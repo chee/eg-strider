@@ -1,0 +1,5 @@
+/target
+# Machine-specific toolchain pins.
+/.cargo
+# Benchmark traces copied from github.com/josephg/egwalker-paper (datasets/*.dt).
+/traces

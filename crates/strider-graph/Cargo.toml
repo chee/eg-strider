@@ -1,0 +1,10 @@
+[package]
+name = "strider-graph"
+description = "A causal graph of events: its critical versions, and the order to walk it in"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "eg-strider"
+description = "An Eg-walker style replayer for collaborative text editing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+strider-graph = { path = "../strider-graph" }
+strider-text = { path = "../strider-text" }
+strider-tree = { path = "../strider-tree" }

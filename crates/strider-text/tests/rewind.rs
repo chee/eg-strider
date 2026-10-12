@@ -1,0 +1,102 @@
+use strider_text::Rewind;
+use proptest::prelude::*;
+use proptest::sample::Index;
+
+/// An edit to make, with positions picked relative to the document's length at the time.
+#[derive(Clone, Debug)]
+enum Step {
+    Insert { at: Index, text: String },
+    Remove { at: Index, len: usize },
+    /// Carries on from where the last edit left off, as typing and deleting do.
+    Type { text: String },
+    Backspace { len: usize },
+}
+
+fn steps(text: &'static str, max: usize) -> impl Strategy<Value = Vec<Step>> {
+    let step = prop_oneof![
+        2 => (any::<Index>(), text).prop_map(|(at, text)| Step::Insert { at, text }),
+        2 => (any::<Index>(), 1usize..12).prop_map(|(at, len)| Step::Remove { at, len }),
+        4 => text.prop_map(|text| Step::Type { text }),
+        2 => (1usize..6).prop_map(|len| Step::Backspace { len }),
+    ];
+    proptest::collection::vec(step, 0..max)
+}
+
+/// Makes the edits to a plain list of characters, then takes them back from there.
+fn check(steps: &[Step]) -> Result<(), TestCaseError> {
+    let mut plain: Vec<char> = Vec::new();
+    // Every step comes down to removing `removed` characters at `pos`, then inserting
+    // `text` there.
+    let mut made: Vec<(usize, usize, &str)> = Vec::new();
+    let mut cursor = 0;
+    for step in steps {
+        let (pos, removed, text) = match step {
+            Step::Insert { at, text } => (at.index(plain.len() + 1), 0, text.as_str()),
+            Step::Type { text } => (cursor, 0, text.as_str()),
+            Step::Remove { at, len } => {
+                let pos = at.index(plain.len() + 1);
+                (pos, (*len).min(plain.len() - pos), "")
+            }
+            Step::Backspace { len } => {
+                let len = (*len).min(cursor);
+                (cursor - len, len, "")
+            }
+        };
+        plain.splice(pos..pos + removed, text.chars());
+        cursor = pos + text.chars().count();
+        made.push((pos, removed, text));
+    }
+
+    let mut rewind = Rewind::new(plain.len() as u32);
+    for &(pos, removed, text) in made.iter().rev() {
+        rewind.undo_insert(pos as u32, text, text.chars().count() as u32);
+        rewind.undo_remove(pos as u32, removed as u32);
+    }
+    prop_assert_eq!(rewind.finish(), plain.iter().collect::<String>());
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    #[test]
+    fn ascii_matches_a_plain_list(steps in steps("[a-z ]{0,6}", 200)) {
+        check(&steps)?;
+    }
+
+    #[test]
+    fn any_text_matches_a_plain_list(steps in steps("[a-zé✓🙂]{0,6}", 200)) {
+        check(&steps)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(40))]
+
+    #[test]
+    fn long_histories_match_a_plain_list(steps in steps("[a-zé]{0,8}", 4000)) {
+        check(&steps)?;
+    }
+}
+
+#[test]
+fn nothing_typed_gives_nothing() {
+    assert_eq!(Rewind::new(0).finish(), "");
+    // "gone" was typed, then deleted.
+    let mut rewind = Rewind::new(0);
+    rewind.undo_remove(0, 4);
+    rewind.undo_insert(0, "gone", 4);
+    assert_eq!(rewind.finish(), "");
+}
+
+#[test]
+#[should_panic(expected = "not within the document")]
+fn taking_back_more_than_there_is_panics() {
+    Rewind::new(1).undo_insert(1, "x", 1);
+}
+
+#[test]
+#[should_panic(expected = "edits left")]
+fn stopping_early_panics() {
+    Rewind::new(1).finish();
+}
