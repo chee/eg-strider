@@ -16,6 +16,8 @@ the revision the paper benchmarked and Yjs as its Rust port, all on an Apple M5 
 
 ## Why it is faster
 
+In order of how much each one matters:
+
 - Concurrent edits that don't touch each other are merged without building a CRDT.
   Eg-walker builds its CRDT for any part of the history that has concurrency, while
   eg-strider first tries shifting each edit by the net length of the concurrent edits
@@ -25,19 +27,21 @@ the revision the paper benchmarked and Yjs as its Rust port, all on an Apple M5 
   real-time traces: C1 has 3,650 concurrent parts of which only 25 need the CRDT, and none
   of C2's 4,825 do.
 - The final text is assembled backwards from a piece table instead of forwards in a rope.
-  Eg-walker applies every edit in order to a rope, whereas eg-strider only works out where
-  each edit lands while merging, and then undoes the edits from last to first over a piece
-  table of the final text, copying each surviving character once to its final position.
-  This helps most when a lot of what gets typed is later deleted, since a rope has to
-  insert and shift all of that text even though it won't be there at the end. In S1 only
-  315k of the 547k characters typed survive, and in S3 only 122k of 1.2M.
+  Eg-walker applies every edit in order to a rope, which is almost all of the time it
+  spends on S1, whereas eg-strider only works out where each edit lands while merging, and
+  then undoes the edits from last to first over a piece table of the final text, copying
+  each surviving character once to its final position. This helps most when a lot of what
+  gets typed is later deleted, since a rope has to insert and shift all of that text even
+  though it won't be there at the end. In S1 only 315k of the 547k characters typed
+  survive, and in S3 only 122k of 1.2M.
 - Looking up a CRDT record by the event that created it is an array read instead of a
   tree search. Eg-walker keeps a second B-tree from event ids to records, and goes through
   it every time it steps its view of the document back or forward by an event (the
-  paper's retreat and advance). Because the events of one concurrent part are numbered
-  consecutively, eg-strider can use a flat array instead. This matters on git histories
-  because they branch and merge all the time: one part of A2 has 749 forks and 765 merges,
-  and merging it steps back or forward 1.6 events for every event it applies.
+  paper's retreat and advance), which comes to about a fifth of its time on A2. Because
+  the events of one concurrent part are numbered consecutively, eg-strider can use a flat
+  array instead. This matters on git histories because they branch and merge all the
+  time: one part of A2 has 749 forks and 765 merges, and merging it steps back or forward
+  1.6 events for every event it applies.
 - The graph is analysed as events are appended instead of at the start of every merge.
   Eg-walker works out where the history is linear, and a plan for the rest, each time it
   merges, while eg-strider keeps track of this on every append so that a replay doesn't
@@ -48,22 +52,26 @@ the revision the paper benchmarked and Yjs as its Rust port, all on an Apple M5 
 
 eg-strider holds on to more state than Eg-walker does, since the stored history also
 records where it is linear and each replay saves what the CRDT resolved so that the next
-one can skip it.
+one can skip it. What a replay saves is two numbers per insert or run of deletes in the
+parts that needed the CRDT, plus an index into the history, which for A2's 698k events
+comes to 0.4 MB. The savings, again in order of how much each one matters:
 
-- What a replay saves for the next one is two numbers per insert or run of deletes in the
-  parts that needed the CRDT, plus an index into the history, rather than anything per
-  character. For A2's 698k events that comes to 0.4 MB.
-- The CRDT state only exists for the parts of the history that need it, and it is freed
-  before the text is built. On C1 and C2, where almost no part needs the CRDT, there is
-  very little to hold while merging, and peak memory is about 12 times lower than
-  Eg-walker's.
+- The plan for a merge isn't rebuilt as a graph each time. Before it merges, Eg-walker
+  builds a graph of the history's concurrent parts and a plan from it, and on C1 those two
+  take 38 of the 41 MB it uses at its peak. eg-strider keeps the same information up to
+  date as a few flat arrays of numbers that are stored with the history, and a replay only
+  adds a 0.8 MB index on top. This is why peak memory is about 12 times lower on C1 and
+  C2. Those arrays are part of the stored history, which the charts leave out for every
+  system, so counting them would narrow that gap somewhat.
+- The document comes out as a string, while Eg-walker holds it as a rope, and a rope of
+  S1's 0.3 MB of text takes 1.3 MB. This accounts for the S traces, where peak memory is 3
+  to 5 times lower, and for most of the difference in memory held after merging.
 - While merging, each edit is stored as a single position, and the rest of the edit is
   read back from the history when the text is built, so the edits waiting to be undone
   cost a few bytes each.
-- The document comes out as a string, while Eg-walker holds it as a rope, and a rope of
-  S1's 0.3 MB of text takes 1.3 MB. This is most of the difference in memory held after
-  merging, which is lower on every trace except C2, where the index into the history
-  makes it about the same.
+
+On A1 and A2, where the CRDT is needed almost everywhere, the two use about the same
+amount while merging.
 
 ## Layout
 
