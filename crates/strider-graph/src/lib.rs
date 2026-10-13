@@ -240,6 +240,13 @@ impl Blocks {
 
     /// Finds the block holding an event.
     fn containing(&self, event: u32) -> usize {
-        self.start.partition_point(|&start| start <= event) - 1
+        // Parents are mostly recent events, so the search widens backwards from the last block.
+        let (mut end, mut step) = (self.len(), 1);
+        while step < end && self.start[end - step] > event {
+            end -= step;
+            step *= 2;
+        }
+        let from = end.saturating_sub(step);
+        from + self.start[from..end].partition_point(|&start| start <= event) - 1
     }
 }
