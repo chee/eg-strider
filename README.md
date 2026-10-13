@@ -3,68 +3,78 @@
 Replays a collaborative text document from its editing history, in the style of
 [Eg-walker](https://arxiv.org/abs/2409.14252) (Gentle and Kleppmann). The history is a graph
 of index-based inserts and deletes, and CRDT state is built only where edits were
-concurrent. It produces the same documents as the paper's implementation, 2 to 12 times
-faster.
+concurrent.
 
 ## Results
 
-Time to build the document from its whole history, and the most memory used on top of the
-history, for the paper's seven traces.
-
-| Trace | Events | eg-strider | Eg-walker | Speedup | Peak memory |
-|---|---|---|---|---|---|
-| S1 | 779k | 0.76 ms | 1.70 ms | 2.2× | 0.3 MB vs 1.6 MB |
-| S2 | 1,105k | 1.10 ms | 2.46 ms | 2.2× | 0.2 MB vs 1.0 MB |
-| S3 | 2,339k | 0.62 ms | 3.21 ms | 5.1× | 0.3 MB vs 0.8 MB |
-| C1 | 652k | 3.57 ms | 35.98 ms | 10.1× | 3.3 MB vs 40.7 MB |
-| C2 | 608k | 4.37 ms | 53.77 ms | 12.3× | 3.7 MB vs 48.1 MB |
-| A1 | 947k | 2.95 ms | 7.24 ms | 2.5× | 2.0 MB vs 2.4 MB |
-| A2 | 698k | 7.00 ms | 20.62 ms | 2.9× | 4.4 MB vs 4.6 MB |
-
 ![Time to merge each trace](compare/figures/time.svg)
+![Peak memory while merging](compare/figures/memory-peak.svg)
+![Memory kept once merged](compare/figures/memory-kept.svg)
 
-Measured on an Apple M5 Pro. Eg-walker is diamond-types at the revision the paper
-benchmarked, and both are timed producing the text as a string. Memory charts are in
-[`compare/figures`](compare/figures).
+The traces are the paper's: S have no concurrent edits, C are two people editing in real
+time, A are git histories. Measured on an Apple M5 Pro. Eg-walker is diamond-types at the
+revision the paper benchmarked, and Yjs is its Rust port.
 
 ## Where the speedup comes from
 
-1. **Concurrent edits that do not touch need no CRDT.** History is cut at critical versions,
-   as in Eg-walker, and stretches with no concurrency are applied as recorded. A concurrent
-   region is first tried with offset arithmetic, as in operational transformation: an edit
-   moves by the net length of the concurrent edits before it. The CRDT is built only where
-   concurrent edits land in the same stretch of text. In the real-time traces (C1, C2) that
-   almost never happens.
-2. **The text is built backwards, without a rope.** Merging only works out where each edit
-   goes. The edits are then taken back from last to first over a piece table of the final
-   text, so each surviving character is copied once, straight to its final place, and text
-   that was later deleted is never copied. This is all the sequential traces (S) rely on.
-3. **A leaner CRDT where one is needed.** One B+ tree counts both versions of the document,
-   a flat array maps events to spans in place of a second tree, and versions are compared
-   as vectors over chains of blocks. The asynchronous traces (A) are concurrent nearly
-   everywhere and lean on this.
-4. **Nothing is worked out twice.** Blocks and critical versions are kept up to date as
-   events arrive, and what the CRDT resolved is kept at each critical version, so a later
-   checkout places those events directly.
+1. **Concurrent edits that do not touch.**
+   - *Eg-walker* builds its CRDT for every stretch of history that has any concurrency,
+     and walks the events through it.
+   - *eg-strider* first tries offset arithmetic, as in operational transformation: an edit
+     moves by the net length of the concurrent edits before it. The CRDT is built only
+     when an edit lands in a stretch of text holding concurrent edits it has not seen.
+   - *Why it helps:* two people typing at once are usually typing in different places. C1
+     has 3,650 concurrent stretches and 25 need the CRDT; C2 has 4,825 and none do.
+
+2. **Building the text.**
+   - *Eg-walker* applies every edit, in order, to a rope.
+   - *eg-strider* only works out where each edit goes while merging. It then takes the
+     edits back from last to first over a piece table of the final text, copying each
+     surviving character straight to its final place.
+   - *Why it helps:* most of what is typed does not survive. S1 types 547k characters to
+     end with 315k, and S3 types 1.2M to end with 122k. A rope copies and shifts all of
+     it; here text that is later deleted is never copied and nothing is moved.
+
+3. **Finding a record by the event that made it.**
+   - *Eg-walker* keeps two B-trees while merging: one holding the CRDT's records in
+     document order, and one from event ids to those records, used whenever the version
+     being looked at moves backwards or forwards.
+   - *eg-strider* keeps the first tree and replaces the second with a flat array, since a
+     stretch's events are numbered consecutively. It also orders the walk by comparing
+     versions as vectors rather than by searching the graph.
+   - *Why it helps:* git histories branch and merge constantly. One stretch of A2 is 1,214
+     blocks with 749 forks and 765 merges, and merging it moves the version across 1.6
+     events for every event applied. Each of those is a lookup.
+
+4. **Analysing the graph.**
+   - *Eg-walker* works out where history is linear, and a plan for the rest, each time it
+     merges.
+   - *eg-strider* keeps that up to date as events are added, and keeps what the CRDT
+     resolved so that a later checkout places those events directly.
+   - *Why it helps:* real-time traces cut into many small pieces (C1 into 7,300), so
+     planning is a visible share of a merge that otherwise does little.
 
 ## Layout
 
-- `crates/strider-graph`: the event graph, its critical versions, and the order a
-  concurrent region is walked in.
+- `crates/strider-graph`: the event graph, where it is linear, and the order the rest is
+  walked in.
 - `crates/strider-tree`: the order-statistic B+ tree behind the CRDT.
 - `crates/strider-text`: the piece table that assembles the final text.
 - `crates/eg-strider`: the operation log and the replayer.
-- `compare`: property tests against diamond-types, and the benchmarks.
+- `compare`: checks against diamond-types, and the benchmarks.
 
-## Running
+## Reproducing the results
 
-Tests need nothing else. The benchmarks need the paper's traces (`datasets/*.dt` from
-[josephg/egwalker-paper](https://github.com/josephg/egwalker-paper)) copied into `traces/`.
+Copy the paper's traces (`datasets/*.dt` from
+[josephg/egwalker-paper](https://github.com/josephg/egwalker-paper)) into `traces/`, then:
 
 ```bash
-cargo test --workspace
-cargo run --release -p compare -- --replay --json compare/figures/results.json traces/*.dt
+cargo run --release -p compare -- --replay --reps 25 --json compare/figures/results.json traces/*.dt
+```
+
+```bash
 python3 compare/figures.py compare/figures/results.json compare/figures
 ```
 
-MIT licensed.
+The first run also replays each history into Yjs, Loro and Automerge, which takes several
+minutes, and keeps the result beside the trace.
