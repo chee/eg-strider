@@ -8,21 +8,47 @@
 mod pieces;
 
 use pieces::PieceTable;
+use std::ops::Range;
 
 /// A document being taken back from its final state to empty, one edit at a time, last edit
 /// first. Positions and lengths count characters.
-pub struct Rewind {
+pub struct Rewind<'a> {
+    /// Where the text of every insert is.
+    source: &'a str,
     pieces: PieceTable,
     /// Length of the document with the edits taken back so far undone.
     len: u32,
     /// The final text as it is assembled: one byte per character, since the characters are
-    /// placed out of order. A character that is not ASCII has [`WIDE`] here and is in `wide`.
+    /// placed out of order, then [`SHORT`] bytes to spare. A character that is not ASCII has
+    /// [`WIDE`] here and is in `wide`.
     slots: Vec<u8>,
     wide: Wide,
 }
 
 /// In place of a character that does not fit in a byte.
 const WIDE: u8 = 0x80;
+
+/// The longest stretch of text that is copied as two 16-byte words.
+const SHORT: usize = 32;
+
+/// Copies `n` bytes of `from`, starting at `skip`, to `to[at..]`. `to` must run on for
+/// [`SHORT`] bytes past where a short copy starts.
+fn copy(to: &mut [u8], at: usize, from: &[u8], skip: usize, n: usize) {
+    if n > SHORT || skip + SHORT > from.len() {
+        to[at..at + n].copy_from_slice(&from[skip..skip + n]);
+        return;
+    }
+    // Most copies are a few bytes long and no two alike, and a general copy branches on the
+    // length in ways that cannot be predicted. These take the same steps whatever their
+    // length: two words are read from each side, and the bytes past the end are put back
+    // as they were.
+    let word = |bytes: &[u8]| u128::from_le_bytes(bytes[..16].try_into().expect("16 bytes"));
+    for (start, n) in [(0, n.min(16)), (16, n.saturating_sub(16))] {
+        let beyond = u128::MAX.checked_shl(8 * n as u32).unwrap_or(0);
+        let merged = word(&to[at + start..]) & beyond | word(&from[skip + start..]) & !beyond;
+        to[at + start..at + start + 16].copy_from_slice(&merged.to_le_bytes());
+    }
+}
 
 /// How many positions of the final text share a page of [`Wide`]. Tiny in debug builds, so
 /// that tests on short texts use several pages.
@@ -58,15 +84,18 @@ impl Wide {
     }
 }
 
-impl Rewind {
-    /// Starts from the final document, which is `len` characters long.
-    pub fn new(len: u32) -> Self {
-        Rewind { pieces: PieceTable::new(len), len, slots: vec![0; len as usize], wide: Wide::default() }
+impl<'a> Rewind<'a> {
+    /// Starts from the final document, which is `len` characters long. `source` holds the
+    /// text of every insert that will be taken back.
+    pub fn new(len: u32, source: &'a str) -> Self {
+        Rewind { source, pieces: PieceTable::new(len), len, slots: vec![0; len as usize + SHORT], wide: Wide::default() }
     }
 
-    /// Takes back an insert that put `text`, `len` characters long, at `pos`.
-    pub fn undo_insert(&mut self, pos: u32, text: &str, len: u32) {
+    /// Takes back an insert that put the `len` characters at `text` in the source at `pos`.
+    pub fn undo_insert(&mut self, pos: u32, text: Range<usize>, len: u32) {
         assert!(pos.checked_add(len).is_some_and(|end| end <= self.len), "insert was not within the document");
+        let (source, start) = (self.source.as_bytes(), text.start);
+        let text = &self.source[text];
         // Debug builds only: counting takes as long as the text.
         debug_assert_eq!(text.chars().count(), len as usize);
         if len == 0 {
@@ -76,10 +105,7 @@ impl Rewind {
         let (slots, wide) = (&mut self.slots, &mut self.wide);
         if text.len() == len as usize {
             // All ASCII: characters and bytes coincide.
-            self.pieces.remove(pos, len, |at, skip, n| {
-                let (at, skip, n) = (at as usize, skip as usize, n as usize);
-                slots[at..at + n].copy_from_slice(&text.as_bytes()[skip..skip + n]);
-            });
+            self.pieces.remove(pos, len, |at, skip, n| copy(slots, at as usize, source, start + skip as usize, n as usize));
         } else {
             // The survivors come in the order they have in `text`, so one pass over it
             // reaches them all. `passed` counts the characters gone by.
@@ -110,8 +136,9 @@ impl Rewind {
     }
 
     /// Returns the final text.
-    pub fn finish(self) -> String {
+    pub fn finish(mut self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");
+        self.slots.truncate(self.slots.len() - SHORT);
         if self.wide.chars.is_empty() {
             return String::from_utf8(self.slots).expect("ASCII");
         }

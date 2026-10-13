@@ -188,7 +188,8 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     memo.room = (doc.order.len(), doc.at.len());
 
     // Backwards: take every edit back, starting from the final document.
-    let mut text = Rewind::new(doc.len);
+    let mut text = Rewind::new(doc.len, log.content());
+    let bytes = |(start, end): (u32, u32)| start as usize..end as usize;
     let mut order = doc.order.iter().rev().peekable();
     let mut places = doc.at.iter().rev().copied();
     let mut place = || places.next().expect("a place for every op of a region");
@@ -197,7 +198,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
             Segment::Linear(linear) => {
                 for op in plan.ops(log, linear).rev() {
                     match op.kind {
-                        OpKind::Ins => text.undo_insert(op.pos, log.text(op.text), op.len),
+                        OpKind::Ins => text.undo_insert(op.pos, bytes(op.text), op.len),
                         OpKind::Del => text.undo_remove(op.pos, op.len),
                     }
                 }
@@ -206,7 +207,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
                 while let Some(stretch) = order.next_if(|stretch| stretch.start as usize >= region.start) {
                     for op in plan.ops(log, &(stretch.start as usize..stretch.end as usize)).rev() {
                         match op.kind {
-                            OpKind::Ins => text.undo_insert(place(), log.text(op.text), op.len),
+                            OpKind::Ins => text.undo_insert(place(), bytes(op.text), op.len),
                             OpKind::Del => {
                                 for _ in 0..place() {
                                     let (len, pos) = (place(), place());

@@ -52,7 +52,7 @@ pub(crate) struct OpSlice {
     pub fwd: bool,
     /// Inserts go at `pos`; deletes remove `pos..pos + len`.
     pub pos: u32,
-    /// Inserts only: where the text is, for [`OpLog::text`].
+    /// Inserts only: where the text is in [`OpLog::content`], in bytes.
     pub text: (u32, u32),
 }
 
@@ -248,8 +248,13 @@ impl OpLog {
         self.ops[ops.start as usize..][..count].iter().map(move |op| self.slice(op, &events))
     }
 
-    /// Returns the inserted text that an [`OpSlice`]'s range refers to.
-    pub(crate) fn text(&self, (start, end): (u32, u32)) -> &str {
+    /// Returns all the inserted text, which an [`OpSlice`]'s range is a stretch of.
+    pub(crate) fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Returns the inserted text that an op's range refers to.
+    fn text(&self, (start, end): (u32, u32)) -> &str {
         &self.content[start as usize..end as usize]
     }
 

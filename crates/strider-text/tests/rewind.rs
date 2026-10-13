@@ -47,10 +47,14 @@ fn check(steps: &[Step]) -> Result<(), TestCaseError> {
         made.push((pos, removed, text));
     }
 
-    let mut rewind = Rewind::new(plain.len() as u32);
+    // The inserted texts end to end, which is where the rewind looks them up.
+    let source: String = made.iter().map(|&(_, _, text)| text).collect();
+    let mut rewind = Rewind::new(plain.len() as u32, &source);
+    let mut end = source.len();
     for &(pos, removed, text) in made.iter().rev() {
-        rewind.undo_insert(pos as u32, text, text.chars().count() as u32);
+        rewind.undo_insert(pos as u32, end - text.len()..end, text.chars().count() as u32);
         rewind.undo_remove(pos as u32, removed as u32);
+        end -= text.len();
     }
     prop_assert_eq!(rewind.finish(), plain.iter().collect::<String>());
     Ok(())
@@ -68,6 +72,12 @@ proptest! {
     fn any_text_matches_a_plain_list(steps in steps("[a-zé✓🙂]{0,6}", 200)) {
         check(&steps)?;
     }
+
+    /// Stretches of text are copied in different ways according to their length.
+    #[test]
+    fn long_inserts_match_a_plain_list(steps in steps("[a-z ]{0,70}", 60)) {
+        check(&steps)?;
+    }
 }
 
 proptest! {
@@ -81,22 +91,22 @@ proptest! {
 
 #[test]
 fn nothing_typed_gives_nothing() {
-    assert_eq!(Rewind::new(0).finish(), "");
+    assert_eq!(Rewind::new(0, "").finish(), "");
     // "gone" was typed, then deleted.
-    let mut rewind = Rewind::new(0);
+    let mut rewind = Rewind::new(0, "gone");
     rewind.undo_remove(0, 4);
-    rewind.undo_insert(0, "gone", 4);
+    rewind.undo_insert(0, 0..4, 4);
     assert_eq!(rewind.finish(), "");
 }
 
 #[test]
 #[should_panic(expected = "not within the document")]
 fn taking_back_more_than_there_is_panics() {
-    Rewind::new(1).undo_insert(1, "x", 1);
+    Rewind::new(1, "x").undo_insert(1, 0..1, 1);
 }
 
 #[test]
 #[should_panic(expected = "edits left")]
 fn stopping_early_panics() {
-    Rewind::new(1).finish();
+    Rewind::new(1, "x").finish();
 }
