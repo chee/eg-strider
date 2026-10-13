@@ -54,6 +54,29 @@ revision the paper benchmarked, and Yjs is its Rust port.
    - *Why it helps:* real-time traces cut into many small pieces (C1 into 7,300), so
      planning is a visible share of a merge that otherwise does little.
 
+## More state, less memory
+
+- *Eg-walker* keeps nothing between merges but the document. While merging it holds its
+  two B-trees and the document as a rope.
+- *eg-strider* keeps more. The log carries where its history is linear, kept up to date as
+  events arrive. A checkout also leaves behind what the CRDT resolved for each concurrent
+  stretch that needed it, for the next checkout to use.
+- *Why it is still smaller:*
+  - What a checkout leaves behind is counted per run of typing, not per character: two
+    numbers for an insert and two for a run of deleted characters where the CRDT was
+    needed, plus an index of the history's blocks. That is 0.4 MB on A2 and 1.2 MB on C2,
+    which is cut into far more blocks.
+  - The CRDT's working state exists only for the stretches that need it, is one tree and
+    one array, and is dropped before the text is built.
+  - Merging records one position per edit, not the edit. The rest is read back from the
+    log.
+  - The document is a plain string, not a rope. S1's 0.3 MB of text takes 1.3 MB as a rope.
+  - The log itself, with that analysis in it, is about half the size of diamond-types' in
+    memory (C1: 7.5 MB against 17.4 MB). The charts above leave the log out for both.
+
+Peak memory is lower on every trace, by twelve times on C1 and C2. What is kept afterwards
+is lower on every trace but C2, where it is about the same.
+
 ## Layout
 
 - `crates/strider-graph`: the event graph, where it is linear, and the order the rest is
