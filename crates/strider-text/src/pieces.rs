@@ -1,8 +1,8 @@
 //! The piece table behind [`Rewind`](crate::Rewind). A piece is a stretch of the document
 //! that either sits at a known offset of the final text or is deleted: some later edit
 //! removes it. Pieces are kept in an unrolled list: chunks of up to 32 under a flat list of
-//! chunk lengths, each chunk a gap buffer with its gap where a piece was last added or
-//! dropped. Edits cluster, so the chunk used last is tried first.
+//! chunk lengths. Edits cluster, so the chunk used last, and the piece found last in it, are
+//! tried first.
 
 /// In place of a final position: these characters do not survive.
 const DELETED: u32 = u32::MAX;
@@ -39,108 +39,68 @@ impl Piece {
     }
 }
 
-/// Up to [`CHUNK`] pieces: `pieces[..before]`, then a gap, then the last `after` of `pieces`.
+/// Up to [`CHUNK`] pieces, in document order.
 #[derive(Clone, Copy)]
 struct Chunk {
-    before: usize,
-    after: usize,
-    /// Characters in the pieces before the gap.
-    gap_at: u32,
+    len: usize,
+    /// The piece found last, and how many characters come before it in the chunk: the next
+    /// lookup usually lands on or just after it.
+    last: (usize, u32),
     pieces: [Piece; CHUNK],
 }
 
 impl Chunk {
-    const EMPTY: Chunk = Chunk { before: 0, after: 0, gap_at: 0, pieces: [Piece { len: 0, at: 0 }; CHUNK] };
+    const EMPTY: Chunk = Chunk { len: 0, last: (0, 0), pieces: [Piece { len: 0, at: 0 }; CHUNK] };
 
     /// Returns how many pieces the chunk holds.
     fn len(&self) -> usize {
-        self.before + self.after
-    }
-
-    /// Returns where piece `i` is in `pieces`.
-    fn slot(&self, i: usize) -> usize {
-        if i < self.before { i } else { i + CHUNK - self.len() }
+        self.len
     }
 
     /// Returns piece `i`.
     fn piece(&self, i: usize) -> Piece {
-        self.pieces[self.slot(i)]
+        self.pieces[i]
     }
 
-    /// Replaces piece `i`, keeping the count of characters before the gap right.
-    fn set(&mut self, i: usize, piece: Piece) {
-        let slot = self.slot(i);
-        if i < self.before {
-            self.gap_at = self.gap_at - self.pieces[slot].len + piece.len;
+    /// Notes that piece `i` is changing: a remembered piece after it no longer starts where
+    /// it did.
+    fn touch(&mut self, i: usize) {
+        if i < self.last.0 {
+            self.last = (0, 0);
         }
-        self.pieces[slot] = piece;
+    }
+
+    /// Replaces piece `i`.
+    fn set(&mut self, i: usize, piece: Piece) {
+        self.touch(i);
+        self.pieces[i] = piece;
     }
 
     /// Finds the piece holding the character `offset` characters into the chunk, and how far into
     /// that piece it is. One past the last piece for the end of the chunk.
-    fn find(&self, offset: u32) -> (usize, u32) {
-        if offset >= self.gap_at {
-            let mut start = self.gap_at;
-            for (i, piece) in self.pieces[CHUNK - self.after..].iter().enumerate() {
-                if offset < start + piece.len {
-                    return (self.before + i, offset - start);
-                }
-                start += piece.len;
-            }
-            debug_assert_eq!(start, offset);
-            return (self.len(), 0);
+    fn find(&mut self, offset: u32) -> (usize, u32) {
+        let (mut i, mut start) = if offset < self.last.1 { (0, 0) } else { self.last };
+        while i < self.len && offset >= start + self.pieces[i].len {
+            start += self.pieces[i].len;
+            i += 1;
         }
-        // The piece just before the gap, then the rest from the start.
-        let mut start = self.gap_at - self.pieces[self.before - 1].len;
-        if offset >= start {
-            return (self.before - 1, offset - start);
-        }
-        start = 0;
-        for (i, piece) in self.pieces[..self.before].iter().enumerate() {
-            if offset < start + piece.len {
-                return (i, offset - start);
-            }
-            start += piece.len;
-        }
-        unreachable!("offset is before the gap");
-    }
-
-    /// Moves the gap so that `i` pieces come before it.
-    fn move_gap(&mut self, i: usize) {
-        let chars = |pieces: &[Piece]| pieces.iter().map(|piece| piece.len).sum::<u32>();
-        if i < self.before {
-            let (from, to) = (i, self.before);
-            self.gap_at -= chars(&self.pieces[from..to]);
-            self.after += to - from;
-            self.pieces.copy_within(from..to, CHUNK - self.after);
-        } else if i > self.before {
-            let from = CHUNK - self.after;
-            let to = from + (i - self.before);
-            self.gap_at += chars(&self.pieces[from..to]);
-            self.after -= to - from;
-            self.pieces.copy_within(from..to, self.before);
-        }
-        self.before = i;
+        self.last = (i, start);
+        (i, offset - start)
     }
 
     /// Adds a piece as piece `i`. There must be room.
     fn insert(&mut self, i: usize, piece: Piece) {
-        self.move_gap(i);
+        self.touch(i);
+        self.pieces.copy_within(i..self.len, i + 1);
         self.pieces[i] = piece;
-        self.before += 1;
-        self.gap_at += piece.len;
+        self.len += 1;
     }
 
-    /// Removes piece `i`, leaving the gap where it was.
+    /// Removes piece `i`.
     fn remove(&mut self, i: usize) {
-        if i < self.before {
-            self.move_gap(i + 1);
-            self.before -= 1;
-            self.gap_at -= self.pieces[i].len;
-        } else {
-            self.move_gap(i);
-            self.after -= 1;
-        }
+        self.touch(i);
+        self.pieces.copy_within(i + 1..self.len, i);
+        self.len -= 1;
     }
 }
 
@@ -281,12 +241,13 @@ impl PieceTable {
     /// Moves the second half of a chunk's pieces into a new chunk after it.
     fn split(&mut self, k: usize) {
         let left = &mut self.chunks[self.order[k] as usize];
-        left.move_gap(left.len() / 2);
+        let half = left.len / 2;
         let mut right = Chunk::EMPTY;
-        right.before = left.after;
-        right.pieces[..right.before].copy_from_slice(&left.pieces[CHUNK - left.after..]);
-        right.gap_at = self.totals[k] - left.gap_at;
-        left.after = 0;
+        right.len = left.len - half;
+        right.pieces[..right.len].copy_from_slice(&left.pieces[half..left.len]);
+        let moved = right.pieces[..right.len].iter().map(|piece| piece.len).sum::<u32>();
+        left.len = half;
+        left.last = (0, 0);
 
         let id = match self.spare.pop() {
             Some(id) => {
@@ -299,7 +260,7 @@ impl PieceTable {
             }
         };
         self.order.insert(k + 1, id);
-        self.totals.insert(k + 1, right.gap_at);
-        self.totals[k] -= right.gap_at;
+        self.totals.insert(k + 1, moved);
+        self.totals[k] -= moved;
     }
 }

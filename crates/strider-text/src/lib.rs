@@ -15,20 +15,53 @@ pub struct Rewind {
     pieces: PieceTable,
     /// Length of the document with the edits taken back so far undone.
     len: u32,
-    text: Text,
+    /// The final text as it is assembled: one byte per character, since the characters are
+    /// placed out of order. A character that is not ASCII has [`WIDE`] here and is in `wide`.
+    slots: Vec<u8>,
+    wide: Wide,
 }
 
-/// The final text as it is assembled: one slot per character, since the characters are
-/// placed out of order. Bytes will do until something other than ASCII turns up.
-enum Text {
-    Ascii(Vec<u8>),
-    Wide(Vec<char>),
+/// In place of a character that does not fit in a byte.
+const WIDE: u8 = 0x80;
+
+/// How many positions of the final text share a page of [`Wide`]. Tiny in debug builds, so
+/// that tests on short texts use several pages.
+const PAGE: usize = if cfg!(debug_assertions) { 4 } else { 256 };
+
+/// The characters of the final text that are not ASCII, by position. Text is mostly ASCII
+/// with the odd character that is not, so room is only made for pages that have some.
+#[derive(Default)]
+struct Wide {
+    /// For each page of positions, where its characters start in `chars`, if it has any.
+    pages: Vec<Option<u32>>,
+    chars: Vec<char>,
+}
+
+impl Wide {
+    /// Records the character at position `at`.
+    #[cold]
+    fn set(&mut self, at: usize, ch: char) {
+        if self.pages.len() <= at / PAGE {
+            self.pages.resize(at / PAGE + 1, None);
+        }
+        let start = *self.pages[at / PAGE].get_or_insert_with(|| {
+            self.chars.resize(self.chars.len() + PAGE, '\0');
+            (self.chars.len() - PAGE) as u32
+        });
+        self.chars[start as usize + at % PAGE] = ch;
+    }
+
+    /// Returns the character recorded at position `at`.
+    fn get(&self, at: usize) -> char {
+        let start = self.pages[at / PAGE].expect("a character was recorded on this page");
+        self.chars[start as usize + at % PAGE]
+    }
 }
 
 impl Rewind {
     /// Starts from the final document, which is `len` characters long.
     pub fn new(len: u32) -> Self {
-        Rewind { pieces: PieceTable::new(len), len, text: Text::Ascii(vec![0; len as usize]) }
+        Rewind { pieces: PieceTable::new(len), len, slots: vec![0; len as usize], wide: Wide::default() }
     }
 
     /// Takes back an insert that put `text`, `len` characters long, at `pos`.
@@ -40,36 +73,29 @@ impl Rewind {
             return;
         }
         self.len -= len;
-        let ascii = text.len() == len as usize;
-        if let (false, Text::Ascii(bytes)) = (ascii, &self.text) {
-            self.text = Text::Wide(bytes.iter().map(|&b| b as char).collect());
-        }
-        match &mut self.text {
-            Text::Ascii(slots) => self.pieces.remove(pos, len, |at, skip, n| {
+        let (slots, wide) = (&mut self.slots, &mut self.wide);
+        if text.len() == len as usize {
+            // All ASCII: characters and bytes coincide.
+            self.pieces.remove(pos, len, |at, skip, n| {
                 let (at, skip, n) = (at as usize, skip as usize, n as usize);
                 slots[at..at + n].copy_from_slice(&text.as_bytes()[skip..skip + n]);
-            }),
-            Text::Wide(slots) => {
-                // The survivors come in the order they have in `text`, so one pass over it
-                // reaches them all. `passed` counts the characters gone by.
-                let (mut rest, mut passed) = (text.chars(), 0);
-                self.pieces.remove(pos, len, |at, skip, n| {
-                    let slots = &mut slots[at as usize..(at + n) as usize];
-                    if ascii {
-                        for (slot, &b) in slots.iter_mut().zip(&text.as_bytes()[skip as usize..]) {
-                            *slot = b as char;
-                        }
-                    } else {
-                        if skip > passed {
-                            rest.nth((skip - passed - 1) as usize);
-                        }
-                        for (slot, ch) in slots.iter_mut().zip(rest.by_ref()) {
-                            *slot = ch;
-                        }
-                        passed = skip + n;
+            });
+        } else {
+            // The survivors come in the order they have in `text`, so one pass over it
+            // reaches them all. `passed` counts the characters gone by.
+            let (mut rest, mut passed) = (text.chars(), 0);
+            self.pieces.remove(pos, len, |at, skip, n| {
+                if skip > passed {
+                    rest.nth((skip - passed - 1) as usize);
+                }
+                for (at, ch) in (at as usize..).zip(rest.by_ref().take(n as usize)) {
+                    slots[at] = if ch.is_ascii() { ch as u8 } else { WIDE };
+                    if !ch.is_ascii() {
+                        wide.set(at, ch);
                     }
-                })
-            }
+                }
+                passed = skip + n;
+            });
         }
     }
 
@@ -86,20 +112,21 @@ impl Rewind {
     /// Returns the final text.
     pub fn finish(self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");
-        match self.text {
-            Text::Ascii(bytes) => String::from_utf8(bytes).expect("ASCII"),
-            Text::Wide(chars) => {
-                // Mostly ASCII in practice: whole stretches of it are narrowed to bytes at once.
-                let mut bytes = Vec::with_capacity(chars.len());
-                for stretch in chars.chunks(16) {
-                    if stretch.iter().all(char::is_ascii) {
-                        bytes.extend(stretch.iter().map(|&ch| ch as u8));
-                    } else {
-                        stretch.iter().for_each(|&ch| bytes.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes()));
-                    }
+        if self.wide.chars.is_empty() {
+            return String::from_utf8(self.slots).expect("ASCII");
+        }
+        // Mostly ASCII in practice: whole stretches of it are copied at once.
+        let mut bytes = Vec::with_capacity(self.slots.len() + self.wide.chars.len());
+        for (i, stretch) in self.slots.chunks(16).enumerate() {
+            if stretch.is_ascii() {
+                bytes.extend_from_slice(stretch);
+            } else {
+                for (at, &byte) in (i * 16..).zip(stretch) {
+                    let ch = if byte == WIDE { self.wide.get(at) } else { byte as char };
+                    bytes.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
                 }
-                String::from_utf8(bytes).expect("encoded from characters")
             }
         }
+        String::from_utf8(bytes).expect("encoded from characters")
     }
 }

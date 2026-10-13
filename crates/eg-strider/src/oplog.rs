@@ -67,6 +67,8 @@ pub struct OpLog {
     memo: Memo,
     /// Reused to hold the parents of the event being added.
     parents: Vec<u32>,
+    /// How many characters the inserts put in, and how many the deletes take out.
+    totals: (u32, u32),
 }
 
 impl OpLog {
@@ -183,6 +185,10 @@ impl OpLog {
             _ => self.agent_runs.push(AgentRun { lv, len, agent, seq }),
         }
 
+        match kind {
+            OpKind::Ins => self.totals.0 += len,
+            OpKind::Del => self.totals.1 += len,
+        }
         let at = self.content.len() as u32;
         self.content.push_str(text);
         let content = (at, self.content.len() as u32);
@@ -247,6 +253,11 @@ impl OpLog {
         &self.content[start as usize..end as usize]
     }
 
+    /// Returns what [`lengths`](Self::lengths) would count over every event.
+    pub(crate) fn total_lengths(&self) -> (u32, u32) {
+        self.totals
+    }
+
     /// Counts how many characters `events` insert and how many they remove, given that they are
     /// applied as recorded. `first_op` is the index of the op containing the first of them.
     pub(crate) fn lengths(&self, first_op: u32, events: Range<u32>) -> (u32, u32) {
@@ -256,10 +267,11 @@ impl OpLog {
                 break;
             }
             let len = events.end.min(op.lv + op.len) - events.start.max(op.lv);
-            match op.kind {
-                OpKind::Ins => inserted += len,
-                OpKind::Del => removed += len,
-            }
+            // Which kind an op is cannot be predicted, so both sums are added to without
+            // branching on it.
+            let insert = (op.kind == OpKind::Ins) as u32;
+            inserted += len * insert;
+            removed += len * (1 - insert);
         }
         (inserted, removed)
     }
@@ -280,17 +292,15 @@ impl OpLog {
     fn slice(&self, op: &Op, events: &Range<u32>) -> OpSlice {
         let from = events.start.max(op.lv) - op.lv;
         let to = events.end.min(op.lv + op.len) - op.lv;
+        // Nearly always the whole op, which needs no working out whatever its kind.
+        if to - from == op.len {
+            return OpSlice { lv: op.lv, len: op.len, kind: op.kind, fwd: op.fwd, pos: op.pos, text: op.content };
+        }
         let (pos, text) = match (op.kind, op.fwd) {
             (OpKind::Ins, _) => {
                 let (start, end) = op.content;
-                let text = if to - from == op.len {
-                    op.content
-                } else if end - start == op.len {
-                    // All ASCII: characters and bytes coincide.
-                    (start + from, start + to)
-                } else {
-                    self.cut(op.content, from, to)
-                };
+                // Characters and bytes coincide when the text is all ASCII.
+                let text = if end - start == op.len { (start + from, start + to) } else { self.cut(op.content, from, to) };
                 (op.pos + from, text)
             }
             // Each forward delete lands on the same position, so a later slice starts where

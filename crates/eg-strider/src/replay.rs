@@ -174,7 +174,9 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     for (segment, kept) in plan.segments.iter().zip(&mut kept) {
         match segment {
             Segment::Linear(linear) => {
-                let (inserted, removed) = log.lengths(plan.first_op[linear.start], events(linear));
+                // A history with no concurrency is one stretch, and the log keeps its count.
+                let whole = plan.segments.len() == 1;
+                let (inserted, removed) = if whole { log.total_lengths() } else { log.lengths(plan.first_op[linear.start], events(linear)) };
                 doc.len = doc.len + inserted - removed;
             }
             Segment::Region(region) => merge_region(log, plan, region, kept, &mut workspace, &mut doc),
