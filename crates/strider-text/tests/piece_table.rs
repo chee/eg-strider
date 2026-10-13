@@ -1,4 +1,4 @@
-use strider_text::Rewind;
+use strider_text::PieceTable;
 use proptest::prelude::*;
 use proptest::sample::Index;
 
@@ -47,16 +47,16 @@ fn check(steps: &[Step]) -> Result<(), TestCaseError> {
         made.push((pos, removed, text));
     }
 
-    // The inserted texts end to end, which is where the rewind looks them up.
+    // The inserted texts end to end, which is where the table looks them up.
     let source: String = made.iter().map(|&(_, _, text)| text).collect();
-    let mut rewind = Rewind::new(plain.len() as u32, &source);
+    let mut table = PieceTable::new(plain.len() as u32, &source);
     let mut end = source.len();
     for &(pos, removed, text) in made.iter().rev() {
-        rewind.undo_insert(pos as u32, end - text.len()..end, text.chars().count() as u32);
-        rewind.undo_remove(pos as u32, removed as u32);
+        table.undo_insert(pos as u32, end - text.len()..end, text.chars().count() as u32);
+        table.undo_remove(pos as u32, removed as u32);
         end -= text.len();
     }
-    prop_assert_eq!(rewind.finish(), plain.iter().collect::<String>());
+    prop_assert_eq!(table.into_string(), plain.iter().collect::<String>());
     Ok(())
 }
 
@@ -91,22 +91,22 @@ proptest! {
 
 #[test]
 fn nothing_typed_gives_nothing() {
-    assert_eq!(Rewind::new(0, "").finish(), "");
+    assert_eq!(PieceTable::new(0, "").into_string(), "");
     // "gone" was typed, then deleted.
-    let mut rewind = Rewind::new(0, "gone");
-    rewind.undo_remove(0, 4);
-    rewind.undo_insert(0, 0..4, 4);
-    assert_eq!(rewind.finish(), "");
+    let mut table = PieceTable::new(0, "gone");
+    table.undo_remove(0, 4);
+    table.undo_insert(0, 0..4, 4);
+    assert_eq!(table.into_string(), "");
 }
 
 #[test]
 #[should_panic(expected = "not within the document")]
 fn taking_back_more_than_there_is_panics() {
-    Rewind::new(1, "x").undo_insert(1, 0..1, 1);
+    PieceTable::new(1, "x").undo_insert(1, 0..1, 1);
 }
 
 #[test]
 #[should_panic(expected = "edits left")]
 fn stopping_early_panics() {
-    Rewind::new(1, "x").finish();
+    PieceTable::new(1, "x").into_string();
 }

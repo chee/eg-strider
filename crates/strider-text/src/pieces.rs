@@ -1,4 +1,4 @@
-//! The piece table behind [`Rewind`](crate::Rewind). A piece is a stretch of the document
+//! The pieces of a [`PieceTable`](crate::PieceTable). A piece is a stretch of the document
 //! that either sits at a known offset of the final text or is deleted: some later edit
 //! removes it. Pieces are kept in an unrolled list: chunks of up to 32 under a flat list of
 //! chunk lengths. Edits cluster, so the chunk used last, and the piece found last in it, are
@@ -7,7 +7,7 @@
 /// In place of a final position: these characters do not survive.
 const DELETED: u32 = u32::MAX;
 
-/// PieceTable per chunk. Tiny in debug builds, so that tests split and empty chunks often.
+/// Pieces per chunk. Tiny in debug builds, so that tests split and empty chunks often.
 const CHUNK: usize = if cfg!(debug_assertions) { 4 } else { 32 };
 
 #[derive(Clone, Copy)]
@@ -104,7 +104,8 @@ impl Chunk {
     }
 }
 
-pub(crate) struct PieceTable {
+/// The pieces of a document, in order.
+pub(crate) struct Pieces {
     chunks: Vec<Chunk>,
     /// Chunks no longer in use.
     spare: Vec<u32>,
@@ -115,14 +116,14 @@ pub(crate) struct PieceTable {
     near: (usize, u32),
 }
 
-impl PieceTable {
+impl Pieces {
     /// Creates a document of `len` characters, all of which survive: the final text itself.
     pub fn new(len: u32) -> Self {
         let mut first = Chunk::EMPTY;
         if len > 0 {
             first.insert(0, Piece { len, at: 0 });
         }
-        PieceTable { chunks: vec![first], spare: Vec::new(), order: vec![0], totals: vec![len], near: (0, 0) }
+        Pieces { chunks: vec![first], spare: Vec::new(), order: vec![0], totals: vec![len], near: (0, 0) }
     }
 
     /// Puts `len` deleted characters into the document at `pos`.

@@ -1,21 +1,22 @@
 //! Builds a document's final text from the edits made to it. A replay only wants the text
 //! at the end and knows every edit beforehand, so instead of applying the edits to a rope
-//! it takes them back from last to first. What it tracks is a piece table over the final
+//! it takes them back from last to first. What it keeps is a piece table over the final
 //! text: each piece of the document at that moment either maps to a place in the final text
 //! or was deleted later. Taking back an insert copies whichever of its characters survive
-//! straight to their final place.
+//! straight to their final place, so the text is complete once every edit is taken back.
 
 mod pieces;
 
-use pieces::PieceTable;
+use pieces::Pieces;
 use std::ops::Range;
 
-/// A document being taken back from its final state to empty, one edit at a time, last edit
-/// first. Positions and lengths count characters.
-pub struct Rewind<'a> {
+/// A piece table over a document's final text. It starts as the final document and is
+/// taken back to empty, one edit at a time, last edit first; the text is then read off with
+/// [`into_string`](Self::into_string). Positions and lengths count characters.
+pub struct PieceTable<'a> {
     /// Where the text of every insert is.
     source: &'a str,
-    pieces: PieceTable,
+    pieces: Pieces,
     /// Length of the document with the edits taken back so far undone.
     len: u32,
     /// The final text as it is assembled: one byte per character, since the characters are
@@ -84,11 +85,11 @@ impl Wide {
     }
 }
 
-impl<'a> Rewind<'a> {
+impl<'a> PieceTable<'a> {
     /// Starts from the final document, which is `len` characters long. `source` holds the
     /// text of every insert that will be taken back.
     pub fn new(len: u32, source: &'a str) -> Self {
-        Rewind { source, pieces: PieceTable::new(len), len, slots: vec![0; len as usize + SHORT], wide: Wide::default() }
+        PieceTable { source, pieces: Pieces::new(len), len, slots: vec![0; len as usize + SHORT], wide: Wide::default() }
     }
 
     /// Takes back an insert that put the `len` characters at `text` in the source at `pos`.
@@ -135,8 +136,8 @@ impl<'a> Rewind<'a> {
         self.pieces.insert_deleted(pos, len);
     }
 
-    /// Returns the final text.
-    pub fn finish(mut self) -> String {
+    /// Returns the final text. Every edit must have been taken back.
+    pub fn into_string(mut self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");
         self.slots.truncate(self.slots.len() - SHORT);
         if self.wide.chars.is_empty() {

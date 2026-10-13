@@ -10,7 +10,7 @@ use crate::shift::Shifter;
 use crate::tracker::Tracker;
 use std::ops::Range;
 use strider_graph::{Move, Segment, Walker};
-use strider_text::Rewind;
+use strider_text::PieceTable;
 
 /// Where merging put each op of the regions. The rest of each edit is the op itself, in the
 /// log.
@@ -188,7 +188,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     memo.room = (doc.order.len(), doc.at.len());
 
     // Backwards: take every edit back, starting from the final document.
-    let mut text = Rewind::new(doc.len, log.content());
+    let mut text = PieceTable::new(doc.len, log.content());
     let bytes = |(start, end): (u32, u32)| start as usize..end as usize;
     let mut order = doc.order.iter().rev().peekable();
     let mut places = doc.at.iter().rev().copied();
@@ -220,7 +220,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
             }
         }
     }
-    text.finish()
+    text.into_string()
 }
 
 /// Merges one region, recording in `doc` where its ops go.
