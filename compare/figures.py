@@ -37,21 +37,26 @@ def times(ratio):
     return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
 
 
-def chart(results, kind, label, caption, ticks):
+def chart(results, kind, label, caption, ticks, baseline=None):
+    """Draws one bar per system for each trace. `baseline` names a figure of the trace
+    itself to draw above them, with what to call it."""
     by_trace = {r["trace"]: r[kind] for r in results}
     traces = [t for t in ORDER if t in by_trace]
-    values = [by_trace[t][key] for t in traces for _, key, _ in SYSTEMS]
+    systems = ([(baseline[1], None, "#999999")] if baseline else []) + SYSTEMS
+    base = {r["trace"]: r[baseline[0]] for r in results} if baseline else {}
+    value_of = lambda trace, key: base[trace] if key is None else by_trace[trace][key]
+    values = [value_of(t, key) for t in traces for _, key, _ in systems]
     values = [v for v in values if v]
     low, high = math.floor(math.log10(min(values))), math.ceil(math.log10(max(values)))
     x = lambda v: LEFT + (math.log10(v) - low) / (high - low) * (RIGHT - LEFT)
 
-    height = TOP + len(traces) * (len(SYSTEMS) * ROW + GAP) + 40
+    height = TOP + len(traces) * (len(systems) * ROW + GAP) + 40
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {RIGHT + 110} {height}" font-family="Helvetica, Arial, sans-serif">',
         f'<rect width="{RIGHT + 110}" height="{height}" fill="white"/>',
     ]
     at = LEFT
-    for name, _, colour in SYSTEMS:
+    for name, _, colour in systems:
         out.append(f'<rect x="{at}" y="6" width="10" height="10" fill="{colour}"/>')
         out.append(f'<text x="{at + 14}" y="15" font-size="11">{name}</text>')
         at += 26 + 6.2 * len(name)
@@ -70,17 +75,17 @@ def chart(results, kind, label, caption, ticks):
 
     y = TOP
     for trace in traces:
-        middle = y + len(SYSTEMS) * ROW / 2
+        middle = y + len(systems) * ROW / 2
         out.append(f'<text x="{LEFT - 62}" y="{middle + 4:.1f}" font-size="14" text-anchor="end">{trace}</text>')
-        out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(SYSTEMS) * ROW}" stroke="black" stroke-width="1.5"/>')
+        out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(systems) * ROW}" stroke="black" stroke-width="1.5"/>')
         least = min(v for v in (by_trace[trace][key] for _, key, _ in SYSTEMS) if v)
-        for name, key, colour in SYSTEMS:
-            value = by_trace[trace][key]
+        for name, key, colour in systems:
+            value = value_of(trace, key)
             out.append(f'<text x="{LEFT - 6}" y="{y + 8}" font-size="7.5" fill="#888" text-anchor="end">{name}</text>')
             if value:
                 end = x(value)
                 out.append(f'<rect x="{LEFT}" y="{y}" width="{max(end - LEFT, 1):.1f}" height="{ROW - 2}" fill="{colour}"/>')
-                behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if value > least else ""
+                behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if key and value > least else ""
                 out.append(f'<text x="{end + 5:.1f}" y="{y + 8.5}" font-size="9">{label(value)}{behind}</text>')
             else:
                 out.append(f'<text x="{LEFT + 5}" y="{y + 8.5}" font-size="9" fill="#888">{"nothing" if value == 0 else "did not finish"}</text>')
@@ -100,8 +105,9 @@ def main(results_path, out_dir):
         [(0.1, "0.1 ms"), (1, "1 ms"), (10, "10 ms"), (100, "100 ms"), (1000, "1 sec"), (10000, "10 sec"), (100000, "100 sec")],
     )
     sizes = [(2**10 * 100, "100 KiB"), (2**20, "1 MiB"), (2**20 * 10, "10 MiB"), (2**20 * 100, "100 MiB"), (2**30, "1 GiB")]
-    peak = chart(results, "bytes", memory, "Peak RAM used while merging, beyond the stored history. Log scale. (Less is better)", sizes)
-    kept = chart(results, "kept", memory, "RAM still in use once merged, beyond the stored history. Log scale. (Less is better)", sizes)
+    on_disk = ("disk", "On disk")
+    peak = chart(results, "peak", memory, "Most memory allocated while merging a history, with the history itself counted. Log scale. (Less is better)", sizes, on_disk)
+    kept = chart(results, "held", memory, "Memory still allocated afterwards, ready to merge again. Log scale. (Less is better)", sizes, on_disk)
     open(f"{out_dir}/time.svg", "w").write(time)
     open(f"{out_dir}/memory-peak.svg", "w").write(peak)
     open(f"{out_dir}/memory-kept.svg", "w").write(kept)

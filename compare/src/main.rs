@@ -177,6 +177,7 @@ fn main() {
     println!("{:6} {:>8} {:>14} {:>20} {:>20}  result", "trace", "events", "diamond-types", "first checkout", "later checkouts");
     let mut all_match = true;
     let mut memory = Vec::new();
+    let mut from_disks = Vec::new();
     let mut loro = Vec::new();
     let mut others = Vec::new();
     let mut json = Vec::new();
@@ -186,31 +187,10 @@ fn main() {
         let (dt, dt_log) = memory_of(|| ListOpLog::load_from(&bytes).unwrap());
         let (mut log, strider_log) = memory_of(|| compare::convert(&dt));
 
-        // Memory first, while nothing is warm. Each closure's result is dropped inside
-        // `kept`'s accounting only if it is returned, so the text is measured and dropped.
-        let (text_len, dt_checkout) = memory_of(|| dt.checkout_tip().content().to_string().len());
-        // What each is left holding once merged: its document, and for eg-strider what the
-        // checkout keeps for the next one too.
-        let dt_document = memory_of(|| dt.checkout_tip()).1.kept;
-        let (text, with_text) = memory_of(|| log.checkout());
-        let first_checkout = Memory { peak: with_text.peak, kept: with_text.kept - text.capacity() };
-        drop(text);
-        let (_, later_checkout) = memory_of(|| log.checkout().len());
+        let disk = bytes.len();
         let in_loro = in_loro(path, &dt, replay);
-        let loro_memory = in_loro.as_ref().ok().map(|(updates, snapshot, _)| {
-            (memory_of(|| loro_import(updates).0).1, memory_of(|| loro_import(snapshot).0).1.peak)
-        });
-        memory.push(format!(
-            "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-            mb(text_len),
-            mb(dt_log.kept),
-            mb(strider_log.kept),
-            mb(dt_checkout.peak),
-            mb(first_checkout.peak),
-            mb(later_checkout.peak),
-            mb(first_checkout.kept),
-        ));
 
+        // Times first, so that measuring memory cannot disturb them.
         let (mut dt_ms, mut first_ms, mut later_ms) = (f64::MAX, f64::MAX, f64::MAX);
         let (mut import_ms, mut merge_ms, mut snapshot_ms) = (f64::MAX, f64::MAX, f64::MAX);
         let (mut same, mut loro_same) = (true, true);
@@ -249,6 +229,46 @@ fn main() {
             snapshot_ms = snapshot_ms.min(t.elapsed().as_secs_f64() * 1e3);
             loro_same &= expected == imported && expected == merged && expected == loaded;
         }
+        // Memory. A closure's result counts as kept only if it is returned, so here the text
+        // is measured and dropped.
+        let (text_len, dt_checkout) = memory_of(|| dt.checkout_tip().content().to_string().len());
+        log.forget();
+        let (text, with_text) = memory_of(|| log.checkout());
+        let first_checkout = Memory { peak: with_text.peak, kept: with_text.kept - text.capacity() };
+        drop(text);
+        let (_, later_checkout) = memory_of(|| log.checkout().len());
+        // As the paper measures it: from the history on disk to a document that is ready to
+        // merge again, with the history counted. eg-strider has no file format of its own,
+        // and its history is built from diamond-types' in memory, so its figures are its
+        // history at rest plus what merging adds to that.
+        let dt_from_disk = memory_of(|| {
+            let history = ListOpLog::load_from(&bytes).unwrap();
+            let document = history.checkout_tip();
+            (history, document)
+        })
+        .1;
+        let from_disk = Memory { peak: strider_log.kept + with_text.peak, kept: strider_log.kept + with_text.kept };
+        from_disks.push(format!(
+            "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            mb(disk),
+            mb(dt_from_disk.peak),
+            mb(dt_from_disk.kept),
+            mb(from_disk.peak),
+            mb(from_disk.kept)
+        ));
+        let loro_memory = in_loro.as_ref().ok().map(|(updates, snapshot, _)| {
+            (memory_of(|| loro_import(updates).0).1, memory_of(|| loro_import(snapshot).0).1.peak)
+        });
+        memory.push(format!(
+            "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            mb(text_len),
+            mb(dt_log.kept),
+            mb(strider_log.kept),
+            mb(dt_checkout.peak),
+            mb(first_checkout.peak),
+            mb(later_checkout.peak),
+            mb(first_checkout.kept),
+        ));
         loro.push(match (&in_loro, loro_memory) {
             (Ok((_, _, notes)), Some((updates, snapshot))) => format!(
                 "{name:6} {notes} {import_ms:>10.2} ms {merge_ms:>10.2} ms {snapshot_ms:>10.2} ms {:>12} {:>12} {:>12}  {}",
@@ -271,13 +291,14 @@ fn main() {
         let bytes = |v: Option<usize>| v.map_or("null".to_string(), |v| v.to_string());
         let loro_ms = |v: f64| in_loro.as_ref().ok().map(|_| v);
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"bytes\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"kept\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"held\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
             dt.len(),
             ms(Some(first_ms)), ms(Some(later_ms)), ms(Some(dt_ms)), ms(loro_ms(import_ms)), ms(loro_ms(merge_ms)), ms(loro_ms(snapshot_ms)), ms(automerge.map(|m| m.0)), ms(yjs.map(|m| m.0)),
-            first_checkout.peak, later_checkout.peak, first_checkout.kept, dt_checkout.peak,
+            from_disk.peak, dt_from_disk.peak,
             bytes(loro_memory.map(|m| m.0.peak)), bytes(loro_memory.map(|m| m.1)), bytes(automerge.map(|m| m.1.peak)), bytes(yjs.map(|m| m.1.peak)),
-            with_text.kept, dt_document,
+            from_disk.kept, dt_from_disk.kept,
             bytes(loro_memory.map(|m| m.0.kept)), bytes(automerge.map(|m| m.1.kept)), bytes(yjs.map(|m| m.1.kept)),
+            first_checkout.peak, later_checkout.peak, first_checkout.kept, dt_checkout.peak,
         ));
 
         all_match &= same;
@@ -293,6 +314,12 @@ fn main() {
     println!("\nmemory: the log at rest, the most in use during a checkout beyond the log, and what a checkout keeps for the next");
     println!("{:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}", "trace", "text", "dt log", "log", "dt peak", "first", "later", "kept");
     for line in memory {
+        println!("{line}");
+    }
+
+    println!("\nmemory as the paper measures it: the history on disk, then the most in use while loading and merging it, and what is held ready to merge again");
+    println!("{:6} {:>10} {:>10} {:>10} {:>10} {:>10}", "trace", "on disk", "dt peak", "dt held", "peak", "held");
+    for line in from_disks {
         println!("{line}");
     }
 
