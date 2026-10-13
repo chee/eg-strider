@@ -4,8 +4,8 @@
 //!
 //! - a number is a LEB128 varint, and a column is its length in bytes and then its values;
 //! - a column whose values mostly repeat is stored as runs: a value, then how many times;
-//! - an ascending list is stored as the steps between its items, and a position as how far
-//!   it is from the one before;
+//! - an ascending list is stored as the steps between its items, and an op's position as
+//!   how far it is from where the op before left off;
 //! - the columns together, the inserted text and the document's text are each compressed
 //!   with LZ4.
 
@@ -68,9 +68,9 @@ impl OpLog {
             }
         });
         column(&mut columns, |out| {
-            let mut last = 0;
+            let mut cursor = 0;
             for op in &self.ops {
-                number(out, zigzag(i64::from(op.pos) - i64::from(std::mem::replace(&mut last, op.pos))) as usize);
+                number(out, zigzag(i64::from(op.pos) - i64::from(std::mem::replace(&mut cursor, after(op.kind, op.pos, op.len)))) as usize);
             }
         });
         column(&mut columns, |out| self.ops.iter().filter(|op| wide(op)).for_each(|op| number(out, bytes(op))));
@@ -136,12 +136,13 @@ impl OpLog {
         let (mut heads, mut places, mut wides) = (columns.column()?, columns.column()?, columns.column()?);
         let ops = heads.count()?;
         log.ops.reserve_exact(ops);
-        let (mut lv, mut at, mut pos) = (0u32, 0usize, 0u32);
+        let (mut lv, mut at, mut cursor) = (0u32, 0usize, 0u32);
         for _ in 0..ops {
             let head = heads.varint()?;
             let len = u32::try_from(head >> 3).ok().filter(|&len| len > 0).ok_or(Malformed)?;
-            pos = u32::try_from(i64::from(pos) + unzigzag(places.varint()?)).map_err(|_| Malformed)?;
+            let pos = u32::try_from(i64::from(cursor) + unzigzag(places.varint()?)).map_err(|_| Malformed)?;
             let (kind, fwd) = (if head & 1 == 1 { OpKind::Del } else { OpKind::Ins }, head & 2 == 0);
+            cursor = after(kind, pos, len);
             let bytes = match kind {
                 OpKind::Del => 0,
                 OpKind::Ins if head & 4 == 0 => len as usize,
@@ -184,6 +185,15 @@ impl OpLog {
 
         let whole = file.0.is_empty() && columns.0.is_empty() && lv == events && at == log.content.len() && log.graph.len() == events;
         whole.then_some((log, text)).ok_or(Malformed)
+    }
+}
+
+/// Returns where an op leaves off: after what it inserted, or where it deleted from. The
+/// next op is most often right there or a little before.
+fn after(kind: OpKind, pos: u32, len: u32) -> u32 {
+    match kind {
+        OpKind::Ins => pos.saturating_add(len),
+        OpKind::Del => pos,
     }
 }
 
