@@ -115,6 +115,42 @@ impl Graph {
         start..end
     }
 
+    /// Returns the arrays the graph is made of, for storing it with what it has worked out.
+    pub fn parts(&self) -> Parts<&[u32]> {
+        Parts {
+            start: &self.blocks.start,
+            parent_start: &self.blocks.parent_start,
+            parents: &self.blocks.parents,
+            heads: &self.heads,
+            seen: &self.seen,
+            critical: &self.critical,
+        }
+    }
+
+    /// Puts a graph back together from the arrays of one, or returns `None` if they cannot be
+    /// a graph's. What they say about the history is taken on trust.
+    pub fn from_parts(parts: Parts<Vec<u32>>) -> Option<Self> {
+        let Parts { start, parent_start, parents, heads, seen, critical } = parts;
+        let blocks = start.len().checked_sub(1)?;
+        let events = start[blocks];
+        let ascending = |list: &[u32]| list.windows(2).all(|pair| pair[0] < pair[1]);
+        let sound = start[0] == 0
+            && ascending(&start)
+            && parent_start.len() == start.len()
+            && parent_start[0] == 0
+            && parent_start.windows(2).all(|pair| pair[0] <= pair[1])
+            && parent_start[blocks] as usize == parents.len()
+            // A block's parents are blocks before it.
+            && (0..blocks).all(|block| parents[parent_start[block] as usize..parent_start[block + 1] as usize].iter().all(|&parent| (parent as usize) < block))
+            && seen.len() == blocks
+            && seen.iter().zip(&start).all(|(seen, start)| seen <= start)
+            && ascending(&critical)
+            && critical.last().is_none_or(|&block| (block as usize) < blocks)
+            && ascending(&heads)
+            && heads.last().map_or(events == 0, |&head| head + 1 == events);
+        sound.then(|| Graph { blocks: Blocks { start, parent_start, parents }, heads, seen, critical, ends: Vec::new() })
+    }
+
     /// Returns how many events from the start of history are all in the history of a
     /// block's last event.
     fn seen_after(&self, block: usize) -> u32 {
@@ -175,6 +211,23 @@ impl Graph {
         }
         segments
     }
+}
+
+/// The arrays a [`Graph`] is made of, as [`Graph::parts`] hands them out and
+/// [`Graph::from_parts`] takes them back.
+pub struct Parts<T> {
+    /// The first event of each block, then the number of events.
+    pub start: T,
+    /// Where each block's parents begin in `parents`, then how many there are in all.
+    pub parent_start: T,
+    /// Each block's parents: the blocks that its first event's parents end.
+    pub parents: T,
+    /// The events that nothing yet descends from.
+    pub heads: T,
+    /// For each block, how many events from the start of history are known to be in its history.
+    pub seen: T,
+    /// The blocks that start at a critical version.
+    pub critical: T,
 }
 
 /// A graph cut into *blocks*: maximal chains of events that no other event branches from

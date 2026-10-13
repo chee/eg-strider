@@ -10,3 +10,5 @@ authors.workspace = true
 strider-graph = { path = "../strider-graph" }
 strider-text = { path = "../strider-text" }
 strider-tree = { path = "../strider-tree" }
+# Compresses a saved document.
+lz4_flex = "0.11"

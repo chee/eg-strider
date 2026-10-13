@@ -5,6 +5,10 @@
 //! inserted text lives in one append-only buffer that ops and edits point into, as in a
 //! piece table.
 
+mod file;
+
+pub use file::Malformed;
+
 use crate::replay::{self, Memo};
 use std::cmp::Ordering;
 use std::ops::Range;
