@@ -125,7 +125,7 @@ fn measure<D>(replayed: Result<(Vec<u8>, String), &'static str>, load: fn(&[u8])
     match replayed {
         Ok((bytes, notes)) => {
             let memory = memory_of(|| load(&bytes).0).1;
-            let (ms, text) = best_of(reps, || load(&bytes).1);
+            let (ms, text) = median_of(reps, || load(&bytes).1);
             let same = if text == expected { "same text" } else { "different text" };
             (Some((ms, memory)), format!("{notes} {ms:>10.2} ms {:>12} {:>12} {same:>15}", mb(memory.peak), mb(memory.kept)))
         }
@@ -133,17 +133,25 @@ fn measure<D>(replayed: Result<(Vec<u8>, String), &'static str>, load: fn(&[u8])
     }
 }
 
-/// Returns the best time in milliseconds of up to `reps` runs, fewer once they have taken three
-/// seconds, and the last result.
-fn best_of<T>(reps: u32, mut f: impl FnMut() -> T) -> (f64, T) {
-    let (mut best, mut spent, mut runs) = (f64::MAX, 0.0, 0);
+/// Returns the median of some times: the middle one, or the mean of the middle two.
+fn median(mut times: Vec<f64>) -> f64 {
+    times.sort_by(f64::total_cmp);
+    let (below, above) = (times.len().saturating_sub(1) / 2, times.len() / 2);
+    times.get(below).map_or(f64::NAN, |low| (low + times[above]) / 2.0)
+}
+
+/// Returns the median time in milliseconds of up to `reps` runs, fewer once they have taken
+/// three seconds, and the last result.
+fn median_of<T>(reps: u32, mut f: impl FnMut() -> T) -> (f64, T) {
+    let (mut times, mut spent) = (Vec::with_capacity(reps as usize), 0.0);
     loop {
         let t = Instant::now();
         let result = f();
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        (best, spent, runs) = (best.min(ms), spent + ms, runs + 1);
-        if runs >= reps || spent > 3000.0 {
-            return (best, result);
+        times.push(ms);
+        spent += ms;
+        if times.len() >= reps as usize || spent > 3000.0 {
+            return (median(times), result);
         }
     }
 }
@@ -194,28 +202,28 @@ fn main() {
         let in_loro = in_loro(path, &dt, replay);
 
         // Times first, so that measuring memory cannot disturb them.
-        let (mut dt_ms, mut first_ms, mut later_ms) = (f64::MAX, f64::MAX, f64::MAX);
-        let (mut import_ms, mut merge_ms, mut snapshot_ms) = (f64::MAX, f64::MAX, f64::MAX);
+        let mut times: [Vec<f64>; 6] = std::array::from_fn(|_| Vec::with_capacity(reps as usize));
+        let [dt_ms, first_ms, later_ms, import_ms, merge_ms, snapshot_ms] = &mut times;
         let (mut same, mut loro_same) = (true, true);
         for _ in 0..reps {
             let t = Instant::now();
             let expected = dt.checkout_tip().content().to_string();
-            dt_ms = dt_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            dt_ms.push(t.elapsed().as_secs_f64() * 1e3);
 
             log.forget();
             let t = Instant::now();
             let first = log.checkout();
-            first_ms = first_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            first_ms.push(t.elapsed().as_secs_f64() * 1e3);
 
             let t = Instant::now();
             let later = log.checkout();
-            later_ms = later_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            later_ms.push(t.elapsed().as_secs_f64() * 1e3);
             same &= expected == first && expected == later;
 
             let Ok((updates, snapshot, _)) = &in_loro else { continue };
             let t = Instant::now();
             let imported = loro_import(updates).1;
-            import_ms = import_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            import_ms.push(t.elapsed().as_secs_f64() * 1e3);
 
             // A checkout: the updates are taken in while the document is detached, which
             // leaves its state untouched, and it is brought up to date on attaching.
@@ -225,16 +233,18 @@ fn main() {
             let t = Instant::now();
             doc.attach();
             let merged = doc.get_text(TEXT).to_string();
-            merge_ms = merge_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            merge_ms.push(t.elapsed().as_secs_f64() * 1e3);
 
             let t = Instant::now();
             let loaded = loro_import(snapshot).1;
-            snapshot_ms = snapshot_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            snapshot_ms.push(t.elapsed().as_secs_f64() * 1e3);
             loro_same &= expected == imported && expected == merged && expected == loaded;
         }
+        let [dt_ms, first_ms, later_ms, import_ms, merge_ms, snapshot_ms] = times.map(median);
+
         // Loading alone, each from its own file.
-        let dt_load_ms = best_of(reps, || ListOpLog::load_from(&bytes).unwrap()).0;
-        let load_ms = best_of(reps, || compare::file::load(&saved)).0;
+        let dt_load_ms = median_of(reps, || ListOpLog::load_from(&bytes).unwrap()).0;
+        let load_ms = median_of(reps, || compare::file::load(&saved)).0;
         loads.push(format!(
             "{name:6} {:>10} {:>10} {dt_load_ms:>7.2} ms {load_ms:>7.2} ms {:>7.2} ms {:>7.2} ms ({:>5.2}x)",
             mb(disk),
@@ -267,7 +277,7 @@ fn main() {
         })
         .1;
         from_disks.push(format!(
-            "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "{name:6} {:>10} {:>10} {:>12} {:>10} {:>12}",
             mb(disk),
             mb(dt_from_disk.peak),
             mb(dt_from_disk.kept),
@@ -309,7 +319,7 @@ fn main() {
         let bytes = |v: Option<usize>| v.map_or("null".to_string(), |v| v.to_string());
         let loro_ms = |v: f64| in_loro.as_ref().ok().map(|_| v);
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"load_ms\":{{\"strider_first\":{load_ms:.4},\"egwalker\":{dt_load_ms:.4}}},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"held\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"load_ms\":{{\"strider_first\":{load_ms:.4},\"egwalker\":{dt_load_ms:.4}}},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"retained\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
             dt.len(),
             ms(Some(first_ms)), ms(Some(later_ms)), ms(Some(dt_ms)), ms(loro_ms(import_ms)), ms(loro_ms(merge_ms)), ms(loro_ms(snapshot_ms)), ms(automerge.map(|m| m.0)), ms(yjs.map(|m| m.0)),
             from_disk.peak, dt_from_disk.peak,
@@ -341,8 +351,8 @@ fn main() {
         println!("{line}");
     }
 
-    println!("\nmemory as the paper measures it: the history on disk, then the most in use while loading and merging it, and what is held ready to merge again");
-    println!("{:6} {:>10} {:>10} {:>10} {:>10} {:>10}", "trace", "on disk", "dt peak", "dt held", "peak", "held");
+    println!("\nmemory as the paper measures it: the history on disk, then the most in use while loading and merging it, and what is retained ready to merge again");
+    println!("{:6} {:>10} {:>10} {:>12} {:>10} {:>12}", "trace", "on disk", "dt peak", "dt retained", "peak", "retained");
     for line in from_disks {
         println!("{line}");
     }

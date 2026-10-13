@@ -38,13 +38,11 @@ def times(ratio):
     return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
 
 
-def chart(results, kind, label, caption, ticks, baseline=None, loading=None):
+def chart(results, kind, label, caption, ticks, baseline=None):
     """Draws one bar per system for each trace. `baseline` names a figure of the trace
-    itself to draw above them, with what to call it. `loading` names what some systems
-    spend before `kind`: it is added to their bars, as a lighter part of matching share.
-    The axis starts at or below the first tick."""
-    before = {r["trace"]: r[loading] if loading else {} for r in results}
-    by_trace = {r["trace"]: {key: v and v + before[r["trace"]].get(key, 0) for key, v in r[kind].items()} for r in results}
+    itself to draw above them, with what to call it. The axis starts at or below the
+    first tick."""
+    by_trace = {r["trace"]: r[kind] for r in results}
     traces = [t for t in ORDER if t in by_trace]
     systems = ([(baseline[1], None, "#999999")] if baseline else []) + SYSTEMS
     base = {r["trace"]: r[baseline[0]] for r in results} if baseline else {}
@@ -90,10 +88,6 @@ def chart(results, kind, label, caption, ticks, baseline=None, loading=None):
                 end = x(value)
                 out.append(f'<rect x="{LEFT}" y="{y}" width="{max(end - LEFT, 1):.1f}" height="{ROW - 2}" fill="{colour}"/>')
                 behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if key and value > least else ""
-                loaded = before[trace].get(key)
-                if loaded:
-                    out.append(f'<rect x="{LEFT}" y="{y}" width="{(end - LEFT) * loaded / value:.1f}" height="{ROW - 2}" fill="white" fill-opacity="0.5"/>')
-                    behind = f' <tspan fill="#888">· {label(loaded)} to load, {label(value - loaded)} to merge</tspan>{behind}'
                 out.append(f'<text x="{end + 5:.1f}" y="{y + 8.5}" font-size="9">{label(value)}{behind}</text>')
             else:
                 out.append(f'<text x="{LEFT + 5}" y="{y + 8.5}" font-size="9" fill="#888">{"nothing" if value == 0 else "did not finish"}</text>')
@@ -105,29 +99,19 @@ def chart(results, kind, label, caption, ticks, baseline=None, loading=None):
 
 def main(results_path, out_dir):
     results = json.load(open(results_path))
-    time = chart(
-        results,
-        "ms",
-        milliseconds,
-        "Time taken to merge all events into a document, from its stored history. Log scale. (Less is better)",
-        TIMES,
-    )
-    from_disk = chart(
-        results,
-        "ms",
-        milliseconds,
-        "Time from a history's file to its document. The lighter part of a bar is the share spent loading. Log scale. (Less is better)",
-        TIMES,
-        loading="load_ms",
-    )
+    for r in results:
+        # Yjs, Loro and Automerge merge as they load, so their one time stands for both.
+        r["load_ms"] = {**r["ms"], **r["load_ms"]}
+    load = chart(results, "load_ms", milliseconds, "Time taken to load a history from its file. Median of up to 25 runs. Log scale. (Less is better)", TIMES)
+    merge = chart(results, "ms", milliseconds, "Time taken to merge a loaded history into a document. Median of up to 25 runs. Log scale. (Less is better)", TIMES)
     sizes = [(2**10 * 100, "100 KiB"), (2**20, "1 MiB"), (2**20 * 10, "10 MiB"), (2**20 * 100, "100 MiB"), (2**30, "1 GiB")]
     on_disk = ("disk", "On disk")
-    peak = chart(results, "peak", memory, "Most memory allocated while merging a history, with the history itself counted. Log scale. (Less is better)", sizes, on_disk)
-    kept = chart(results, "held", memory, "Memory still allocated afterwards, ready to merge again. Log scale. (Less is better)", sizes, on_disk)
-    open(f"{out_dir}/time.svg", "w").write(time)
-    open(f"{out_dir}/time-from-disk.svg", "w").write(from_disk)
+    peak = chart(results, "peak", memory, "Most memory allocated while loading and merging a history. Log scale. (Less is better)", sizes, on_disk)
+    retained = chart(results, "retained", memory, "Memory still allocated afterwards, ready to merge again. Log scale. (Less is better)", sizes, on_disk)
+    open(f"{out_dir}/time-load.svg", "w").write(load)
+    open(f"{out_dir}/time-merge.svg", "w").write(merge)
     open(f"{out_dir}/memory-peak.svg", "w").write(peak)
-    open(f"{out_dir}/memory-kept.svg", "w").write(kept)
+    open(f"{out_dir}/memory-retained.svg", "w").write(retained)
 
 
 if __name__ == "__main__":
