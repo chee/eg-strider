@@ -32,6 +32,11 @@ def memory(v):
     return f"{v:.0f} B"
 
 
+def times(ratio):
+    """How many times the fastest a row is, to three figures."""
+    return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
+
+
 def chart(results, kind, label, caption, ticks):
     by_trace = {r["trace"]: r[kind] for r in results}
     traces = [t for t in ORDER if t in by_trace]
@@ -68,13 +73,15 @@ def chart(results, kind, label, caption, ticks):
         middle = y + len(SYSTEMS) * ROW / 2
         out.append(f'<text x="{LEFT - 62}" y="{middle + 4:.1f}" font-size="14" text-anchor="end">{trace}</text>')
         out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(SYSTEMS) * ROW}" stroke="black" stroke-width="1.5"/>')
+        least = min(v for v in (by_trace[trace][key] for _, key, _ in SYSTEMS) if v)
         for name, key, colour in SYSTEMS:
             value = by_trace[trace][key]
             out.append(f'<text x="{LEFT - 6}" y="{y + 8}" font-size="7.5" fill="#888" text-anchor="end">{name}</text>')
             if value:
                 end = x(value)
                 out.append(f'<rect x="{LEFT}" y="{y}" width="{max(end - LEFT, 1):.1f}" height="{ROW - 2}" fill="{colour}"/>')
-                out.append(f'<text x="{end + 5:.1f}" y="{y + 8.5}" font-size="9">{label(value)}</text>')
+                behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if value > least else ""
+                out.append(f'<text x="{end + 5:.1f}" y="{y + 8.5}" font-size="9">{label(value)}{behind}</text>')
             else:
                 out.append(f'<text x="{LEFT + 5}" y="{y + 8.5}" font-size="9" fill="#888">{"nothing" if value == 0 else "did not finish"}</text>')
             y += ROW
