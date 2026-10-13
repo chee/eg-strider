@@ -93,8 +93,8 @@
 <text x="58" y="212.0" font-size="14" text-anchor="end">S3</text>
 <line x1="120" y1="176" x2="120" y2="238" stroke="black" stroke-width="1.5"/>
 <text x="114" y="186" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="178" width="50.5" height="10" fill="#d55e00"/>
-<text x="175.5" y="186.5" font-size="9">239 KiB</text>
+<rect x="120" y="178" width="12.6" height="10" fill="#d55e00"/>
+<text x="137.6" y="186.5" font-size="9">122 KiB</text>
 <text x="114" y="198" font-size="7.5" fill="#888" text-anchor="end">Eg-walker</text>
 <rect x="120" y="190" width="100.5" height="10" fill="#0072b2"/>
 <text x="225.5" y="198.5" font-size="9">579 KiB</text>
