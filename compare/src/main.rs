@@ -6,6 +6,7 @@
 
 use compare::replicas::TEXT;
 use compare::History;
+use diamond_types::list::operation::TextOperation;
 use diamond_types::list::{ListBranch, ListOpLog};
 use eg_strider::OpLog;
 use jumprope::JumpRope;
@@ -107,17 +108,17 @@ fn strider_merge(history: &History) -> (OpLog, String) {
 }
 
 /// Appends a history to a new diamond-types oplog through its call for remote edits.
-fn dt_append(history: &History) -> ListOpLog {
+fn dt_append(history: &History<TextOperation>) -> ListOpLog {
     let mut oplog = ListOpLog::new();
     let agents: Vec<_> = history.agents.iter().map(|name| oplog.get_or_create_agent_id(name)).collect();
     for chunk in &history.chunks {
-        oplog.add_operations_remote(agents[chunk.agent], &chunk.parents, chunk.seq, &chunk.ops);
+        oplog.add_operations_remote(agents[chunk.agent], history.parents(chunk), chunk.seq, history.ops(chunk));
     }
     oplog
 }
 
 /// Appends a history to a new diamond-types oplog, then merges it.
-fn dt_merge(history: &History) -> (ListOpLog, ListBranch) {
+fn dt_merge(history: &History<TextOperation>) -> (ListOpLog, ListBranch) {
     let oplog = dt_append(history);
     let branch = oplog.checkout_tip();
     (oplog, branch)
@@ -205,10 +206,20 @@ fn yjs_save(doc: &mut yrs::Doc) -> Vec<u8> {
     doc.transact().encode_state_as_update_v2(&yrs::StateVector::default())
 }
 
-/// Imports updates or a snapshot into a new Loro document and returns it with its text.
+/// Imports a snapshot into a new Loro document and returns it with its text.
 fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
     let doc = LoroDoc::new();
     doc.import(bytes).unwrap();
+    let string = doc.get_text(TEXT).to_string();
+    (doc, string)
+}
+
+/// Applies ops to a new Loro document. Loro takes remote edits either as bytes or as the
+/// ops themselves, in the form it also exchanges as JSON, which is the one that starts from
+/// ops in memory.
+fn loro_apply(ops: loro::JsonSchema) -> (LoroDoc, String) {
+    let doc = LoroDoc::new();
+    doc.import_json_updates(ops).unwrap();
     let string = doc.get_text(TEXT).to_string();
     (doc, string)
 }
@@ -217,7 +228,10 @@ fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
 #[derive(Clone, Copy)]
 struct Measured {
     merge_ms: f64,
-    /// While merging: the most memory in use, and what the merged document holds.
+    /// The memory that the history's ops take, in the form the system is handed them.
+    ops: usize,
+    /// While merging: the most memory in use, the ops included, and what the merged document
+    /// holds.
     merging: Memory,
     open_ms: f64,
     /// While reopening: the most memory in use, and what the reopened document holds.
@@ -229,8 +243,8 @@ struct Measured {
 }
 
 /// Measures a library on the two tasks. `ops` puts a history's ops in memory, which is not
-/// timed but is counted as memory, since `merge` uses them up. The text each task hands back
-/// is a copy made to check it, and is not counted as held.
+/// timed but is counted as memory. The text each task hands back is a copy made to check it,
+/// and is not counted as held.
 fn measure<O, D>(reps: u32, expected: &str, ops: impl Fn() -> O, merge: impl Fn(O) -> (D, String), save: impl Fn(&mut D) -> Vec<u8>, open: impl Fn(&[u8]) -> (D, String)) -> Measured {
     let (mut doc, text) = merge(ops());
     let saved = save(&mut doc);
@@ -239,9 +253,10 @@ fn measure<O, D>(reps: u32, expected: &str, ops: impl Fn() -> O, merge: impl Fn(
     let merge_ms = median_of(reps, &ops, &merge).0;
     let open_ms = median_of(reps, || (), |()| open(&saved)).0;
     let held = |((_doc, text), memory): ((D, String), Memory)| Memory { peak: memory.peak, kept: memory.kept.saturating_sub(text.capacity()) };
+    let held_by_ops = memory_of(&ops).1.kept;
     let merging = held(memory_of(|| merge(ops())));
     let opening = held(memory_of(|| open(&saved)));
-    Measured { merge_ms, merging, open_ms, opening, saved: saved.len(), same }
+    Measured { merge_ms, ops: held_by_ops, merging, open_ms, opening, saved: saved.len(), same }
 }
 
 /// Returns the milliseconds since `start`.
@@ -311,7 +326,9 @@ fn main() {
         let name = path.rsplit('/').next().unwrap().trim_end_matches(".dt");
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let dt = ListOpLog::load_from(&bytes).unwrap();
-        let history = History::of(&dt);
+        // The ops, as each of the two is handed them.
+        let (dt_history, held_by_dt_history) = memory_of(|| History::of(&dt));
+        let (history, held_by_history) = memory_of(|| dt_history.edits());
         let expected = dt.checkout_tip().content().to_string();
 
         // The two systems under comparison take turns, each straight after the other, which
@@ -321,7 +338,7 @@ fn main() {
         let mut same = true;
         for _ in 0..reps {
             let t = Instant::now();
-            let oplog = dt_append(&history);
+            let oplog = dt_append(&dt_history);
             dt_append_ms.push(since(t));
             let branch = oplog.checkout_tip();
             dt_ms.push(since(t));
@@ -349,10 +366,13 @@ fn main() {
         same &= reopened.1 == expected && dt_reopened.1.to_string() == expected;
         drop((reopened, dt_reopened));
 
-        // Memory after the times, so that measuring it cannot disturb them.
+        // Memory after the times, so that measuring it cannot disturb them. The ops each is
+        // handed stay in memory throughout, so the most in use while merging is on top of them.
+        let with_ops = |ops: Memory, merging: Memory| Memory { peak: ops.kept + merging.peak, kept: merging.kept };
         let strider = Measured {
             merge_ms,
-            merging: memory_of(|| strider_merge(&history)).1,
+            ops: held_by_history.kept,
+            merging: with_ops(held_by_history, memory_of(|| strider_merge(&history)).1),
             open_ms,
             opening: memory_of(|| OpLog::load(&saved).unwrap()).1,
             saved: saved.len(),
@@ -360,7 +380,8 @@ fn main() {
         };
         let diamond = Measured {
             merge_ms: dt_ms,
-            merging: memory_of(|| dt_merge(&history)).1,
+            ops: held_by_dt_history.kept,
+            merging: with_ops(held_by_dt_history, memory_of(|| dt_merge(&dt_history)).1),
             open_ms: dt_open_ms,
             opening: memory_of(|| dt_open(&dt_saved)).1,
             saved: dt_saved.len(),
@@ -382,17 +403,9 @@ fn main() {
         let yjs = replayed::<compare::replicas::Yjs>(path, "yrs", &dt, replay)
             .map(|(update, notes)| (measure(reps, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))), notes));
         let loro = replayed::<compare::replicas::Loro>(path, "loro", &dt, replay).map(|(updates, notes)| {
-            let mut measured = measure(reps, &expected, || &updates[..], loro_import, |doc| doc.export(ExportMode::snapshot()).unwrap(), loro_import);
-            // Its import takes bytes. Reading them into its log, which is all that a detached
-            // document does with them, is the part that is not merging, and is taken off.
-            let read = |()| {
-                let doc = LoroDoc::new();
-                doc.detach();
-                doc.import(&updates).unwrap();
-                doc
-            };
-            measured.merge_ms -= median_of(reps, || (), read).0;
-            (measured, notes)
+            let source = loro_import(&updates).0;
+            let ops = || source.export_json_updates(&Default::default(), &source.oplog_vv());
+            (measure(reps, &expected, ops, loro_apply, |doc| doc.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
         });
         let automerge = replayed::<compare::replicas::Automerge>(path, "automerge", &dt, replay).map(|(saved, notes)| {
             let changes = automerge_changes(&saved);
@@ -410,9 +423,10 @@ fn main() {
 
         let all = [Some(strider), Some(diamond), yjs.ok().map(|m| m.0), loro.ok().map(|m| m.0), automerge.ok().map(|m| m.0)];
         merges.push(format!(
-            "{name:6} {}   {}",
+            "{name:6} {}   {}   {}",
             columns(all.map(|m| m.map(|m| format!("{:.2} ms", m.merge_ms)))),
-            columns(all.map(|m| m.map(|m| mb(m.merging.peak))))
+            columns(all.map(|m| m.map(|m| mb(m.merging.peak)))),
+            columns(all.map(|m| m.map(|m| mb(m.ops))))
         ));
         opens.push(format!(
             "{name:6} {}   {}   {}",
@@ -421,12 +435,13 @@ fn main() {
             columns(all.map(|m| m.map(|m| mb(m.saved))))
         ));
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"reps\":{reps},\"disk\":{},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"reps\":{reps},\"text\":{},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_ops\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4}}}}}",
             dt.len(),
-            bytes.len(),
+            dt_history.text_bytes(),
             object(all.map(|m| m.map(|m| m.same))),
             object(all.map(|m| m.map(|m| format!("{:.4}", m.merge_ms)))),
             object(all.map(|m| m.map(|m| format!("{:.4}", m.open_ms)))),
+            object(all.map(|m| m.map(|m| m.ops))),
             object(all.map(|m| m.map(|m| m.merging.peak))),
             object(all.map(|m| m.map(|m| m.merging.kept))),
             object(all.map(|m| m.map(|m| m.opening.peak))),
@@ -436,8 +451,8 @@ fn main() {
     }
 
     let heads = || columns(["eg-strider", "diamond-types", "yrs", "Loro", "Automerge"].map(|name| Some(name.to_string())));
-    println!("\nmerging a history whose ops are in memory: the time, then the most memory in use");
-    println!("{:6} {}   {}", "trace", heads(), heads());
+    println!("\nmerging a history whose ops are in memory: the time, the most memory in use, and how much of that the ops are");
+    println!("{:6} {}   {}   {}", "trace", heads(), heads(), heads());
     for line in merges {
         println!("{line}");
     }

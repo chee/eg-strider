@@ -93,7 +93,7 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
     // and absorbed while the log holds what it resolved for their earlier shapes. A second
     // log grows the same way but is saved and loaded at each step, so that it carries on from
     // what the file kept of its graph.
-    let history = compare::History::of(&dt);
+    let history = compare::History::of(&dt).edits();
     let (mut growing, mut reloaded) = (OpLog::new(), OpLog::new());
     for part in 1..=8 {
         let limit = if part == 8 { usize::MAX } else { dt.len() * part / 8 };

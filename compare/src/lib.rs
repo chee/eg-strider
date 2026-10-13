@@ -8,48 +8,122 @@ use diamond_types::list::ListOpLog;
 use eg_strider::OpLog;
 use std::ops::Range;
 
-/// A history with its ops in memory, as one peer would hand it to another: what both
-/// eg-strider and diamond-types are given to merge.
-pub struct History {
+/// A history with its ops in memory, as one peer would hand it to another. Parents and ops
+/// are each kept in one list for the whole history, so that it is not much larger than its
+/// ops. Each library is handed the ops in the form its own calls take: diamond-types its
+/// [`TextOperation`]s, and eg-strider, whose calls take plain numbers and text, an [`Edit`].
+pub struct History<Op = Edit> {
     pub agents: Vec<String>,
     pub chunks: Vec<Chunk>,
+    parents: Vec<usize>,
+    ops: Vec<Op>,
+    /// The text of every [`Edit`] that inserts, one after another.
+    text: String,
 }
 
-/// A run of events by one agent, the first with the given parents and each of the others
+/// A run of events by one agent, the first with the chunk's parents and each of the others
 /// following the one before.
+#[derive(Clone)]
 pub struct Chunk {
     pub events: Range<usize>,
     /// The agent's index in [`History::agents`].
     pub agent: usize,
     pub seq: usize,
-    pub parents: Vec<usize>,
-    pub ops: Vec<TextOperation>,
+    parents: Range<u32>,
+    ops: Range<u32>,
 }
 
-impl History {
+/// An op with no more than eg-strider's calls ask for.
+pub struct Edit {
+    pub delete: bool,
+    /// For a delete: whether its characters were removed last first.
+    pub backspace: bool,
+    pub pos: u32,
+    pub len: u32,
+    /// Where an insert's text is in the history's.
+    text: Range<u32>,
+}
+
+impl<Op> History<Op> {
+    /// Returns a chunk's parents.
+    pub fn parents(&self, chunk: &Chunk) -> &[usize] {
+        &self.parents[chunk.parents.start as usize..chunk.parents.end as usize]
+    }
+
+    /// Returns a chunk's ops.
+    pub fn ops(&self, chunk: &Chunk) -> &[Op] {
+        &self.ops[chunk.ops.start as usize..chunk.ops.end as usize]
+    }
+}
+
+impl History<TextOperation> {
     /// Lists the ops of a diamond-types oplog, event for event.
     pub fn of(dt: &ListOpLog) -> Self {
+        let entries = dt.as_chunked_operation_vec();
         let (mut agents, mut ids) = (Vec::new(), Vec::new());
-        let chunks = dt
-            .as_chunked_operation_vec()
-            .into_iter()
-            .map(|entry| {
-                let id = entry.agent_span.agent;
-                let agent = ids.iter().position(|&known| known == id).unwrap_or_else(|| {
-                    ids.push(id);
-                    agents.push(dt.get_agent_name(id).to_string());
-                    ids.len() - 1
-                });
-                Chunk {
-                    events: entry.span.start..entry.span.end,
-                    agent,
-                    seq: entry.agent_span.seq_range.start,
-                    parents: entry.parents.as_ref().to_vec(),
-                    ops: entry.ops.into_vec(),
+        let mut chunks = Vec::with_capacity(entries.len());
+        let mut parents = Vec::with_capacity(entries.iter().map(|entry| entry.parents.as_ref().len()).sum());
+        let mut ops = Vec::with_capacity(entries.iter().map(|entry| entry.ops.len()).sum());
+        for entry in entries {
+            let id = entry.agent_span.agent;
+            let agent = ids.iter().position(|&known| known == id).unwrap_or_else(|| {
+                ids.push(id);
+                agents.push(dt.get_agent_name(id).to_string());
+                ids.len() - 1
+            });
+            let (first_parent, first_op) = (parents.len() as u32, ops.len() as u32);
+            parents.extend_from_slice(entry.parents.as_ref());
+            ops.extend(entry.ops);
+            chunks.push(Chunk {
+                events: entry.span.start..entry.span.end,
+                agent,
+                seq: entry.agent_span.seq_range.start,
+                parents: first_parent..parents.len() as u32,
+                ops: first_op..ops.len() as u32,
+            });
+        }
+        History { agents, chunks, parents, ops, text: String::new() }
+    }
+
+    /// Returns the same history with its ops as eg-strider is handed them.
+    pub fn edits(&self) -> History {
+        fn inserted(op: &TextOperation) -> &str {
+            if op.kind == ListOpKind::Ins { op.content.as_ref().expect("insert without content") } else { "" }
+        }
+        let mut text = String::with_capacity(self.ops.iter().map(|op| inserted(op).len()).sum());
+        let ops = self
+            .ops
+            .iter()
+            .map(|op| {
+                assert!(op.kind == ListOpKind::Del || op.loc.fwd, "reversed inserts are not supported");
+                let start = text.len() as u32;
+                text.push_str(inserted(op));
+                Edit {
+                    delete: op.kind == ListOpKind::Del,
+                    backspace: !op.loc.fwd,
+                    pos: op.loc.span.start as u32,
+                    len: (op.loc.span.end - op.loc.span.start) as u32,
+                    text: start..text.len() as u32,
                 }
             })
             .collect();
-        History { agents, chunks }
+        History { agents: self.agents.clone(), chunks: self.chunks.clone(), parents: self.parents.clone(), ops, text }
+    }
+
+    /// Returns the bytes of all the text the history inserts and deletes: what a protocol
+    /// with no overhead at all would have to carry. A trace does not say what its deletes
+    /// removed, so a deleted character is taken to be as long as an inserted one is on
+    /// average.
+    pub fn text_bytes(&self) -> usize {
+        let (mut bytes, mut inserted, mut deleted) = (0, 0, 0);
+        for op in &self.ops {
+            let len = op.loc.span.end - op.loc.span.start;
+            match op.kind {
+                ListOpKind::Ins => (bytes, inserted) = (bytes + op.content.as_ref().map_or(len, |text| text.len()), inserted + len),
+                ListOpKind::Del => deleted += len,
+            }
+        }
+        bytes + (deleted * bytes).checked_div(inserted).unwrap_or(0)
     }
 }
 
@@ -57,7 +131,7 @@ impl History {
 /// number events identically.
 pub fn convert(dt: &ListOpLog) -> OpLog {
     let mut log = OpLog::new();
-    extend(&mut log, &History::of(dt), usize::MAX);
+    extend(&mut log, &History::of(dt).edits(), usize::MAX);
     log
 }
 
@@ -70,16 +144,13 @@ pub fn extend(log: &mut OpLog, history: &History, limit: usize) {
         assert_eq!(log.len(), chunk.events.start);
         let (agent, mut seq) = (agents[chunk.agent], chunk.seq);
         parents.clear();
-        parents.extend_from_slice(&chunk.parents);
-        for op in &chunk.ops {
-            let span = op.loc.span;
-            let events = match op.kind {
-                ListOpKind::Ins => {
-                    assert!(op.loc.fwd, "reversed inserts are not supported");
-                    let text = op.content.as_ref().expect("insert without content");
-                    log.add_remote_insert(agent, seq, &parents, span.start, text)
-                }
-                ListOpKind::Del => log.add_remote_delete(agent, seq, &parents, span.start..span.end, op.loc.fwd),
+        parents.extend_from_slice(history.parents(chunk));
+        for edit in history.ops(chunk) {
+            let (pos, len) = (edit.pos as usize, edit.len as usize);
+            let events = if edit.delete {
+                log.add_remote_delete(agent, seq, &parents, pos..pos + len, !edit.backspace)
+            } else {
+                log.add_remote_insert(agent, seq, &parents, pos, &history.text[edit.text.start as usize..edit.text.end as usize])
             };
             // The next op of a chunk follows the last event of this one.
             seq += events.len();
