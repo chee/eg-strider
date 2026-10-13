@@ -13,19 +13,19 @@ pub use walk::{Move, Walker};
 use std::ops::Range;
 
 /// An append-only causal graph, run-length encoded.
+/// An append-only event graph, kept cut into blocks and with its critical versions known.
 #[derive(Default)]
 pub struct Graph {
-    entries: Vec<Entry>,
-    parents: Vec<u32>,
+    blocks: Blocks,
+    /// The events that nothing yet descends from, in ascending order.
     heads: Vec<u32>,
-}
-
-/// Events `start..end`, where each after the first has the previous one as its only parent.
-struct Entry {
-    start: u32,
-    end: u32,
-    /// Range in `Graph::parents` holding the first event's parents.
-    parents: (u32, u32),
+    /// For each block, a number of events from the start of history that are all in its
+    /// history: exact when the block has seen everything before it, else a lower bound.
+    seen: Vec<u32>,
+    /// The blocks that start at a critical version, in order.
+    critical: Vec<u32>,
+    /// Reused while adding events: the blocks their parents end.
+    ends: Vec<u32>,
 }
 
 impl Graph {
@@ -36,12 +36,12 @@ impl Graph {
 
     /// Returns the number of events.
     pub fn len(&self) -> u32 {
-        self.entries.last().map_or(0, |entry| entry.end)
+        self.blocks.start[self.blocks.len()]
     }
 
     /// Tells whether the graph has no events.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.blocks.is_empty()
     }
 
     /// Returns the events that nothing yet descends from, in ascending order.
@@ -53,6 +53,11 @@ impl Graph {
     /// Tells whether a new event with these parents would simply follow the last event.
     pub fn continues(&self, parents: &[u32]) -> bool {
         !self.is_empty() && parents == [self.len() - 1]
+    }
+
+    /// Returns the graph's blocks.
+    pub fn blocks(&self) -> &Blocks {
+        &self.blocks
     }
 
     /// Adds `len` events in a chain, the first with the given parents. Returns their
@@ -74,85 +79,118 @@ impl Graph {
         };
 
         if self.continues(parents) {
-            self.entries.last_mut().expect("an entry to continue").end = end;
+            // Nothing else can have the last event as a parent yet, so its block just grows.
+            *self.blocks.start.last_mut().expect("a block to continue") = end;
         } else {
-            let at = self.parents.len() as u32;
-            self.parents.extend_from_slice(parents);
-            self.entries.push(Entry { start, end, parents: (at, self.parents.len() as u32) });
+            // A parent part-way along a block splits it there. Taking them in ascending
+            // order keeps the blocks already found where they were.
+            let mut ends = std::mem::take(&mut self.ends);
+            ends.clear();
+            for &parent in parents {
+                let block = self.blocks.containing(parent);
+                if parent + 1 < self.blocks.start[block + 1] {
+                    self.split(block, parent + 1);
+                }
+                ends.push(block as u32);
+            }
+            let seen = if parents == self.heads { start } else { ends.iter().map(|&block| self.seen_after(block as usize)).max().unwrap_or(0) };
+            let new = self.blocks.len() as u32;
+            self.blocks.parents.extend_from_slice(&ends);
+            self.blocks.parent_start.push(self.blocks.parents.len() as u32);
+            self.blocks.start.push(end);
+            self.seen.push(seen);
+            self.ends = ends;
+
+            // A version is critical only while every later block has seen all that came
+            // before it.
+            while self.critical.last().is_some_and(|&block| self.blocks.start[block as usize] > seen) {
+                self.critical.pop();
+            }
+            if seen == start {
+                self.critical.push(new);
+            }
         }
         self.heads.retain(|h| !parents.contains(h));
         self.heads.push(end - 1);
         start..end
     }
 
-    /// Cuts the graph into [`Blocks`].
-    pub fn blocks(&self) -> Blocks {
-        let n = self.len();
-
-        // A block starts wherever an entry does, and just after every event that is some
-        // other event's parent.
-        let mut cut = vec![0u64; n as usize / 64 + 1];
-        let mut mark = |event: u32| cut[event as usize / 64] |= 1 << (event % 64);
-        for e in &self.entries {
-            mark(e.start);
+    /// Returns how many events from the start of history are all in the history of a
+    /// block's last event.
+    fn seen_after(&self, block: usize) -> u32 {
+        if self.seen[block] == self.blocks.start[block] {
+            self.blocks.start[block + 1]
+        } else {
+            self.seen[block]
         }
-        for &p in &self.parents {
-            if p + 1 < n {
-                mark(p + 1);
+    }
+
+    /// Splits a block so that a new one starts at event `at`.
+    fn split(&mut self, block: usize, at: u32) {
+        let blocks = &mut self.blocks;
+        let (first, second) = (block as u32, block as u32 + 1);
+        // Later blocks named this one for its last event, which the second part now has;
+        // and every block after it moves up one.
+        let later = blocks.parent_start[block + 1] as usize;
+        for parent in &mut blocks.parents[later..] {
+            *parent += u32::from(*parent >= first);
+        }
+        blocks.parents.insert(later, first);
+        blocks.start.insert(block + 1, at);
+        blocks.parent_start.insert(block + 1, later as u32);
+        for start in &mut blocks.parent_start[block + 2..] {
+            *start += 1;
+        }
+        self.seen.insert(block + 1, if self.seen[block] == blocks.start[block] { at } else { self.seen[block] });
+
+        let moved = self.critical.partition_point(|&critical| critical <= first);
+        for critical in &mut self.critical[moved..] {
+            *critical += 1;
+        }
+        if self.seen[block + 1..].iter().all(|&seen| seen >= at) {
+            self.critical.insert(moved, second);
+        }
+    }
+
+    /// Splits the history at its critical versions: the points where every later event has
+    /// every earlier event in its history.
+    pub fn segments(&self) -> Vec<Segment> {
+        let blocks = self.blocks.len();
+        let next = |i: usize| self.critical.get(i + 1).map_or(blocks, |&block| block as usize);
+        let mut segments = Vec::new();
+        let mut i = 0;
+        while i < self.critical.len() {
+            let from = self.critical[i] as usize;
+            if next(i) == from + 1 {
+                // Critical on both sides: nothing is concurrent with this block. Take
+                // every block that follows in the same way.
+                while i + 1 < self.critical.len() && next(i + 1) == self.critical[i + 1] as usize + 1 {
+                    i += 1;
+                }
+                segments.push(Segment::Linear(from..next(i)));
+            } else {
+                segments.push(Segment::Region(from..next(i)));
             }
+            i += 1;
         }
-
-        let mut rank = Vec::with_capacity(cut.len());
-        let mut count = 0u32;
-        for w in &cut {
-            rank.push(count);
-            count += w.count_ones();
-        }
-        let mut start = Vec::with_capacity(count as usize + 1);
-        for (i, &w) in cut.iter().enumerate() {
-            let mut w = w;
-            while w != 0 {
-                start.push(i as u32 * 64 + w.trailing_zeros());
-                w &= w - 1;
-            }
-        }
-        start.push(n);
-
-        // The block containing an event: one less than the number of starts at or before it.
-        let block_of = |event: u32| {
-            let below = cut[event as usize / 64] & (u64::MAX >> (63 - event % 64));
-            rank[event as usize / 64] + below.count_ones() - 1
-        };
-
-        let mut parent_start = Vec::with_capacity(count as usize + 1);
-        let mut parents = Vec::with_capacity(self.parents.len() + count as usize);
-        let mut block = 0usize;
-        for e in &self.entries {
-            debug_assert_eq!(start[block], e.start);
-            parent_start.push(parents.len() as u32);
-            parents.extend(self.parents[e.parents.0 as usize..e.parents.1 as usize].iter().map(|&p| block_of(p)));
-            block += 1;
-            // Later pieces of the same entry each continue from the piece before.
-            while start[block] < e.end {
-                parent_start.push(parents.len() as u32);
-                parents.push(block as u32 - 1);
-                block += 1;
-            }
-        }
-        parent_start.push(parents.len() as u32);
-
-        Blocks { start, parent_start, parents }
+        segments
     }
 }
 
 /// A graph cut into *blocks*: maximal chains of events that no other event branches from
-/// part-way along. A version therefore contains a block entirely or not at all, which lets
-/// versions be handled as sets of blocks.
+/// part-way along. A version therefore contains a block entirely or not at all.
 pub struct Blocks {
-    /// Run `i` covers events `start[i]..start[i + 1]`.
+    /// Block `i` covers events `start[i]..start[i + 1]`.
     start: Vec<u32>,
     parent_start: Vec<u32>,
+    /// Each block's parents: the blocks that its first event's parents end.
     parents: Vec<u32>,
+}
+
+impl Default for Blocks {
+    fn default() -> Self {
+        Blocks { start: vec![0], parent_start: vec![0], parents: Vec::new() }
+    }
 }
 
 /// A stretch of history between two critical versions.
@@ -200,64 +238,8 @@ impl Blocks {
         &self.parents[self.parent_start[block] as usize..self.parent_start[block + 1] as usize]
     }
 
-    /// Splits the history at its critical versions: the points where every later event has
-    /// every earlier event in its history, so that nothing before the point can affect how
-    /// anything after it is merged.
-    pub fn segments(&self) -> Vec<Segment> {
-        let blocks = self.len();
-        let start = &self.start;
-
-        // seen[i]: a `q` such that block i's first event has all of events 0..q in its
-        // history. Exact when the block has seen everything before it (its parents are then
-        // exactly the heads of the graph so far), otherwise a lower bound from its parents.
-        let mut seen = vec![0u32; blocks];
-        let mut is_head = vec![false; blocks];
-        let mut heads = 0usize;
-        for i in 0..blocks {
-            let parents = self.parents(i);
-            seen[i] = if parents.len() == heads && parents.iter().all(|&p| is_head[p as usize]) {
-                start[i]
-            } else {
-                let seen_after = |p: usize| if seen[p] == start[p] { start[p + 1] } else { seen[p] };
-                parents.iter().map(|&p| seen_after(p as usize)).max().unwrap_or(0)
-            };
-            for &p in parents {
-                if std::mem::take(&mut is_head[p as usize]) {
-                    heads -= 1;
-                }
-            }
-            is_head[i] = true;
-            heads += 1;
-        }
-
-        // The version just before block i is critical when every block from i on has seen all
-        // of events 0..start[i].
-        let mut least_seen = vec![u32::MAX; blocks + 1];
-        for i in (0..blocks).rev() {
-            least_seen[i] = least_seen[i + 1].min(seen[i]);
-        }
-        let critical = |i: usize| least_seen[i] >= start[i];
-
-        let mut segments = Vec::new();
-        let mut i = 0;
-        while i < blocks {
-            debug_assert!(critical(i));
-            let mut end = i + 1;
-            if critical(end) {
-                // Critical on both sides: nothing is concurrent with this block. Take every
-                // block that follows in the same way.
-                while end < blocks && critical(end + 1) {
-                    end += 1;
-                }
-                segments.push(Segment::Linear(i..end));
-            } else {
-                while !critical(end) {
-                    end += 1;
-                }
-                segments.push(Segment::Region(i..end));
-            }
-            i = end;
-        }
-        segments
+    /// Finds the block holding an event.
+    fn containing(&self, event: u32) -> usize {
+        self.start.partition_point(|&start| start <= event) - 1
     }
 }

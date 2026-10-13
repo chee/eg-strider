@@ -72,17 +72,19 @@ impl Clusters {
     /// seen edited there. Forgets stable blocks first; if none are left, the cluster is
     /// dropped and `None` returned, and `i` is then the cluster that followed.
     fn unseen(&mut self, i: usize, viewer: &Viewer) -> Option<(i64, bool)> {
-        let (mut longer, mut any) = (0, false);
-        self.list[i].members.retain(|&(block, grew)| {
+        let (mut longer, mut any, mut stale) = (0, false, false);
+        for &(block, grew) in &self.list[i].members {
             if has(viewer.stable, block) {
-                return false;
-            }
-            if !has(viewer.seen, block) {
+                stale = true;
+            } else if !has(viewer.seen, block) {
                 longer += grew;
                 any = true;
             }
-            true
-        });
+        }
+        // Rewriting the list only when something has to go keeps the common case to a read.
+        if stale {
+            self.list[i].members.retain(|&(block, _)| !has(viewer.stable, block));
+        }
         if self.list[i].members.is_empty() {
             self.spare.push(self.list.remove(i).members);
             return None;
@@ -249,6 +251,22 @@ impl Shifter {
         let count = region.len();
         let words = count.div_ceil(64);
         self.seen.clear();
+        self.stable.clear();
+        if words == 1 {
+            // Most regions are this small: each set is one word, with no slices to cut.
+            for i in 0..count {
+                let inside = blocks.parents(region.start + i).iter().filter_map(|&p| (p as usize).checked_sub(region.start));
+                let seen = inside.fold(1 << i, |seen, parent| seen | self.seen[parent]);
+                self.seen.push(seen);
+            }
+            self.stable.resize(count, 0);
+            let mut later = u64::MAX;
+            for i in (0..count).rev() {
+                later &= self.seen[i];
+                self.stable[i] = later;
+            }
+            return words;
+        }
         self.seen.resize(count * words, 0);
         for i in 0..count {
             let (earlier, own) = self.seen.split_at_mut(i * words);
@@ -261,7 +279,6 @@ impl Shifter {
             }
             own[i / 64] |= 1 << (i % 64);
         }
-        self.stable.clear();
         self.stable.resize(count * words, u64::MAX);
         for i in (0..count).rev() {
             for word in 0..words {

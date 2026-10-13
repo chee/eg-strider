@@ -9,7 +9,7 @@ use crate::oplog::{OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
 use crate::tracker::Tracker;
 use std::ops::Range;
-use strider_graph::{Move, Blocks, Segment, Walker};
+use strider_graph::{Move, Segment, Walker};
 use strider_text::Rewind;
 
 /// The edits that merged regions come to, in the order they are made.
@@ -80,7 +80,8 @@ pub(crate) struct Memo {
 /// The shape of the history, valid while the log has the same number of events.
 struct Plan {
     events: usize,
-    blocks: Blocks,
+    /// The first event of each segment.
+    starts: Vec<u32>,
     segments: Vec<Segment>,
     /// For each block, the index of the op containing its first event.
     first_op: Vec<u32>,
@@ -94,7 +95,8 @@ impl Plan {
     /// take over what it kept for them.
     fn new(log: &OpLog, mut previous: Option<Plan>) -> Self {
         let blocks = log.graph.blocks();
-        let segments = blocks.segments();
+        let segments = log.graph.segments();
+        let starts = segments.iter().map(|segment| blocks.start(segment.blocks().start)).collect();
         let first_op = log.ops_containing((0..blocks.len()).map(|block| blocks.start(block)));
         let kept = segments
             .iter()
@@ -103,13 +105,12 @@ impl Plan {
                 _ => Kept::default(),
             })
             .collect();
-        Plan { events: log.len(), blocks, segments, first_op, kept }
+        Plan { events: log.len(), starts, segments, first_op, kept }
     }
 
     /// Takes what is kept for the region that starts at event `start`, if there is one.
     fn take_kept(&mut self, start: u32) -> Kept {
-        let blocks = &self.blocks;
-        match self.segments.binary_search_by_key(&start, |segment| blocks.start(segment.blocks().start)) {
+        match self.starts.binary_search(&start) {
             Ok(at) => std::mem::take(&mut self.kept[at]),
             Err(_) => Kept::default(),
         }
@@ -140,7 +141,8 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
 
     // Forwards: merge the regions. The events of a linear stretch are edits already, so all
     // that is needed of them for now is what they do to the document's length.
-    let linear_events = |linear: &Range<usize>| plan.blocks.start(linear.start)..plan.blocks.start(linear.end);
+    let blocks = log.graph.blocks();
+    let linear_events = |linear: &Range<usize>| blocks.start(linear.start)..blocks.start(linear.end);
     let mut doc = Edits { made: Vec::with_capacity(*region_edits), len: 0 };
     let mut edits_before = Vec::with_capacity(plan.segments.len());
     for (segment, kept) in plan.segments.iter().zip(&mut kept) {
@@ -188,10 +190,10 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
 #[allow(clippy::too_many_arguments)]
 fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept, tracker: &mut Tracker, walker: &mut Walker, shifter: &mut Shifter, doc: &mut Edits) {
     // Nothing kept: the region has not needed the tracker so far. See whether it does now.
-    if kept.events == 0 && shifter.merge(log, &plan.blocks, &plan.first_op, region, doc) {
+    if kept.events == 0 && shifter.merge(log, log.graph.blocks(), &plan.first_op, region, doc) {
         return;
     }
-    let blocks = &plan.blocks;
+    let blocks = log.graph.blocks();
     let (start, end) = (blocks.start(region.start), blocks.start(region.end));
     let first_op = plan.first_op[region.start];
     let goes_before = |a: u32, b: u32| log.inserts_before(start + a, start + b);

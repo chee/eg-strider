@@ -88,7 +88,18 @@ impl Rewind {
         assert_eq!(self.len, 0, "edits left to take back");
         match self.text {
             Text::Ascii(bytes) => String::from_utf8(bytes).expect("ASCII"),
-            Text::Wide(chars) => chars.into_iter().collect(),
+            Text::Wide(chars) => {
+                // Mostly ASCII in practice: whole stretches of it are narrowed to bytes at once.
+                let mut bytes = Vec::with_capacity(chars.len());
+                for stretch in chars.chunks(16) {
+                    if stretch.iter().all(char::is_ascii) {
+                        bytes.extend(stretch.iter().map(|&ch| ch as u8));
+                    } else {
+                        stretch.iter().for_each(|&ch| bytes.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes()));
+                    }
+                }
+                String::from_utf8(bytes).expect("encoded from characters")
+            }
         }
     }
 }

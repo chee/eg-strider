@@ -75,7 +75,7 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
     let blocks = graph.blocks();
     let histories = histories(graph);
     let mut applied = vec![false; blocks.len()];
-    for segment in blocks.segments() {
+    for segment in graph.segments() {
         let Segment::Region(region) = segment else { continue };
         let known = region.len() * known_quarters / 4;
         let base = blocks.start(region.start) as usize;
@@ -83,7 +83,7 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
         version[..blocks.start(region.start + known) as usize].fill(true);
         applied[region.start..region.start + known].fill(true);
 
-        walker.walk(&blocks, &region, known, |step| match step {
+        walker.walk(blocks, &region, known, |step| match step {
             Move::Retreat(events) => {
                 for e in events {
                     assert!(std::mem::replace(&mut version[e as usize], false), "retreated an event that was not there");
