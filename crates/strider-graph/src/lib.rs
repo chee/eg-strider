@@ -65,6 +65,13 @@ impl Graph {
     pub fn push(&mut self, parents: &[u32], len: u32) -> Range<u32> {
         let start = self.len();
         let end = start.checked_add(len).expect("too many events");
+        if self.continues(parents) {
+            // Nothing else can have the last event as a parent yet, so its block just grows,
+            // and the block's new end is the last head in its place.
+            *self.blocks.start.last_mut().expect("a block to continue") = end;
+            *self.heads.last_mut().expect("the last event is a head") = end - 1;
+            return start..end;
+        }
         assert!(parents.iter().all(|&p| p < start), "parent is not a known event");
         // Parents usually arrive in order; only otherwise are they copied to be sorted.
         let sorted: Vec<u32>;
@@ -78,39 +85,40 @@ impl Graph {
             &sorted
         };
 
-        if self.continues(parents) {
-            // Nothing else can have the last event as a parent yet, so its block just grows.
-            *self.blocks.start.last_mut().expect("a block to continue") = end;
-        } else {
-            // A parent part-way along a block splits it there. Taking them in ascending
-            // order keeps the blocks already found where they were.
-            let mut ends = std::mem::take(&mut self.ends);
-            ends.clear();
-            for &parent in parents {
-                let block = self.blocks.containing(parent);
-                if parent + 1 < self.blocks.start[block + 1] {
-                    self.split(block, parent + 1);
-                }
-                ends.push(block as u32);
+        // A parent part-way along a block splits it there. Taking them in ascending order
+        // keeps the blocks already found where they were.
+        let mut ends = std::mem::take(&mut self.ends);
+        ends.clear();
+        for &parent in parents {
+            let block = self.blocks.containing(parent);
+            if parent + 1 < self.blocks.start[block + 1] {
+                self.split(block, parent + 1);
             }
-            let seen = if parents == self.heads { start } else { ends.iter().map(|&block| self.seen_after(block as usize)).max().unwrap_or(0) };
-            let new = self.blocks.len() as u32;
-            self.blocks.parents.extend_from_slice(&ends);
-            self.blocks.parent_start.push(self.blocks.parents.len() as u32);
-            self.blocks.start.push(end);
-            self.seen.push(seen);
-            self.ends = ends;
-
-            // A version is critical only while every later block has seen all that came
-            // before it.
-            while self.critical.last().is_some_and(|&block| self.blocks.start[block as usize] > seen) {
-                self.critical.pop();
-            }
-            if seen == start {
-                self.critical.push(new);
-            }
+            ends.push(block as u32);
         }
-        self.heads.retain(|h| !parents.contains(h));
+        // An event that merges every head has seen all there is, and leaves no other head.
+        let merges_all = parents == self.heads;
+        let seen = if merges_all { start } else { ends.iter().map(|&block| self.seen_after(block as usize)).max().unwrap_or(0) };
+        let new = self.blocks.len() as u32;
+        self.blocks.parents.extend_from_slice(&ends);
+        self.blocks.parent_start.push(self.blocks.parents.len() as u32);
+        self.blocks.start.push(end);
+        self.seen.push(seen);
+        self.ends = ends;
+
+        // A version is critical only while every later block has seen all that came before
+        // it.
+        while self.critical.last().is_some_and(|&block| self.blocks.start[block as usize] > seen) {
+            self.critical.pop();
+        }
+        if seen == start {
+            self.critical.push(new);
+        }
+        if merges_all {
+            self.heads.clear();
+        } else {
+            self.heads.retain(|h| !parents.contains(h));
+        }
         self.heads.push(end - 1);
         start..end
     }

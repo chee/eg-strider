@@ -170,16 +170,22 @@ impl OpLog {
         }
         let len = u32::try_from(len).expect("run too long");
         let pos = u32::try_from(pos).expect("position too large");
-        // No parents given: the event is made at the current frontier.
-        let mut at = std::mem::take(&mut self.parents);
-        at.clear();
-        match parents {
-            Some(parents) => at.extend(parents.iter().map(|&p| u32::try_from(p).expect("parent is not a known event"))),
-            None => at.extend_from_slice(self.graph.frontier()),
-        }
-        let continues = self.graph.continues(&at);
-        let events = self.graph.push(&at, len);
-        self.parents = at;
+        // No parents given: the event is made at the current frontier. Most events simply
+        // follow the last one, whose number is then all the graph needs.
+        let continues = lv > 0 && parents.map_or(self.graph.frontier() == [lv - 1], |parents| parents == [(lv - 1) as LV]);
+        let events = if continues {
+            self.graph.push(&[lv - 1], len)
+        } else {
+            let mut at = std::mem::take(&mut self.parents);
+            at.clear();
+            match parents {
+                Some(parents) => at.extend(parents.iter().map(|&p| u32::try_from(p).expect("parent is not a known event"))),
+                None => at.extend_from_slice(self.graph.frontier()),
+            }
+            let events = self.graph.push(&at, len);
+            self.parents = at;
+            events
+        };
 
         let seq = seq.unwrap_or(self.next_seq[agent as usize]);
         let next = &mut self.next_seq[agent as usize];
