@@ -7,7 +7,6 @@
 
 use crate::oplog::OpKind;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::ops::Range;
 use strider_tree::{Cursor, PrepareEffectTree, View, Widths};
 
@@ -23,6 +22,10 @@ const UNDERWATER_LEN: u32 = 0x7fff_0000;
 // A span's state in the prepare version. Each delete of an inserted character adds one.
 const NOT_INSERTED_YET: u32 = 0;
 const INSERTED: u32 = 1;
+
+/// How many characters of the pre-region document share an entry of the index that finds
+/// underwater spans. Tiny in debug builds, so that tests on small documents cross pages.
+const PAGE: u32 = if cfg!(debug_assertions) { 4 } else { 64 };
 
 /// Tree nodes are tiny in debug builds so that tests on small documents still split them.
 const NODE: usize = if cfg!(debug_assertions) { 4 } else { 32 };
@@ -67,8 +70,9 @@ pub(crate) struct Tracker {
     /// Per region event. For an insert, the span holding the character it inserted; for a
     /// delete, the item it deleted.
     by_event: Vec<u32>,
-    /// Underwater spans by starting position.
-    underwater: BTreeMap<u32, u32>,
+    /// For each page of the document as it stood when the region began, the underwater span
+    /// that holds the page's first character.
+    pages: Vec<u32>,
     /// Per span: the `scan_stamp` of the last `integrate` scan that passed over it.
     scanned: Vec<u32>,
     scan_stamp: u32,
@@ -80,7 +84,7 @@ impl Default for Tracker {
             tree: PrepareEffectTree::new(Widths::default()),
             spans: Vec::new(),
             by_event: Vec::new(),
-            underwater: BTreeMap::new(),
+            pages: Vec::new(),
             scanned: Vec::new(),
             scan_stamp: 0,
         }
@@ -88,9 +92,9 @@ impl Default for Tracker {
 }
 
 impl Tracker {
-    /// Resets to a single placeholder for the document as it stands, ready for a region of
-    /// `events` events.
-    pub fn begin_region(&mut self, events: usize) {
+    /// Resets to a single placeholder for the document as it stands, `len` characters long,
+    /// ready for a region of `events` events.
+    pub fn begin_region(&mut self, events: usize, len: u32) {
         let placeholder = Span {
             item: UNDERWATER,
             len: UNDERWATER_LEN,
@@ -102,8 +106,8 @@ impl Tracker {
         self.tree.reset(placeholder.widths());
         self.spans.clear();
         self.spans.push(placeholder);
-        self.underwater.clear();
-        self.underwater.insert(0, 0);
+        self.pages.clear();
+        self.pages.resize((len / PAGE) as usize + 1, 0);
         self.scanned.clear();
         self.scan_stamp = 0;
         self.by_event.clear();
@@ -119,12 +123,29 @@ impl Tracker {
 
     /// Finds the span holding `item`, and how far into it.
     fn locate(&self, item: u32) -> (u32, u32) {
-        let span = if item & UNDERWATER != 0 {
-            *self.underwater.range(..=item & !UNDERWATER).next_back().expect("no underwater span").1
-        } else {
-            self.by_event[item as usize]
-        };
+        let span = if item & UNDERWATER != 0 { self.underwater(item) } else { self.by_event[item as usize] };
         (span, item - self.spans[span as usize].item)
+    }
+
+    /// Finds the span holding an underwater item: the one holding the first character of
+    /// its page, or one further along the document.
+    fn underwater(&self, item: u32) -> u32 {
+        let holds = |id: u32| {
+            let span = &self.spans[id as usize];
+            span.item & UNDERWATER != 0 && item.wrapping_sub(span.item) < span.len
+        };
+        let mut id = self.pages[((item & !UNDERWATER) / PAGE) as usize];
+        if holds(id) {
+            return id;
+        }
+        let mut at = self.tree.cursor(id);
+        loop {
+            at = self.tree.next(at).expect("an underwater item is in some span");
+            id = self.tree.id(at);
+            if holds(id) {
+                return id;
+            }
+        }
     }
 
     /// Returns the place `off` characters into the span at `at`, where `off` may be the span's
@@ -181,21 +202,28 @@ impl Tracker {
         let events = |s: &Span| s.item as usize..(s.item + s.len) as usize;
 
         // Every event in the part that takes the new id has to be re-pointed, so give the
-        // new id to the smaller part: each event is then re-pointed O(log) times.
+        // new id to the smaller part: each event is then re-pointed O(log) times. Likewise
+        // every page that begins in an underwater part.
         let underwater = whole.item & UNDERWATER != 0;
-        if underwater || right.len <= left.len {
+        let index = if underwater { &mut self.pages } else { &mut self.by_event };
+        let pointed = |s: &Span| {
+            if underwater {
+                let page = |pos: u32| ((pos & !UNDERWATER).div_ceil(PAGE) as usize).min(index.len());
+                page(s.item)..page(s.item + s.len)
+            } else {
+                events(s)
+            }
+        };
+        let (from_left, from_right) = (pointed(&left), pointed(&right));
+        if from_right.len() <= from_left.len() {
             self.spans[span as usize] = left;
             self.spans.push(right);
-            if underwater {
-                self.underwater.insert(right.item & !UNDERWATER, new);
-            } else {
-                self.by_event[events(&right)].fill(new);
-            }
+            index[from_right].fill(new);
             self.tree.split_entry(at, right.widths(), false).1
         } else {
             self.spans[span as usize] = right;
             self.spans.push(left);
-            self.by_event[events(&left)].fill(new);
+            index[from_left].fill(new);
             self.tree.split_entry(at, left.widths(), true).1
         }
     }

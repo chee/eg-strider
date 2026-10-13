@@ -230,7 +230,7 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
     let blocks = log.graph.blocks();
     let (start, end) = (blocks.start(region.start), blocks.start(region.end));
     let goes_before = |a: u32, b: u32| log.inserts_before(start + a, start + b);
-    tracker.begin_region((end - start) as usize);
+    tracker.begin_region((end - start) as usize, doc.len);
 
     // Blocks resolved in full by earlier replays are placed by id. Their events stay in the
     // tracker's prepare version, which is where the walk of the rest begins.
