@@ -15,6 +15,8 @@ enum Edit {
     SplitEntry { at: Index, share: [Index; 2], before: bool },
     SetWidths { at: Index, widths: [u32; 2] },
     Update { at: Index, widths: [u32; 2] },
+    /// Looks up a character index, which the tree remembers the whereabouts of.
+    Find { prepare: bool, idx: Index },
 }
 
 fn edit() -> impl Strategy<Value = Edit> {
@@ -24,6 +26,7 @@ fn edit() -> impl Strategy<Value = Edit> {
         (any::<Index>(), any::<[Index; 2]>(), any::<bool>()).prop_map(|(at, share, before)| Edit::SplitEntry { at, share, before }),
         (any::<Index>(), widths()).prop_map(|(at, widths)| Edit::SetWidths { at, widths }),
         (any::<Index>(), widths()).prop_map(|(at, widths)| Edit::Update { at, widths }),
+        (any::<bool>(), any::<Index>()).prop_map(|(prepare, idx)| Edit::Find { prepare, idx }),
     ]
 }
 
@@ -59,6 +62,21 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
                 let i = at.index(list.len());
                 prop_assert_eq!(tree.update(tree.cursor(list[i].0), w(widths)), effect_idx(&list[..i]));
                 list[i].1 = widths;
+            }
+            Edit::Find { prepare, idx } => {
+                let (view, k) = if prepare { (View::Prepare, 0) } else { (View::Effect, 1) };
+                let total: u32 = list.iter().map(|e| e.1[k]).sum();
+                if total > 0 {
+                    let mut idx = idx.index(total as usize) as u32;
+                    let (at, off) = tree.char_idx_to_entry(view, idx);
+                    // The first entry that `idx` falls within.
+                    let entry = list.iter().find(|e| {
+                        let within = idx < e.1[k];
+                        idx -= if within { 0 } else { e.1[k] };
+                        within
+                    });
+                    prop_assert_eq!((tree.id(at), off), (entry.expect("within the total").0, idx));
+                }
             }
         }
     }
