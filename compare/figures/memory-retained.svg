@@ -141,8 +141,8 @@
 <rect x="120" y="300" width="184.3" height="10" fill="#d55e00"/>
 <text x="309.3" y="308.5" font-size="9">5.9 MiB <tspan fill="#888">(2.34×)</tspan></text>
 <text x="114" y="320" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="312" width="235.4" height="10" fill="#0072b2"/>
-<text x="360.4" y="320.5" font-size="9">18 MiB <tspan fill="#888">(7.26×)</tspan></text>
+<rect x="120" y="312" width="234.1" height="10" fill="#0072b2"/>
+<text x="359.1" y="320.5" font-size="9">18 MiB <tspan fill="#888">(7.07×)</tspan></text>
 <text x="114" y="332" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
 <rect x="120" y="324" width="207.9" height="10" fill="#e69f00"/>
 <text x="332.9" y="332.5" font-size="9">10.0 MiB <tspan fill="#888">(3.95×)</tspan></text>
@@ -161,8 +161,8 @@
 <rect x="120" y="386" width="198.9" height="10" fill="#d55e00"/>
 <text x="323.9" y="394.5" font-size="9">8.2 MiB <tspan fill="#888">(3.24×)</tspan></text>
 <text x="114" y="406" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="398" width="245.0" height="10" fill="#0072b2"/>
-<text x="370.0" y="406.5" font-size="9">23 MiB <tspan fill="#888">(8.99×)</tspan></text>
+<rect x="120" y="398" width="244.0" height="10" fill="#0072b2"/>
+<text x="369.0" y="406.5" font-size="9">22 MiB <tspan fill="#888">(8.79×)</tspan></text>
 <text x="114" y="418" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
 <rect x="120" y="410" width="191.0" height="10" fill="#e69f00"/>
 <text x="316.0" y="418.5" font-size="9">6.9 MiB* <tspan fill="#888">(2.72×)</tspan></text>
@@ -181,8 +181,8 @@
 <rect x="120" y="472" width="129.4" height="10" fill="#d55e00"/>
 <text x="254.4" y="480.5" font-size="9">1.8 MiB <tspan fill="#888">(1.55×)</tspan></text>
 <text x="114" y="492" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="484" width="175.8" height="10" fill="#0072b2"/>
-<text x="300.8" y="492.5" font-size="9">4.9 MiB <tspan fill="#888">(4.33×)</tspan></text>
+<rect x="120" y="484" width="175.7" height="10" fill="#0072b2"/>
+<text x="300.7" y="492.5" font-size="9">4.9 MiB <tspan fill="#888">(4.32×)</tspan></text>
 <text x="114" y="504" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
 <rect x="120" y="496" width="207.6" height="10" fill="#e69f00"/>
 <text x="332.6" y="504.5" font-size="9">9.9 MiB* <tspan fill="#888">(8.76×)</tspan></text>
@@ -201,8 +201,8 @@
 <rect x="120" y="558" width="122.5" height="10" fill="#d55e00"/>
 <text x="247.5" y="566.5" font-size="9">1.5 MiB <tspan fill="#888">(1.08×)</tspan></text>
 <text x="114" y="578" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="570" width="160.4" height="10" fill="#0072b2"/>
-<text x="285.4" y="578.5" font-size="9">3.5 MiB <tspan fill="#888">(2.51×)</tspan></text>
+<rect x="120" y="570" width="159.9" height="10" fill="#0072b2"/>
+<text x="284.9" y="578.5" font-size="9">3.4 MiB <tspan fill="#888">(2.48×)</tspan></text>
 <text x="114" y="590" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
 <rect x="120" y="582" width="197.5" height="10" fill="#e69f00"/>
 <text x="322.5" y="590.5" font-size="9">7.9 MiB* <tspan fill="#888">(5.71×)</tspan></text>
