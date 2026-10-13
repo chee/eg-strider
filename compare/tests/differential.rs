@@ -85,6 +85,7 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
     let mut log = compare::convert(&dt);
     prop_assert_eq!(log.checkout(), expected.as_str(), "first checkout");
     prop_assert_eq!(log.checkout(), expected.as_str(), "second checkout");
+    prop_assert_eq!(compare::file::load(&compare::file::save(&dt)).checkout(), expected.as_str(), "loaded from a file");
 
     // Growing a little at a time and checking out at each step, so that regions are extended
     // and absorbed while the log holds what it resolved for their earlier shapes.

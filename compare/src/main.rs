@@ -178,6 +178,7 @@ fn main() {
     let mut all_match = true;
     let mut memory = Vec::new();
     let mut from_disks = Vec::new();
+    let mut loads = Vec::new();
     let mut loro = Vec::new();
     let mut others = Vec::new();
     let mut json = Vec::new();
@@ -185,7 +186,9 @@ fn main() {
         let name = path.rsplit('/').next().unwrap().trim_end_matches(".dt");
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let (dt, dt_log) = memory_of(|| ListOpLog::load_from(&bytes).unwrap());
-        let (mut log, strider_log) = memory_of(|| compare::convert(&dt));
+        // eg-strider's own file for the history, which everything it is measured on starts from.
+        let saved = compare::file::save(&dt);
+        let (mut log, strider_log) = memory_of(|| compare::file::load(&saved));
 
         let disk = bytes.len();
         let in_loro = in_loro(path, &dt, replay);
@@ -229,6 +232,18 @@ fn main() {
             snapshot_ms = snapshot_ms.min(t.elapsed().as_secs_f64() * 1e3);
             loro_same &= expected == imported && expected == merged && expected == loaded;
         }
+        // Loading alone, each from its own file.
+        let dt_load_ms = best_of(reps, || ListOpLog::load_from(&bytes).unwrap()).0;
+        let load_ms = best_of(reps, || compare::file::load(&saved)).0;
+        loads.push(format!(
+            "{name:6} {:>10} {:>10} {dt_load_ms:>7.2} ms {load_ms:>7.2} ms {:>7.2} ms {:>7.2} ms ({:>5.2}x)",
+            mb(disk),
+            mb(saved.len()),
+            dt_load_ms + dt_ms,
+            load_ms + first_ms,
+            (dt_load_ms + dt_ms) / (load_ms + first_ms)
+        ));
+
         // Memory. A closure's result counts as kept only if it is returned, so here the text
         // is measured and dropped.
         let (text_len, dt_checkout) = memory_of(|| dt.checkout_tip().content().to_string().len());
@@ -238,16 +253,19 @@ fn main() {
         drop(text);
         let (_, later_checkout) = memory_of(|| log.checkout().len());
         // As the paper measures it: from the history on disk to a document that is ready to
-        // merge again, with the history counted. eg-strider has no file format of its own,
-        // and its history is built from diamond-types' in memory, so its figures are its
-        // history at rest plus what merging adds to that.
+        // merge again, with the history counted.
         let dt_from_disk = memory_of(|| {
             let history = ListOpLog::load_from(&bytes).unwrap();
             let document = history.checkout_tip();
             (history, document)
         })
         .1;
-        let from_disk = Memory { peak: strider_log.kept + with_text.peak, kept: strider_log.kept + with_text.kept };
+        let from_disk = memory_of(|| {
+            let mut history = compare::file::load(&saved);
+            let document = history.checkout();
+            (history, document)
+        })
+        .1;
         from_disks.push(format!(
             "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10}",
             mb(disk),
@@ -291,7 +309,7 @@ fn main() {
         let bytes = |v: Option<usize>| v.map_or("null".to_string(), |v| v.to_string());
         let loro_ms = |v: f64| in_loro.as_ref().ok().map(|_| v);
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"held\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"load_ms\":{{\"strider_first\":{load_ms:.4},\"egwalker\":{dt_load_ms:.4}}},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"held\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
             dt.len(),
             ms(Some(first_ms)), ms(Some(later_ms)), ms(Some(dt_ms)), ms(loro_ms(import_ms)), ms(loro_ms(merge_ms)), ms(loro_ms(snapshot_ms)), ms(automerge.map(|m| m.0)), ms(yjs.map(|m| m.0)),
             from_disk.peak, dt_from_disk.peak,
@@ -309,6 +327,12 @@ fn main() {
             dt_ms / later_ms,
             if same { "identical" } else { "DIFFERENT" }
         );
+    }
+
+    println!("\nloading: each history's file, as diamond-types stores it and as `compare::file` does; the time each takes to load its own; and loading plus merging");
+    println!("{:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}", "trace", "dt file", "file", "dt load", "load", "dt total", "total");
+    for line in loads {
+        println!("{line}");
     }
 
     println!("\nmemory: the log at rest, the most in use during a checkout beyond the log, and what a checkout keeps for the next");

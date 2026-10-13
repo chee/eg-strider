@@ -1,6 +1,7 @@
 //! Glue between eg-strider and diamond-types, for testing one against the other, and
 //! between diamond-types and Loro, for measuring all three on the same histories.
 
+pub mod file;
 pub mod replicas;
 
 use diamond_types::list::operation::ListOpKind;
