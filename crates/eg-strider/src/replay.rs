@@ -193,15 +193,34 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     let mut order = doc.order.iter().rev().peekable();
     let mut places = doc.at.iter().rev().copied();
     let mut place = || places.next().expect("a place for every op of a region");
+    let mut trims: Vec<OpSlice> = Vec::new();
     for segment in plan.segments.iter().rev() {
         match segment {
             Segment::Linear(linear) => {
                 for op in plan.ops(log, linear).rev() {
+                    // A delete that takes back the end of the insert before it is met first.
+                    // The two together are a shorter insert, so it only has to be counted.
+                    if op.trims {
+                        trims.push(op);
+                        continue;
+                    }
+                    let cut = trims.iter().map(|trim| trim.len).sum::<u32>();
+                    let folds = cut > 0 && op.kind == OpKind::Ins && cut <= op.len && trims.last().is_some_and(|first| first.lv == op.lv + op.len);
+                    if cut > 0 && !folds {
+                        // Not enough of the insert is here: this stretch begins partway
+                        // through it.
+                        trims.drain(..).for_each(|trim| text.undo_remove(trim.pos, trim.len));
+                    }
                     match op.kind {
+                        OpKind::Ins if folds => {
+                            text.undo_insert(op.pos, bytes(log.trimmed(op.text, op.len, cut)), op.len - cut);
+                            trims.clear();
+                        }
                         OpKind::Ins => text.undo_insert(op.pos, bytes(op.text), op.len),
                         OpKind::Del => text.undo_remove(op.pos, op.len),
                     }
                 }
+                trims.drain(..).for_each(|trim| text.undo_remove(trim.pos, trim.len));
             }
             Segment::Region(region) => {
                 while let Some(stretch) = order.next_if(|stretch| stretch.start as usize >= region.start) {

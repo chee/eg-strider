@@ -10,4 +10,4 @@ mod replay;
 mod shift;
 mod tracker;
 
-pub use oplog::{AgentId, Malformed, OpLog, LV};
+pub use oplog::{AgentId, Edit, Malformed, OpLog, LV};

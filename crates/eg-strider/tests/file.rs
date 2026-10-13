@@ -1,4 +1,4 @@
-use eg_strider::{Malformed, OpLog};
+use eg_strider::{Edit, Malformed, OpLog};
 
 /// A history with branches that merge, a run of backspaces that a later event cuts in two,
 /// and text beyond ASCII.
@@ -12,6 +12,10 @@ fn history() -> OpLog {
     let merged = log.add_insert_at(a, &[left.end - 1, right], 0, "> ").end - 1;
     log.add_delete_at(b, &[merged], 0..1, true);
     log.add_insert(a, 0, "é");
+    // A run that arrives together, with a correction of what it has just typed.
+    let (c, tip) = (log.get_or_create_agent("c"), log.frontier());
+    let run = [Edit::Insert { pos: 1, len: 4 }, Edit::Delete { pos: 3, len: 2, backspace: true }, Edit::Insert { pos: 3, len: 1 }];
+    log.add_remote_ops(c, 0, &tip, &run, "tÿpos");
     log
 }
 

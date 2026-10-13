@@ -12,7 +12,7 @@
 use super::{AgentRun, Op, OpKind, OpLog};
 use strider_graph::{Graph, Parts};
 
-const MAGIC: &[u8] = b"eg-strider\x02";
+const MAGIC: &[u8] = b"eg-strider\x03";
 
 /// A file that is not a saved document, or is a damaged one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,15 +56,16 @@ impl OpLog {
         });
         column(&mut columns, |out| self.agent_runs.iter().for_each(|run| number(out, run.len as usize)));
 
-        // The ops: `len << 3 | wide << 2 | backspace << 1 | delete`, the position, and for a
-        // wide insert (one with characters longer than a byte) the length of its text in bytes.
+        // The ops: `len << 4 | trims << 3 | wide << 2 | backspace << 1 | delete`, the position,
+        // and for a wide insert (one with characters longer than a byte) the length of its
+        // text in bytes.
         let bytes = |op: &Op| (op.content.1 - op.content.0) as usize;
         let wide = |op: &Op| op.kind == OpKind::Ins && bytes(op) != op.len as usize;
         column(&mut columns, |out| {
             number(out, self.ops.len());
             for op in &self.ops {
-                let flags = usize::from(wide(op)) << 2 | usize::from(!op.fwd) << 1 | usize::from(op.kind == OpKind::Del);
-                number(out, (op.len as usize) << 3 | flags);
+                let flags = usize::from(op.trims) << 3 | usize::from(wide(op)) << 2 | usize::from(!op.fwd) << 1 | usize::from(op.kind == OpKind::Del);
+                number(out, (op.len as usize) << 4 | flags);
             }
         });
         column(&mut columns, |out| {
@@ -139,9 +140,14 @@ impl OpLog {
         let (mut lv, mut at, mut cursor) = (0u32, 0usize, 0u32);
         for _ in 0..ops {
             let head = heads.varint()?;
-            let len = u32::try_from(head >> 3).ok().filter(|&len| len > 0).ok_or(Malformed)?;
+            let len = u32::try_from(head >> 4).ok().filter(|&len| len > 0).ok_or(Malformed)?;
             let pos = u32::try_from(i64::from(cursor) + unzigzag(places.varint()?)).map_err(|_| Malformed)?;
             let (kind, fwd) = (if head & 1 == 1 { OpKind::Del } else { OpKind::Ins }, head & 2 == 0);
+            // Only a delete right after an insert, or after another such delete, can trim it.
+            let trims = head & 8 != 0;
+            if trims && (kind == OpKind::Ins || !log.ops.last().is_some_and(|before| before.kind == OpKind::Ins || before.trims)) {
+                return Err(Malformed);
+            }
             cursor = after(kind, pos, len);
             let bytes = match kind {
                 OpKind::Del => 0,
@@ -155,7 +161,7 @@ impl OpLog {
                 OpKind::Ins => return Err(Malformed),
                 OpKind::Del => log.totals.1 += len,
             }
-            log.ops.push(Op { lv, len, kind, fwd, pos, content: (at as u32, (at + bytes) as u32) });
+            log.ops.push(Op { lv, len, kind, fwd, trims, pos, content: (at as u32, (at + bytes) as u32) });
             at += bytes;
             lv = lv.checked_add(len).ok_or(Malformed)?;
         }

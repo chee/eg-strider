@@ -1,4 +1,4 @@
-use eg_strider::OpLog;
+use eg_strider::{Edit, OpLog};
 
 /// Two replicas rewrite different ends of a shared text at once. Nothing either does lands
 /// among what the other did, so the tracker is never needed.
@@ -116,4 +116,74 @@ fn an_event_made_partway_through_a_run_of_backspaces() {
     // After the first two backspaces the text was "abcd".
     log.add_insert_at(b, &[backspaces.start + 1], 3, "X"); // "abcXd"
     assert_eq!(log.checkout(), "abXY");
+}
+
+/// A run typed, corrected and typed again: "héllo" loses its end to two backspaces, and what is
+/// typed next is deleted whole. Returns the ops and the text they insert.
+fn corrected_typing() -> (Vec<Edit>, &'static str) {
+    let ops = vec![
+        Edit::Insert { pos: 0, len: 5 },
+        Edit::Delete { pos: 3, len: 2, backspace: true },
+        Edit::Delete { pos: 2, len: 1, backspace: true },
+        Edit::Insert { pos: 2, len: 3 },
+        Edit::Delete { pos: 2, len: 3, backspace: false },
+        Edit::Insert { pos: 0, len: 1 },
+        Edit::Delete { pos: 1, len: 1, backspace: false },
+    ];
+    (ops, "hélloy!🙂A")
+}
+
+/// Appends the same ops one call at a time, each following the one before.
+fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Edit], text: &str) {
+    let (mut seq, mut rest) = (0, text);
+    let mut parents = log.frontier();
+    for op in ops {
+        let events = match *op {
+            Edit::Insert { pos, len } => {
+                let bytes = rest.char_indices().nth(len as usize).map_or(rest.len(), |(at, _)| at);
+                let (inserted, after) = rest.split_at(bytes);
+                rest = after;
+                log.add_remote_insert(agent, seq, &parents, pos as usize, inserted)
+            }
+            Edit::Delete { pos, len, backspace } => log.add_remote_delete(agent, seq, &parents, pos as usize..(pos + len) as usize, !backspace),
+        };
+        seq += events.len();
+        parents = vec![events.end - 1];
+    }
+}
+
+#[test]
+fn ops_arriving_as_a_run_merge_as_they_do_one_at_a_time() {
+    let (ops, text) = corrected_typing();
+    let (mut together, mut apart) = (OpLog::new(), OpLog::new());
+    let (a, b) = (together.get_or_create_agent("a"), apart.get_or_create_agent("a"));
+    let events = together.add_remote_ops(a, 0, &[], &ops, text);
+    one_at_a_time(&mut apart, b, &ops, text);
+    assert_eq!(events, 0..apart.len());
+    assert_eq!(together.checkout(), "A\u{e9}");
+    assert_eq!(apart.checkout(), "A\u{e9}");
+
+    // An event made after only part of the first insert puts that insert in a concurrent
+    // part of the history, where its corrections are merged like any other deletes.
+    for log in [&mut together, &mut apart] {
+        let c = log.get_or_create_agent("c");
+        log.add_insert_at(c, &[2], 1, "<>");
+    }
+    assert_eq!(together.checkout(), apart.checkout());
+}
+
+#[test]
+fn a_run_that_follows_earlier_typing_is_merged_with_it() {
+    let (ops, text) = corrected_typing();
+    let (mut together, mut apart) = (OpLog::new(), OpLog::new());
+    for log in [&mut together, &mut apart] {
+        let a = log.get_or_create_agent("a");
+        log.add_insert(a, 0, "xyz");
+    }
+    let (a, tip) = (together.get_or_create_agent("b"), together.frontier());
+    together.add_remote_ops(a, 0, &tip, &ops, text);
+    let b = apart.get_or_create_agent("b");
+    one_at_a_time(&mut apart, b, &ops, text);
+    assert_eq!(together.checkout(), apart.checkout());
+    assert_eq!(together.checkout(), "A\u{e9}xyz");
 }

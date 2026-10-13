@@ -25,6 +25,16 @@ pub(crate) enum OpKind {
     Del,
 }
 
+/// One op of a run handed to [`OpLog::add_remote_ops`]. Positions and lengths count
+/// characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    /// Inserts the next `len` characters of the run's text at `pos`.
+    Insert { pos: u32, len: u32 },
+    /// Deletes the `len` characters at `pos`, the last of them first if `backspace`.
+    Delete { pos: u32, len: u32, backspace: bool },
+}
+
 /// A run of consecutive single-character events of one kind.
 struct Op {
     lv: u32,
@@ -32,6 +42,9 @@ struct Op {
     kind: OpKind,
     /// Deletes only: false for backspace, where the first event removes the last position.
     fwd: bool,
+    /// Deletes only: the op takes back the end of what the insert before it put in, or of
+    /// what earlier such deletes have left of it. Found when a run of ops arrives together.
+    trims: bool,
     /// The run touches document positions `pos..pos + len`, measured before its first
     /// event.
     pos: u32,
@@ -54,6 +67,8 @@ pub(crate) struct OpSlice {
     pub len: u32,
     pub kind: OpKind,
     pub fwd: bool,
+    /// Whether this is the whole of a delete that takes back the end of the insert before it.
+    pub trims: bool,
     /// Inserts go at `pos`; deletes remove `pos..pos + len`.
     pub pos: u32,
     /// Inserts only: where the text is in [`OpLog::content`], in bytes.
@@ -73,6 +88,14 @@ pub struct OpLog {
     parents: Vec<u32>,
     /// How many characters the inserts put in, and how many the deletes take out.
     totals: (u32, u32),
+}
+
+/// Returns how many bytes of `text` come before the first that is not ASCII.
+fn ascii_prefix(text: &[u8]) -> usize {
+    // Whole blocks are checked a word at a time; only the block that fails is searched.
+    let blocks = text.chunks(256).take_while(|block| block.is_ascii()).count();
+    let rest = &text[(blocks * 256).min(text.len())..];
+    text.len() - rest.len() + rest.iter().take_while(|byte| byte.is_ascii()).count()
 }
 
 impl OpLog {
@@ -161,6 +184,56 @@ impl OpLog {
         self.push(agent, Some(seq as u32), Some(parents), OpKind::Del, fwd, range.start, range.len(), "")
     }
 
+    /// Appends a run of ops by one agent, received from elsewhere: the first is made at
+    /// version `parents` and each of the others follows the one before. `text` holds what the
+    /// inserts put in, one after another.
+    pub fn add_remote_ops(&mut self, agent: AgentId, seq: usize, parents: &[LV], ops: &[Edit], text: &str) -> Range<LV> {
+        let parts = |edit: &Edit| match *edit {
+            Edit::Insert { pos, len } => (OpKind::Ins, true, pos, len),
+            Edit::Delete { pos, len, backspace } => (OpKind::Del, !backspace, pos, len),
+        };
+        let lv = self.graph.len();
+        let total = ops.iter().try_fold(0u32, |total, edit| total.checked_add(parts(edit).3)).expect("run too long");
+        if total == 0 {
+            return lv as LV..lv as LV;
+        }
+        let (mut follows, events) = self.link(Some(parents), total);
+        self.assign(agent, Some(seq as u32), lv, total);
+
+        let mut at = self.content.len() as u32;
+        self.content.push_str(text);
+        let end = u32::try_from(self.content.len()).expect("too much inserted text");
+        // Characters and bytes coincide in ASCII text. `plain` is where the text stops being
+        // ASCII: found again only once an insert reaches it, since such characters are few.
+        let ascii_until = |from: u32| from + ascii_prefix(&text.as_bytes()[(from - (end - text.len() as u32)) as usize..]) as u32;
+        let mut plain = ascii_until(at);
+        // The insert just before, if only deletes of its end have followed: where what is
+        // left of it ends, and how much is left.
+        let (mut next, mut open) = (lv, None::<(u32, u32)>);
+        for (kind, fwd, pos, len) in ops.iter().map(parts).filter(|&(.., len)| len > 0) {
+            let bytes = match kind {
+                OpKind::Del => 0,
+                OpKind::Ins if len <= plain.saturating_sub(at) => len,
+                OpKind::Ins => {
+                    let bytes = self.prefix((at, end), len);
+                    plain = ascii_until(at + bytes);
+                    bytes
+                }
+            };
+            assert!(bytes <= end - at, "text does not match the inserts");
+            let trims = kind == OpKind::Del && open.is_some_and(|(end, left)| pos + len == end && len <= left);
+            let whole = self.store(follows && !trims, Op { lv: next, len, kind, fwd, trims, pos, content: (at, at + bytes) });
+            open = match kind {
+                OpKind::Ins => Some((pos + len, whole)),
+                OpKind::Del if trims => open.map(|(end, left)| (end - len, left - len)),
+                OpKind::Del => None,
+            };
+            (at, next, follows) = (at + bytes, next + len, true);
+        }
+        assert_eq!(at, end, "text does not match the inserts");
+        events.start as LV..events.end as LV
+    }
+
     /// Appends a run of events of one kind, extending the last op when it simply carries on.
     #[allow(clippy::too_many_arguments)]
     fn push(&mut self, agent: AgentId, seq: Option<u32>, parents: Option<&[LV]>, kind: OpKind, fwd: bool, pos: usize, len: usize, text: &str) -> Range<LV> {
@@ -170,23 +243,38 @@ impl OpLog {
         }
         let len = u32::try_from(len).expect("run too long");
         let pos = u32::try_from(pos).expect("position too large");
-        // No parents given: the event is made at the current frontier. Most events simply
-        // follow the last one, whose number is then all the graph needs.
-        let continues = lv > 0 && parents.map_or(self.graph.frontier() == [lv - 1], |parents| parents == [(lv - 1) as LV]);
-        let events = if continues {
-            self.graph.push(&[lv - 1], len)
-        } else {
-            let mut at = std::mem::take(&mut self.parents);
-            at.clear();
-            match parents {
-                Some(parents) => at.extend(parents.iter().map(|&p| u32::try_from(p).expect("parent is not a known event"))),
-                None => at.extend_from_slice(self.graph.frontier()),
-            }
-            let events = self.graph.push(&at, len);
-            self.parents = at;
-            events
-        };
+        let (continues, events) = self.link(parents, len);
+        self.assign(agent, seq, lv, len);
+        let at = self.content.len() as u32;
+        self.content.push_str(text);
+        self.store(continues, Op { lv, len, kind, fwd, trims: false, pos, content: (at, self.content.len() as u32) });
+        events.start as LV..events.end as LV
+    }
 
+    /// Adds `len` events in a chain to the graph, the first at version `parents` or, without
+    /// any, at the current frontier. Returns whether they simply follow the last event, and
+    /// their numbers.
+    fn link(&mut self, parents: Option<&[LV]>, len: u32) -> (bool, Range<u32>) {
+        let lv = self.graph.len();
+        // Most events follow the last one, whose number is then all the graph needs.
+        let continues = lv > 0 && parents.map_or(self.graph.frontier() == [lv - 1], |parents| parents == [(lv - 1) as LV]);
+        if continues {
+            return (true, self.graph.push(&[lv - 1], len));
+        }
+        let mut at = std::mem::take(&mut self.parents);
+        at.clear();
+        match parents {
+            Some(parents) => at.extend(parents.iter().map(|&p| u32::try_from(p).expect("parent is not a known event"))),
+            None => at.extend_from_slice(self.graph.frontier()),
+        }
+        let events = self.graph.push(&at, len);
+        self.parents = at;
+        (false, events)
+    }
+
+    /// Records that `agent` made the `len` events from `lv`, numbering them from `seq` or,
+    /// without one, from where its last left off.
+    fn assign(&mut self, agent: AgentId, seq: Option<u32>, lv: u32, len: u32) {
         let seq = seq.unwrap_or(self.next_seq[agent as usize]);
         let next = &mut self.next_seq[agent as usize];
         *next = (*next).max(seq + len);
@@ -194,25 +282,51 @@ impl OpLog {
             Some(r) if r.agent == agent && r.lv + r.len == lv && r.seq + r.len == seq => r.len += len,
             _ => self.agent_runs.push(AgentRun { lv, len, agent, seq }),
         }
+    }
 
-        match kind {
-            OpKind::Ins => self.totals.0 += len,
-            OpKind::Del => self.totals.1 += len,
+    /// Stores an op, as part of the last op when it follows it and simply carries it on:
+    /// typing forwards, or holding the delete key. Returns the length of the op it is now in.
+    fn store(&mut self, follows: bool, op: Op) -> u32 {
+        match op.kind {
+            OpKind::Ins => self.totals.0 += op.len,
+            OpKind::Del => self.totals.1 += op.len,
         }
-        let at = self.content.len() as u32;
-        self.content.push_str(text);
-        let content = (at, self.content.len() as u32);
         match self.ops.last_mut() {
-            // Typing forwards, or holding the delete key: extend the previous run.
-            Some(o) if continues && o.kind == kind && o.fwd && fwd
-                && ((kind == OpKind::Ins && o.pos + o.len == pos) || (kind == OpKind::Del && o.pos == pos)) =>
+            Some(o) if follows && o.kind == op.kind && o.fwd && op.fwd && !o.trims
+                && ((op.kind == OpKind::Ins && o.pos + o.len == op.pos) || (op.kind == OpKind::Del && o.pos == op.pos)) =>
             {
-                o.len += len;
-                o.content.1 = content.1;
+                o.len += op.len;
+                o.content.1 = op.content.1;
+                o.len
             }
-            _ => self.ops.push(Op { lv, len, kind, fwd, pos, content }),
+            _ => {
+                let len = op.len;
+                self.ops.push(op);
+                len
+            }
         }
-        events.start as LV..events.end as LV
+    }
+
+    /// Finds how many bytes the first `len` characters of the inserted text at `content` take.
+    #[cold]
+    fn prefix(&self, content: (u32, u32), len: u32) -> u32 {
+        let text = self.text(content);
+        match text.char_indices().nth(len as usize) {
+            Some((bytes, _)) => bytes as u32,
+            None => {
+                assert_eq!(text.chars().count(), len as usize, "text does not match the inserts");
+                text.len() as u32
+            }
+        }
+    }
+
+    /// Returns the inserted text at `content` without its last `cut` characters: what a
+    /// delete that [trims](Op::trims) the insert leaves of it.
+    pub(crate) fn trimmed(&self, content: (u32, u32), len: u32, cut: u32) -> (u32, u32) {
+        if content.1 - content.0 == len {
+            return (content.0, content.1 - cut);
+        }
+        (content.0, content.0 + self.prefix(content, len - cut))
     }
 
     /// Finds which agent made event `lv`, and its sequence number there.
@@ -309,7 +423,7 @@ impl OpLog {
         let to = events.end.min(op.lv + op.len) - op.lv;
         // Nearly always the whole op, which needs no working out whatever its kind.
         if to - from == op.len {
-            return OpSlice { lv: op.lv, len: op.len, kind: op.kind, fwd: op.fwd, pos: op.pos, text: op.content };
+            return OpSlice { lv: op.lv, len: op.len, kind: op.kind, fwd: op.fwd, trims: op.trims, pos: op.pos, text: op.content };
         }
         let (pos, text) = match (op.kind, op.fwd) {
             (OpKind::Ins, _) => {
@@ -323,6 +437,6 @@ impl OpLog {
             (OpKind::Del, true) => (op.pos, (0, 0)),
             (OpKind::Del, false) => (op.pos + op.len - to, (0, 0)),
         };
-        OpSlice { lv: op.lv + from, len: to - from, kind: op.kind, fwd: op.fwd, pos, text }
+        OpSlice { lv: op.lv + from, len: to - from, kind: op.kind, fwd: op.fwd, trims: false, pos, text }
     }
 }
