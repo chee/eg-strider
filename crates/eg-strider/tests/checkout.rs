@@ -100,3 +100,20 @@ fn checking_out_again_and_after_growing_gives_the_same_document() {
     log.forget();
     assert_eq!(regrown, log.checkout());
 }
+
+/// A run of backspaces is one op, but each of its events removes one particular character.
+/// An event made after only the first two of them cuts the run in two, and to merge it the
+/// characters that the second half removed have to be put back.
+#[test]
+fn an_event_made_partway_through_a_run_of_backspaces() {
+    let mut log = OpLog::new();
+    let (a, b, c) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"), log.get_or_create_agent("c"));
+    let base = log.add_insert(a, 0, "abcdef").end - 1;
+    let backspaces = log.add_delete_at(a, &[base], 2..6, false); // "ab", removing f, e, d, c in turn
+    log.add_insert_at(c, &[base], 4, "Y"); // "abcdYef"
+    assert_eq!(log.checkout(), "abY");
+    assert_eq!(log.tracked_regions(), 1);
+    // After the first two backspaces the text was "abcd".
+    log.add_insert_at(b, &[backspaces.start + 1], 3, "X"); // "abcXd"
+    assert_eq!(log.checkout(), "abXY");
+}

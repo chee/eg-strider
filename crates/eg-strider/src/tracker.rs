@@ -2,9 +2,10 @@
 //! the region's inserted text as spans (the items of a sequence CRDT such as Yjs or Fugue,
 //! with left and right origins) in a B+ tree that measures them in two versions: the one an
 //! event was made in (prepare) and the merged document (effect). Merging an event means
-//! finding its position in the first and reading it off in the second. Flat arrays map each
+//! finding its position in the first and reading it off in the second. A flat array maps each
 //! event to its span or its delete target, for moving the prepare version.
 
+use crate::oplog::OpKind;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -63,10 +64,9 @@ pub(crate) struct Tracker {
     tree: PrepareEffectTree<NODE>,
     /// By tree entry id.
     spans: Vec<Span>,
-    /// Per region event: the span holding the character it inserted, or `NONE` for a delete.
-    ev_span: Vec<u32>,
-    /// Per region event: the item it deleted. Unused for inserts.
-    ev_target: Vec<u32>,
+    /// Per region event. For an insert, the span holding the character it inserted; for a
+    /// delete, the item it deleted.
+    by_event: Vec<u32>,
     /// Underwater spans by starting position.
     underwater: BTreeMap<u32, u32>,
     /// Per span: the `scan_stamp` of the last `integrate` scan that passed over it.
@@ -79,8 +79,7 @@ impl Default for Tracker {
         Tracker {
             tree: PrepareEffectTree::new(Widths::default()),
             spans: Vec::new(),
-            ev_span: Vec::new(),
-            ev_target: Vec::new(),
+            by_event: Vec::new(),
             underwater: BTreeMap::new(),
             scanned: Vec::new(),
             scan_stamp: 0,
@@ -107,10 +106,8 @@ impl Tracker {
         self.underwater.insert(0, 0);
         self.scanned.clear();
         self.scan_stamp = 0;
-        self.ev_span.clear();
-        self.ev_span.resize(events, NONE);
-        self.ev_target.clear();
-        self.ev_target.resize(events, NONE);
+        self.by_event.clear();
+        self.by_event.resize(events, NONE);
     }
 
     // ---------------------------------------------------------------- finding things
@@ -125,7 +122,7 @@ impl Tracker {
         let span = if item & UNDERWATER != 0 {
             *self.underwater.range(..=item & !UNDERWATER).next_back().expect("no underwater span").1
         } else {
-            self.ev_span[item as usize]
+            self.by_event[item as usize]
         };
         (span, item - self.spans[span as usize].item)
     }
@@ -172,15 +169,15 @@ impl Tracker {
 
     // ---------------------------------------------------------------- splitting spans
 
-    /// Splits a span after its first `at` characters. Returns the left and right parts; one
-    /// of them is the span that was passed in.
-    fn split(&mut self, span: u32, at: u32) -> (u32, u32) {
+    /// Splits the span at `at` after its first `off` characters. Returns where the left and
+    /// right parts are; one of them keeps the span's id.
+    fn split(&mut self, at: Cursor, off: u32) -> [Cursor; 2] {
+        let span = self.tree.id(at);
         let whole = self.spans[span as usize];
-        debug_assert!(at > 0 && at < whole.len);
-        let left = Span { len: at, ..whole };
-        let right = Span { item: whole.item + at, len: whole.len - at, origin_left: whole.item + at - 1, ..whole };
+        debug_assert!(off > 0 && off < whole.len);
+        let left = Span { len: off, ..whole };
+        let right = Span { item: whole.item + off, len: whole.len - off, origin_left: whole.item + off - 1, ..whole };
         let new = self.spans.len() as u32;
-        let cursor = self.tree.cursor(span);
         let events = |s: &Span| s.item as usize..(s.item + s.len) as usize;
 
         // Every event in the part that takes the new id has to be re-pointed, so give the
@@ -192,29 +189,27 @@ impl Tracker {
             if underwater {
                 self.underwater.insert(right.item & !UNDERWATER, new);
             } else {
-                self.ev_span[events(&right)].fill(new);
+                self.by_event[events(&right)].fill(new);
             }
-            self.tree.split_entry(cursor, right.widths(), false);
-            (span, new)
+            self.tree.split_entry(at, right.widths(), false).1
         } else {
             self.spans[span as usize] = right;
             self.spans.push(left);
-            self.ev_span[events(&left)].fill(new);
-            self.tree.split_entry(cursor, left.widths(), true);
-            (new, span)
+            self.by_event[events(&left)].fill(new);
+            self.tree.split_entry(at, left.widths(), true).1
         }
     }
 
-    /// Returns a span covering exactly `len` characters of `span` starting `off` in,
-    /// splitting it out if `span` is longer.
-    fn isolate(&mut self, mut span: u32, off: u32, len: u32) -> u32 {
+    /// Splits the span at `at` as needed for one span to cover exactly `len` of its
+    /// characters, starting `off` in. Returns where that span is.
+    fn isolate(&mut self, mut at: Cursor, off: u32, len: u32) -> Cursor {
         if off > 0 {
-            span = self.split(span, off).1;
+            at = self.split(at, off)[1];
         }
-        if len < self.spans[span as usize].len {
-            span = self.split(span, len).0;
+        if len < self.span(at).len {
+            at = self.split(at, len)[0];
         }
-        span
+        at
     }
 
     // ---------------------------------------------------------------- inserting
@@ -340,7 +335,7 @@ impl Tracker {
             if follows && prev.origin_right == origin_right && prev.state == INSERTED && !prev.ever_deleted {
                 prev.len += len;
                 let (widths, old_len) = (prev.widths(), prev.len - len);
-                self.ev_span[lv as usize..(lv + len) as usize].fill(id);
+                self.by_event[lv as usize..(lv + len) as usize].fill(id);
                 return self.tree.update(at, widths) + old_len;
             }
         }
@@ -348,46 +343,54 @@ impl Tracker {
         let before = match place {
             Place::End => None,
             Place::In(at, 0) => Some(at),
-            Place::In(at, off) => {
-                let right = self.split(self.tree.id(at), off).1;
-                Some(self.tree.cursor(right))
-            }
+            Place::In(at, off) => Some(self.split(at, off)[1]),
         };
         let span = Span { item: lv, len, origin_left, origin_right, state: INSERTED, ever_deleted: false };
         let (id, rank) = self.tree.insert(before, span.widths());
         debug_assert_eq!(id as usize, self.spans.len());
         self.spans.push(span);
-        self.ev_span[lv as usize..(lv + len) as usize].fill(id);
+        self.by_event[lv as usize..(lv + len) as usize].fill(id);
         rank
     }
 
     /// Returns the left and right origins of the character inserted by region event `lv`.
     pub fn origins(&self, lv: u32) -> [u32; 2] {
-        let span = &self.spans[self.ev_span[lv as usize] as usize];
+        let span = &self.spans[self.by_event[lv as usize] as usize];
         [if lv == span.item { span.origin_left } else { lv - 1 }, span.origin_right]
     }
 
     // ---------------------------------------------------------------- deleting
 
-    /// Merges as much as it can of a delete of `len` characters made by region events
-    /// starting at `lv`: the prepare-version range `pos..pos + len`, removed first-to-last
-    /// (`fwd`) or last-to-first.
-    pub fn delete(&mut self, lv: u32, pos: u32, len: u32, fwd: bool) -> (u32, Option<u32>) {
-        let (span, off, n) = if fwd {
-            let (at, off) = self.tree.char_idx_to_entry(View::Prepare, pos);
-            (self.tree.id(at), off, len.min(self.span(at).len - off))
-        } else {
-            let (at, off) = self.tree.char_idx_to_entry(View::Prepare, pos + len - 1);
-            let n = len.min(off + 1);
-            (self.tree.id(at), off + 1 - n, n)
-        };
-        let target = self.isolate(span, off, n);
-        debug_assert_eq!(self.spans[target as usize].state, INSERTED);
-        let item = self.spans[target as usize].item;
-        for i in 0..n {
-            self.ev_target[(lv + i) as usize] = if fwd { item + i } else { item + n - 1 - i };
+    /// Merges a delete made by region events `lv..lv + len`: of the prepare-version range
+    /// `pos..pos + len`, removed first-to-last (`fwd`) or last-to-first. Calls `removed` with
+    /// the effect-version index and length of each run of characters that was still there.
+    pub fn delete(&mut self, lv: u32, pos: u32, len: u32, fwd: bool, mut removed: impl FnMut(u32, u32)) {
+        let (mut at, mut off) = self.tree.char_idx_to_entry(View::Prepare, pos);
+        let mut done = 0;
+        loop {
+            // The span holds characters `done..done + n` of the range.
+            let n = (len - done).min(self.span(at).len - off);
+            at = self.isolate(at, off, n);
+            debug_assert_eq!(self.span(at).state, INSERTED);
+            let item = self.span(at).item;
+            for i in 0..n {
+                let event = if fwd { lv + done + i } else { lv + len - 1 - done - i };
+                self.by_event[event as usize] = item + i;
+            }
+            if let Some(index) = self.mark_deleted(at) {
+                removed(index, n);
+            }
+            done += n;
+            if done == len {
+                return;
+            }
+            // The range runs on into the next span that is in the prepare version.
+            at = self.tree.next(at).expect("a delete stays inside the document");
+            while self.span(at).state != INSERTED {
+                at = self.tree.next(at).expect("a delete stays inside the document");
+            }
+            off = 0;
         }
-        (n, self.mark_deleted(target))
     }
 
     /// Merges deletes whose targets are already known by id: region event `lv + i` deletes
@@ -396,7 +399,7 @@ impl Tracker {
     pub fn delete_by_id(&mut self, lv: u32, targets: impl ExactSizeIterator<Item = u32>, mut removed: impl FnMut(u32, u32)) {
         let end = lv + targets.len() as u32;
         for (i, target) in targets.enumerate() {
-            self.ev_target[lv as usize + i] = target;
+            self.by_event[lv as usize + i] = target;
         }
         let mut lv = lv;
         while lv < end {
@@ -405,9 +408,9 @@ impl Tracker {
             while item < stop {
                 let (span, off) = self.locate(item);
                 let n = (stop - item).min(self.spans[span as usize].len - off);
-                let piece = self.isolate(span, off, n);
-                if let Some(at) = self.mark_deleted(piece) {
-                    removed(at, n);
+                let at = self.isolate(self.tree.cursor(span), off, n);
+                if let Some(index) = self.mark_deleted(at) {
+                    removed(index, n);
                 }
                 item += n;
             }
@@ -415,15 +418,14 @@ impl Tracker {
         }
     }
 
-    /// Counts one more delete against a span. Returns its index in the effect version if
-    /// this is the first.
-    fn mark_deleted(&mut self, id: u32) -> Option<u32> {
-        let span = &mut self.spans[id as usize];
+    /// Counts one more delete against the span at `at`. Returns its index in the effect
+    /// version if this is the first.
+    fn mark_deleted(&mut self, at: Cursor) -> Option<u32> {
+        let span = &mut self.spans[self.tree.id(at) as usize];
         let (first, before) = (!span.ever_deleted, span.widths());
         span.state += 1;
         span.ever_deleted = true;
         let widths = span.widths();
-        let at = self.tree.cursor(id);
         if first {
             Some(self.tree.update(at, widths))
         } else {
@@ -436,19 +438,16 @@ impl Tracker {
 
     /// Returns the item deleted by region event `lv`.
     pub fn target(&self, lv: u32) -> u32 {
-        self.ev_target[lv as usize]
+        self.by_event[lv as usize]
     }
 
-    /// Finds the longest stretch of delete events from `lv` (stopping before `end`) whose targets
-    /// are consecutive items, forwards or backwards.
+    /// Finds the longest stretch of the delete events `lv..end` that starts at `lv` and whose
+    /// targets are consecutive items, forwards or backwards.
     fn target_run(&self, lv: u32, end: u32) -> (u32, u32) {
-        let first = self.ev_target[lv as usize];
+        let first = self.by_event[lv as usize];
         let run = |step: u32| {
             let mut n = 1;
-            while lv + n < end
-                && self.ev_span[(lv + n) as usize] == NONE
-                && self.ev_target[(lv + n) as usize] == first.wrapping_add(step.wrapping_mul(n))
-            {
+            while lv + n < end && self.by_event[(lv + n) as usize] == first.wrapping_add(step.wrapping_mul(n)) {
                 n += 1;
             }
             n
@@ -463,51 +462,54 @@ impl Tracker {
 
     // ---------------------------------------------------------------- moving the prepare version
 
-    /// Takes region events out of the prepare version.
-    pub fn retreat(&mut self, events: Range<u32>) {
-        self.shift(events, 1u32.wrapping_neg());
+    /// Takes region events, all inserts or all deletes, out of the prepare version.
+    pub fn retreat(&mut self, kind: OpKind, events: Range<u32>) {
+        self.shift(kind, events, 1u32.wrapping_neg());
     }
 
-    /// Puts region events back into the prepare version.
-    pub fn advance(&mut self, events: Range<u32>) {
-        self.shift(events, 1);
+    /// Puts region events, all inserts or all deletes, back into the prepare version.
+    pub fn advance(&mut self, kind: OpKind, events: Range<u32>) {
+        self.shift(kind, events, 1);
     }
 
     /// Moves region events into or out of the prepare version, span by span.
-    fn shift(&mut self, events: Range<u32>, delta: u32) {
+    fn shift(&mut self, kind: OpKind, events: Range<u32>, delta: u32) {
         let mut lv = events.start;
         while lv < events.end {
-            let id = self.ev_span[lv as usize];
-            if id != NONE {
-                // Inserts: every span, or part of one, that these events created.
-                let span = &self.spans[id as usize];
-                let (off, end) = (lv - span.item, events.end.min(span.item + span.len));
-                let piece = self.isolate(id, off, end - lv);
-                self.shift_span(piece, delta);
-                lv = end;
-            } else {
-                let (n, mut item) = self.target_run(lv, events.end);
-                let stop = item + n;
-                while item < stop {
-                    let (span, off) = self.locate(item);
-                    let len = (stop - item).min(self.spans[span as usize].len - off);
-                    let piece = self.isolate(span, off, len);
-                    self.shift_span(piece, delta);
-                    item += len;
+            match kind {
+                // Every span, or part of one, that these events created.
+                OpKind::Ins => {
+                    let id = self.by_event[lv as usize];
+                    let span = &self.spans[id as usize];
+                    let (off, end) = (lv - span.item, events.end.min(span.item + span.len));
+                    let at = self.isolate(self.tree.cursor(id), off, end - lv);
+                    self.shift_span(at, delta);
+                    lv = end;
                 }
-                lv += n;
+                OpKind::Del => {
+                    let (n, mut item) = self.target_run(lv, events.end);
+                    let stop = item + n;
+                    while item < stop {
+                        let (span, off) = self.locate(item);
+                        let len = (stop - item).min(self.spans[span as usize].len - off);
+                        let at = self.isolate(self.tree.cursor(span), off, len);
+                        self.shift_span(at, delta);
+                        item += len;
+                    }
+                    lv += n;
+                }
             }
         }
     }
 
-    /// Changes one span's state by `delta` and fixes its widths in the tree.
-    fn shift_span(&mut self, id: u32, delta: u32) {
-        let span = &mut self.spans[id as usize];
+    /// Changes the state of the span at `at` by `delta` and fixes its widths in the tree.
+    fn shift_span(&mut self, at: Cursor, delta: u32) {
+        let span = &mut self.spans[self.tree.id(at) as usize];
         let before = span.widths();
         span.state = span.state.wrapping_add(delta);
         let widths = span.widths();
         if widths != before {
-            self.tree.set_widths(self.tree.cursor(id), widths);
+            self.tree.set_widths(at, widths);
         }
     }
 }

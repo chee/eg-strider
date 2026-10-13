@@ -47,10 +47,11 @@ unsafe impl GlobalAlloc for Counting {
 }
 
 /// What running something did to the memory in use, in bytes.
+#[derive(Clone, Copy)]
 struct Memory {
     /// The most in use at any moment, beyond what was in use at the start.
     peak: usize,
-    /// How much more is in use afterwards, once the result is dropped.
+    /// How much more is in use afterwards, while the result is held.
     kept: usize,
 }
 
@@ -98,23 +99,38 @@ fn replayed<R: compare::replicas::Replica>(path: &str, kind: &str, dt: &ListOpLo
     Ok((replayed.saved, notes))
 }
 
-/// Loads an Automerge document saved as `bytes` and returns its text.
-fn automerge_load(bytes: &[u8]) -> String {
+/// Loads an Automerge document saved as `bytes` and returns it with its text.
+fn automerge_load(bytes: &[u8]) -> (automerge::AutoCommit, String) {
     use automerge::ReadDoc;
     let doc = automerge::AutoCommit::load(bytes).unwrap();
     let (_, text) = doc.get(automerge::ROOT, "text").unwrap().unwrap();
-    doc.text(&text).unwrap()
+    let string = doc.text(&text).unwrap();
+    (doc, string)
 }
 
-/// Applies a history to a new Yjs document (its Rust port, yrs) and returns its text.
-fn yjs_load(bytes: &[u8]) -> String {
+/// Applies a history to a new Yjs document (its Rust port, yrs) and returns it with its text.
+fn yjs_load(bytes: &[u8]) -> (yrs::Doc, String) {
     use yrs::updates::decoder::Decode;
     use yrs::{GetString, Transact};
     let doc = yrs::Doc::new();
     let text = doc.get_or_insert_text("text");
     doc.transact_mut().apply_update(yrs::Update::decode_v2(bytes).unwrap());
     let string = text.get_string(&doc.transact());
-    string
+    (doc, string)
+}
+
+/// Loads a history into another library: the time and memory it takes, and a line saying so.
+/// The memory kept is the document the library is left holding.
+fn measure<D>(replayed: Result<(Vec<u8>, String), &'static str>, load: fn(&[u8]) -> (D, String), reps: u32, expected: &str) -> (Option<(f64, Memory)>, String) {
+    match replayed {
+        Ok((bytes, notes)) => {
+            let memory = memory_of(|| load(&bytes).0).1;
+            let (ms, text) = best_of(reps, || load(&bytes).1);
+            let same = if text == expected { "same text" } else { "different text" };
+            (Some((ms, memory)), format!("{notes} {ms:>10.2} ms {:>12} {:>12} {same:>15}", mb(memory.peak), mb(memory.kept)))
+        }
+        Err(why) => (None, format!("{why:>68}")),
+    }
 }
 
 /// Returns the best time in milliseconds of up to `reps` runs, fewer once they have taken three
@@ -132,11 +148,12 @@ fn best_of<T>(reps: u32, mut f: impl FnMut() -> T) -> (f64, T) {
     }
 }
 
-/// Imports `bytes` into a new Loro document and returns its text.
-fn loro_import(bytes: &[u8]) -> String {
+/// Imports `bytes` into a new Loro document and returns it with its text.
+fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
     let doc = LoroDoc::new();
     doc.import(bytes).unwrap();
-    doc.get_text(TEXT).to_string()
+    let string = doc.get_text(TEXT).to_string();
+    (doc, string)
 }
 
 /// Formats a byte count in megabytes.
@@ -172,11 +189,16 @@ fn main() {
         // Memory first, while nothing is warm. Each closure's result is dropped inside
         // `kept`'s accounting only if it is returned, so the text is measured and dropped.
         let (text_len, dt_checkout) = memory_of(|| dt.checkout_tip().content().to_string().len());
-        let (_, first_checkout) = memory_of(|| log.checkout().len());
+        // What each is left holding once merged: its document, and for eg-strider what the
+        // checkout keeps for the next one too.
+        let dt_document = memory_of(|| dt.checkout_tip()).1.kept;
+        let (text, with_text) = memory_of(|| log.checkout());
+        let first_checkout = Memory { peak: with_text.peak, kept: with_text.kept - text.capacity() };
+        drop(text);
         let (_, later_checkout) = memory_of(|| log.checkout().len());
         let in_loro = in_loro(path, &dt, replay);
         let loro_memory = in_loro.as_ref().ok().map(|(updates, snapshot, _)| {
-            (memory_of(|| loro_import(updates).len()).1.peak, memory_of(|| loro_import(snapshot).len()).1.peak)
+            (memory_of(|| loro_import(updates).0).1, memory_of(|| loro_import(snapshot).0).1.peak)
         });
         memory.push(format!(
             "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
@@ -209,7 +231,7 @@ fn main() {
 
             let Ok((updates, snapshot, _)) = &in_loro else { continue };
             let t = Instant::now();
-            let imported = loro_import(updates);
+            let imported = loro_import(updates).1;
             import_ms = import_ms.min(t.elapsed().as_secs_f64() * 1e3);
 
             // A checkout: the updates are taken in while the document is detached, which
@@ -223,14 +245,15 @@ fn main() {
             merge_ms = merge_ms.min(t.elapsed().as_secs_f64() * 1e3);
 
             let t = Instant::now();
-            let loaded = loro_import(snapshot);
+            let loaded = loro_import(snapshot).1;
             snapshot_ms = snapshot_ms.min(t.elapsed().as_secs_f64() * 1e3);
             loro_same &= expected == imported && expected == merged && expected == loaded;
         }
         loro.push(match (&in_loro, loro_memory) {
             (Ok((_, _, notes)), Some((updates, snapshot))) => format!(
-                "{name:6} {notes} {import_ms:>10.2} ms {merge_ms:>10.2} ms {snapshot_ms:>10.2} ms {:>12} {:>12}  {}",
-                mb(updates),
+                "{name:6} {notes} {import_ms:>10.2} ms {merge_ms:>10.2} ms {snapshot_ms:>10.2} ms {:>12} {:>12} {:>12}  {}",
+                mb(updates.peak),
+                mb(updates.kept),
                 mb(snapshot),
                 if loro_same { "same text" } else { "different text" },
             ),
@@ -240,28 +263,21 @@ fn main() {
 
         // Automerge and Yjs, on the same histories replayed into each.
         let expected = dt.checkout_tip().content().to_string();
-        let measure = |replayed: Result<(Vec<u8>, String), &'static str>, load: fn(&[u8]) -> String| match replayed {
-            Ok((bytes, notes)) => {
-                let peak = memory_of(|| load(&bytes).len()).1.peak;
-                let (ms, text) = best_of(reps, || load(&bytes));
-                let same = if text == expected { "same text" } else { "different text" };
-                (Some((ms, peak)), format!("{notes} {ms:>10.2} ms {:>12} {same:>15}", mb(peak)))
-            }
-            Err(why) => (None, format!("{why:>55}")),
-        };
-        let (automerge, automerge_row) = measure(replayed::<compare::replicas::Automerge>(path, "automerge", &dt, replay), automerge_load);
-        let (yjs, yjs_row) = measure(replayed::<compare::replicas::Yjs>(path, "yrs", &dt, replay), yjs_load);
+        let (automerge, automerge_row) = measure(replayed::<compare::replicas::Automerge>(path, "automerge", &dt, replay), automerge_load, reps, &expected);
+        let (yjs, yjs_row) = measure(replayed::<compare::replicas::Yjs>(path, "yrs", &dt, replay), yjs_load, reps, &expected);
         others.push(format!("{name:6} {automerge_row}   {yjs_row}"));
 
         let ms = |v: Option<f64>| v.map_or("null".to_string(), |v| format!("{v:.4}"));
         let bytes = |v: Option<usize>| v.map_or("null".to_string(), |v| v.to_string());
         let loro_ms = |v: f64| in_loro.as_ref().ok().map(|_| v);
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"bytes\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"bytes\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"kept\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}}}}",
             dt.len(),
             ms(Some(first_ms)), ms(Some(later_ms)), ms(Some(dt_ms)), ms(loro_ms(import_ms)), ms(loro_ms(merge_ms)), ms(loro_ms(snapshot_ms)), ms(automerge.map(|m| m.0)), ms(yjs.map(|m| m.0)),
             first_checkout.peak, later_checkout.peak, first_checkout.kept, dt_checkout.peak,
-            bytes(loro_memory.map(|m| m.0)), bytes(loro_memory.map(|m| m.1)), bytes(automerge.map(|m| m.1)), bytes(yjs.map(|m| m.1)),
+            bytes(loro_memory.map(|m| m.0.peak)), bytes(loro_memory.map(|m| m.1)), bytes(automerge.map(|m| m.1.peak)), bytes(yjs.map(|m| m.1.peak)),
+            with_text.kept, dt_document,
+            bytes(loro_memory.map(|m| m.0.kept)), bytes(automerge.map(|m| m.1.kept)), bytes(yjs.map(|m| m.1.kept)),
         ));
 
         all_match &= same;
@@ -280,12 +296,12 @@ fn main() {
         println!("{line}");
     }
 
-    println!("\nLoro on the same histories: time to import its updates, to check out from its log, and to import a snapshot; then the most memory in use while importing each");
-    println!("{:6} {:>6} {:>6} {:>13} {:>13} {:>13} {:>12} {:>12}", "trace", "peers", "moved", "updates", "checkout", "snapshot", "updates", "snapshot");
+    println!("\nLoro on the same histories: time to import its updates, to check out from its log, and to import a snapshot; then the most memory in use while importing its updates, what the document then holds, and the most in use while importing a snapshot");
+    println!("{:6} {:>6} {:>6} {:>13} {:>13} {:>13} {:>12} {:>12} {:>12}", "trace", "peers", "moved", "updates", "checkout", "snapshot", "updates", "document", "snapshot");
     for line in loro {
         println!("{line}");
     }
-    println!("\nAutomerge, then Yjs (yrs), on the same histories: peers, edits moved, time to load, most memory in use, and whether the text is the same");
+    println!("\nAutomerge, then Yjs (yrs), on the same histories: peers, edits moved, time to load, most memory in use, what the document then holds, and whether the text is the same");
     for line in others {
         println!("{line}");
     }

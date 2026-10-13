@@ -399,13 +399,15 @@ impl<const N: usize> PrepareEffectTree<N> {
     }
 
     /// Splits an entry in two: a new entry takes `widths` out of the entry at `at`, and
-    /// sits just before it if `before`, otherwise just after.
-    pub fn split_entry(&mut self, at: Cursor, widths: Widths, before: bool) -> Id {
+    /// sits just before it if `before`, otherwise just after. Returns the new entry's id
+    /// and where the two now are, in sequence order.
+    pub fn split_entry(&mut self, at: Cursor, widths: Widths, before: bool) -> (Id, [Cursor; 2]) {
         let at = self.make_room(at);
         let slot = &mut self.leaves[at.leaf as usize].slots[at.slot as usize];
         slot.set_widths(slot.widths().minus(widths));
         // The leaf's total is unchanged, so no ancestor needs updating.
-        self.write_slot(Cursor { leaf: at.leaf, slot: at.slot + !before as u32 }, widths)
+        let second = Cursor { leaf: at.leaf, slot: at.slot + 1 };
+        (self.write_slot(if before { at } else { second }, widths), [at, second])
     }
 
     /// Writes a new entry into the slot at `at`, shifting later ones along. The leaf must

@@ -6,7 +6,7 @@
 //! tracker. A block is stable once every later block has seen it (causal stability).
 
 use crate::oplog::{OpKind, OpLog};
-use crate::replay::Edits;
+use crate::replay::Placed;
 use std::ops::Range;
 use strider_graph::Blocks;
 
@@ -215,9 +215,9 @@ pub(crate) struct Shifter {
 }
 
 impl Shifter {
-    /// Merges a region by shifting, adding the edits it comes to to `doc`. Returns false,
-    /// with `doc` as it was, if the region needs the tracker.
-    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[u32], region: &Range<usize>, doc: &mut Edits) -> bool {
+    /// Merges a region by shifting, recording in `doc` where its ops go. Returns false, with
+    /// `doc` as it was, if the region needs the tracker.
+    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[u32], region: &Range<usize>, doc: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;
         }
@@ -228,14 +228,18 @@ impl Shifter {
         let mark = doc.mark();
         for (i, block) in (region.start..region.end).enumerate() {
             let viewer = Viewer { block: i as u32, seen: &seen[i * words..][..words], stable: &stable[i * words..][..words] };
-            for op in log.ops(first_op[block], blocks.events(block)) {
+            doc.begin(block..block + 1);
+            for op in log.ops(first_op[block]..first_op[block + 1], blocks.events(block)) {
                 let at = match op.kind {
                     OpKind::Ins => clusters.insert(&viewer, op.pos as i64, op.len as i64),
                     OpKind::Del => clusters.remove(&viewer, op.pos as i64, op.len as i64),
                 };
                 match (at, op.kind) {
-                    (Some(at), OpKind::Ins) => doc.insert(at as u32, op.text, op.len),
-                    (Some(at), OpKind::Del) => doc.remove(at as u32, op.len),
+                    (Some(at), OpKind::Ins) => doc.insert(at as u32, op.len),
+                    (Some(at), OpKind::Del) => {
+                        doc.remove(at as u32, op.len);
+                        doc.end_delete();
+                    }
                     (None, _) => {
                         doc.undo_to(mark);
                         return false;

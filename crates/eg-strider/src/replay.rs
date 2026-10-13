@@ -2,8 +2,8 @@
 //! versions. A stretch with no concurrency is applied as recorded. A region is first tried by
 //! offset arithmetic ([`shift`](crate::shift)) and otherwise walked with the tracker; what
 //! the tracker resolves is memoised at the region's critical version, since it never changes,
-//! so later replays place those events directly. The resulting edits are then taken back
-//! from last to first to assemble the text.
+//! so later replays place those events directly. Merging only works out where each op of a
+//! region goes; the edits are then taken back from last to first to assemble the text.
 
 use crate::oplog::{OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
@@ -12,43 +12,56 @@ use std::ops::Range;
 use strider_graph::{Move, Segment, Walker};
 use strider_text::Rewind;
 
-/// The edits that merged regions come to, in the order they are made.
+/// Where merging put each op of the regions. The rest of each edit is the op itself, in the
+/// log.
 #[derive(Default)]
-pub(crate) struct Edits {
-    made: Vec<Edit>,
+pub(crate) struct Placed {
+    /// The stretches of blocks, in the order they were merged. The ops of a stretch are taken
+    /// together, so one that runs on from a block into the next is a single op.
+    order: Vec<Range<u32>>,
+    /// For each op of those stretches in turn. An insert: the index it went in at. A delete:
+    /// the index and length of each run of characters it removed, then how many runs.
+    at: Vec<u32>,
+    /// How many runs the delete being recorded has removed so far.
+    runs: u32,
     /// Length of the document so far.
     len: u32,
 }
 
-struct Edit {
-    pos: u32,
-    len: u32,
-    /// Where the inserted text is in the log; empty for a removal.
-    text: (u32, u32),
-}
-
-impl Edits {
-    /// Records an insert of `len` characters at `pos`.
-    pub(crate) fn insert(&mut self, pos: u32, text: (u32, u32), len: u32) {
-        self.len += len;
-        self.made.push(Edit { pos, len, text });
+impl Placed {
+    /// Starts on the ops of a stretch of blocks.
+    pub(crate) fn begin(&mut self, stretch: Range<usize>) {
+        self.order.push(stretch.start as u32..stretch.end as u32);
     }
 
-    /// Records a removal of `len` characters at `pos`.
+    /// Records that an insert of `len` characters went in at `pos`.
+    pub(crate) fn insert(&mut self, pos: u32, len: u32) {
+        self.len += len;
+        self.at.push(pos);
+    }
+
+    /// Records that the delete being merged removed the `len` characters at `pos`.
     pub(crate) fn remove(&mut self, pos: u32, len: u32) {
         self.len -= len;
-        self.made.push(Edit { pos, len, text: (0, 0) });
+        self.at.extend([pos, len]);
+        self.runs += 1;
+    }
+
+    /// Ends a delete, once everything it removed is recorded.
+    pub(crate) fn end_delete(&mut self) {
+        self.at.push(std::mem::take(&mut self.runs));
     }
 
     /// Notes where things stand, to come back to with [`undo_to`](Self::undo_to).
-    pub(crate) fn mark(&self) -> (usize, u32) {
-        (self.made.len(), self.len)
+    pub(crate) fn mark(&self) -> (usize, usize, u32) {
+        (self.order.len(), self.at.len(), self.len)
     }
 
-    /// Forgets the edits made since `mark`.
-    pub(crate) fn undo_to(&mut self, mark: (usize, u32)) {
-        self.made.truncate(mark.0);
-        self.len = mark.1;
+    /// Forgets what was recorded since `mark`.
+    pub(crate) fn undo_to(&mut self, mark: (usize, usize, u32)) {
+        self.order.truncate(mark.0);
+        self.at.truncate(mark.1);
+        self.len = mark.2;
     }
 }
 
@@ -66,15 +79,21 @@ struct Kept {
 
 const DESCENDING: u32 = 1 << 31;
 
-/// What a log has worked out in earlier replays, and the working room they used.
+/// What a log has worked out in earlier replays.
 #[derive(Default)]
 pub(crate) struct Memo {
     plan: Option<Plan>,
+    /// How many stretches and places the regions came to last time: room to set aside for
+    /// them next time.
+    room: (usize, usize),
+}
+
+/// Working room for merging regions, reused from one region to the next.
+#[derive(Default)]
+struct Workspace {
     tracker: Tracker,
     walker: Walker,
     shifter: Shifter,
-    /// How many edits the regions came to last time: room to set aside for them next time.
-    region_edits: usize,
 }
 
 /// The shape of the history, valid while the log has the same number of events.
@@ -83,7 +102,7 @@ struct Plan {
     /// The first event of each segment.
     starts: Vec<u32>,
     segments: Vec<Segment>,
-    /// For each block, the index of the op containing its first event.
+    /// For each block, the index of the op containing its first event; then the number of ops.
     first_op: Vec<u32>,
     /// For each segment, what the critical version it starts at keeps. Nothing, unless the
     /// segment is a region that has been through the tracker.
@@ -97,7 +116,7 @@ impl Plan {
         let blocks = log.graph.blocks();
         let segments = log.graph.segments();
         let starts = segments.iter().map(|segment| blocks.start(segment.blocks().start)).collect();
-        let first_op = log.ops_containing((0..blocks.len()).map(|block| blocks.start(block)));
+        let first_op = log.ops_containing((0..=blocks.len()).map(|block| blocks.start(block)));
         let kept = segments
             .iter()
             .map(|segment| match (segment, &mut previous) {
@@ -114,6 +133,14 @@ impl Plan {
             Ok(at) => std::mem::take(&mut self.kept[at]),
             Err(_) => Kept::default(),
         }
+    }
+
+    /// Iterates over the ops of a stretch of blocks. An op that runs past either end is cut
+    /// there.
+    #[inline]
+    fn ops<'a>(&self, log: &'a OpLog, stretch: &Range<usize>) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
+        let blocks = log.graph.blocks();
+        log.ops(self.first_op[stretch.start]..self.first_op[stretch.end], blocks.start(stretch.start)..blocks.start(stretch.end))
     }
 
     /// Counts the regions that have been through the tracker.
@@ -135,67 +162,73 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     if memo.plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
         memo.plan = Some(Plan::new(log, memo.plan.take()));
     }
-    let Memo { plan, tracker, walker, shifter, region_edits } = memo;
-    let plan = plan.as_mut().expect("a plan was just made");
+    let plan = memo.plan.as_mut().expect("a plan was just made");
     let mut kept = std::mem::take(&mut plan.kept);
 
     // Forwards: merge the regions. The events of a linear stretch are edits already, so all
     // that is needed of them for now is what they do to the document's length.
     let blocks = log.graph.blocks();
-    let linear_events = |linear: &Range<usize>| blocks.start(linear.start)..blocks.start(linear.end);
-    let mut doc = Edits { made: Vec::with_capacity(*region_edits), len: 0 };
-    let mut edits_before = Vec::with_capacity(plan.segments.len());
+    let events = |stretch: &Range<usize>| blocks.start(stretch.start)..blocks.start(stretch.end);
+    let mut doc = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: 0 };
+    let mut workspace = Workspace::default();
     for (segment, kept) in plan.segments.iter().zip(&mut kept) {
-        edits_before.push(doc.made.len());
         match segment {
             Segment::Linear(linear) => {
-                let (inserted, removed) = log.lengths(plan.first_op[linear.start], linear_events(linear));
+                let (inserted, removed) = log.lengths(plan.first_op[linear.start], events(linear));
                 doc.len = doc.len + inserted - removed;
             }
-            Segment::Region(region) => merge_region(log, plan, region, kept, tracker, walker, shifter, &mut doc),
+            Segment::Region(region) => merge_region(log, plan, region, kept, &mut workspace, &mut doc),
         }
     }
+    // The text is built without the room that merging took.
+    drop(workspace);
+    plan.kept = kept;
+    memo.room = (doc.order.len(), doc.at.len());
 
     // Backwards: take every edit back, starting from the final document.
     let mut text = Rewind::new(doc.len);
-    let mut edits_end = doc.made.len();
-    for (segment, &edits_start) in plan.segments.iter().zip(&edits_before).rev() {
+    let mut order = doc.order.iter().rev().peekable();
+    let mut places = doc.at.iter().rev().copied();
+    let mut place = || places.next().expect("a place for every op of a region");
+    for segment in plan.segments.iter().rev() {
         match segment {
             Segment::Linear(linear) => {
-                for op in log.ops(plan.first_op[linear.start], linear_events(linear)).rev() {
+                for op in plan.ops(log, linear).rev() {
                     match op.kind {
                         OpKind::Ins => text.undo_insert(op.pos, log.text(op.text), op.len),
                         OpKind::Del => text.undo_remove(op.pos, op.len),
                     }
                 }
             }
-            Segment::Region(_) => {
-                for edit in doc.made[edits_start..edits_end].iter().rev() {
-                    if edit.text.0 < edit.text.1 {
-                        text.undo_insert(edit.pos, log.text(edit.text), edit.len);
-                    } else {
-                        text.undo_remove(edit.pos, edit.len);
+            Segment::Region(region) => {
+                while let Some(stretch) = order.next_if(|stretch| stretch.start as usize >= region.start) {
+                    for op in plan.ops(log, &(stretch.start as usize..stretch.end as usize)).rev() {
+                        match op.kind {
+                            OpKind::Ins => text.undo_insert(place(), log.text(op.text), op.len),
+                            OpKind::Del => {
+                                for _ in 0..place() {
+                                    let (len, pos) = (place(), place());
+                                    text.undo_remove(pos, len);
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-        edits_end = edits_start;
     }
-    plan.kept = kept;
-    *region_edits = doc.made.len();
     text.finish()
 }
 
-/// Merges one region, adding the edits it comes to to `doc`.
-#[allow(clippy::too_many_arguments)]
-fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept, tracker: &mut Tracker, walker: &mut Walker, shifter: &mut Shifter, doc: &mut Edits) {
+/// Merges one region, recording in `doc` where its ops go.
+fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept, workspace: &mut Workspace, doc: &mut Placed) {
+    let Workspace { tracker, walker, shifter } = workspace;
     // Nothing kept: the region has not needed the tracker so far. See whether it does now.
     if kept.events == 0 && shifter.merge(log, log.graph.blocks(), &plan.first_op, region, doc) {
         return;
     }
     let blocks = log.graph.blocks();
     let (start, end) = (blocks.start(region.start), blocks.start(region.end));
-    let first_op = plan.first_op[region.start];
     let goes_before = |a: u32, b: u32| log.inserts_before(start + a, start + b);
     tracker.begin_region((end - start) as usize);
 
@@ -204,13 +237,16 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
     let known_blocks = (region.start..region.end).take_while(|&block| blocks.start(block + 1) - start <= kept.events).count();
     let mut resolved = kept.resolved.iter().copied();
     let mut next = || resolved.next().expect("something kept for every resolved event");
-    for op in log.ops(first_op, start..blocks.start(region.start + known_blocks)) {
+    if known_blocks > 0 {
+        doc.begin(region.start..region.start + known_blocks);
+    }
+    for op in plan.ops(log, &(region.start..region.start + known_blocks)) {
         let lv = op.lv - start;
         match op.kind {
             OpKind::Ins => {
                 let (left, right) = (next(), next());
                 let pos = tracker.insert_by_id(lv, op.len, left, right, goes_before);
-                doc.insert(pos, op.text, op.len);
+                doc.insert(pos, op.len);
             }
             OpKind::Del => {
                 let mut done = 0;
@@ -221,6 +257,7 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
                     tracker.delete_by_id(lv + done, targets, |pos, len| doc.remove(pos, len));
                     done += n;
                 }
+                doc.end_delete();
             }
         }
     }
@@ -229,10 +266,19 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
     }
 
     walker.walk(blocks, region, known_blocks, |step| match step {
-        Move::Retreat(events) => tracker.retreat(events.start - start..events.end - start),
-        Move::Advance(events) => tracker.advance(events.start - start..events.end - start),
+        Move::Retreat(stretch) => {
+            for op in plan.ops(log, &stretch) {
+                tracker.retreat(op.kind, op.lv - start..op.lv - start + op.len);
+            }
+        }
+        Move::Advance(stretch) => {
+            for op in plan.ops(log, &stretch) {
+                tracker.advance(op.kind, op.lv - start..op.lv - start + op.len);
+            }
+        }
         Move::Apply(block) => {
-            for op in log.ops(plan.first_op[block], blocks.events(block)) {
+            doc.begin(block..block + 1);
+            for op in plan.ops(log, &(block..block + 1)) {
                 walk_op(start, op, tracker, &goes_before, doc);
             }
         }
@@ -241,7 +287,7 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
     // The tracker now knows what every event of the region resolved to. Keep that.
     kept.events = end - start;
     kept.resolved.clear();
-    for op in log.ops(first_op, start..end) {
+    for op in plan.ops(log, region) {
         let lv = op.lv - start;
         match op.kind {
             OpKind::Ins => kept.resolved.extend(tracker.origins(lv)),
@@ -260,25 +306,20 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
             }
         }
     }
+    kept.resolved.shrink_to_fit();
 }
 
 /// Merges one op at the tracker's prepare version.
-fn walk_op(start: u32, op: OpSlice, tracker: &mut Tracker, goes_before: &impl Fn(u32, u32) -> bool, doc: &mut Edits) {
+fn walk_op(start: u32, op: OpSlice, tracker: &mut Tracker, goes_before: &impl Fn(u32, u32) -> bool, doc: &mut Placed) {
     let lv = op.lv - start;
     match op.kind {
         OpKind::Ins => {
             let pos = tracker.insert(lv, op.len, op.pos, goes_before);
-            doc.insert(pos, op.text, op.len);
+            doc.insert(pos, op.len);
         }
         OpKind::Del => {
-            let mut done = 0;
-            while done < op.len {
-                let (n, pos) = tracker.delete(lv + done, op.pos, op.len - done, op.fwd);
-                if let Some(pos) = pos {
-                    doc.remove(pos, n);
-                }
-                done += n;
-            }
+            tracker.delete(lv, op.pos, op.len, op.fwd, |pos, len| doc.remove(pos, len));
+            doc.end_delete();
         }
     }
 }

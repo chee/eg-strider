@@ -7,9 +7,16 @@ import json
 import math
 import sys
 
-COLOURS = {"S": "#1b9e77", "C": "#d95f02", "A": "#7570b3"}
+# Each system's name, its key in the results, and its colour.
+SYSTEMS = [
+    ("eg-strider", "strider_first", "#d55e00"),
+    ("Eg-walker", "egwalker", "#0072b2"),
+    ("Yjs", "yjs", "#e69f00"),
+    ("Loro", "loro", "#009e73"),
+    ("Automerge", "automerge", "#cc79a7"),
+]
 ORDER = ["S1", "S2", "S3", "C1", "C2", "A1", "A2"]
-LEFT, RIGHT, ROW, GAP = 200, 640, 12, 16
+LEFT, RIGHT, ROW, GAP, TOP = 120, 640, 12, 14, 30
 
 
 def milliseconds(v):
@@ -25,24 +32,30 @@ def memory(v):
     return f"{v:.0f} B"
 
 
-def chart(results, kind, groups, label, caption, ticks):
+def chart(results, kind, label, caption, ticks):
     by_trace = {r["trace"]: r[kind] for r in results}
     traces = [t for t in ORDER if t in by_trace]
-    values = [by_trace[t][key] for _, _, key in groups for t in traces]
+    values = [by_trace[t][key] for t in traces for _, key, _ in SYSTEMS]
     values = [v for v in values if v]
     low, high = math.floor(math.log10(min(values))), math.ceil(math.log10(max(values)))
     x = lambda v: LEFT + (math.log10(v) - low) / (high - low) * (RIGHT - LEFT)
 
-    height = len(groups) * (len(traces) * ROW + GAP) + 50
+    height = TOP + len(traces) * (len(SYSTEMS) * ROW + GAP) + 40
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {RIGHT + 110} {height}" font-family="Helvetica, Arial, sans-serif">',
         f'<rect width="{RIGHT + 110}" height="{height}" fill="white"/>',
     ]
+    at = LEFT
+    for name, _, colour in SYSTEMS:
+        out.append(f'<rect x="{at}" y="6" width="10" height="10" fill="{colour}"/>')
+        out.append(f'<text x="{at + 14}" y="15" font-size="11">{name}</text>')
+        at += 26 + 6.2 * len(name)
+
     bottom = height - 40
     for decade in range(low, high):
         for step in range(1, 10):
             at = x(step * 10**decade)
-            out.append(f'<line x1="{at:.1f}" y1="6" x2="{at:.1f}" y2="{bottom}" stroke="#ddd" stroke-width="{1 if step == 1 else 0.5}"/>')
+            out.append(f'<line x1="{at:.1f}" y1="{TOP - 4}" x2="{at:.1f}" y2="{bottom}" stroke="#ddd" stroke-width="{1 if step == 1 else 0.5}"/>')
     for value, text in ticks:
         if 10**low <= value <= 10**high:
             out.append(f'<line x1="{x(value):.1f}" y1="{bottom}" x2="{x(value):.1f}" y2="{bottom + 5}" stroke="black"/>')
@@ -50,19 +63,17 @@ def chart(results, kind, groups, label, caption, ticks):
     out.append(f'<line x1="{LEFT}" y1="{bottom}" x2="{RIGHT}" y2="{bottom}" stroke="black"/>')
     out.append(f'<text x="{RIGHT}" y="{bottom + 33}" font-size="10" text-anchor="end">{caption} →</text>')
 
-    y = 8
-    for name, note, key in groups:
-        middle = y + len(traces) * ROW / 2
-        out.append(f'<text x="{LEFT - 40}" y="{middle - (4 if note else -4):.1f}" font-size="14" text-anchor="end">{name}</text>')
-        if note:
-            out.append(f'<text x="{LEFT - 40}" y="{middle + 10:.1f}" font-size="10" fill="#666" text-anchor="end">({note})</text>')
-        out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(traces) * ROW}" stroke="black" stroke-width="1.5"/>')
-        for trace in traces:
+    y = TOP
+    for trace in traces:
+        middle = y + len(SYSTEMS) * ROW / 2
+        out.append(f'<text x="{LEFT - 62}" y="{middle + 4:.1f}" font-size="14" text-anchor="end">{trace}</text>')
+        out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(SYSTEMS) * ROW}" stroke="black" stroke-width="1.5"/>')
+        for name, key, colour in SYSTEMS:
             value = by_trace[trace][key]
-            out.append(f'<text x="{LEFT - 6}" y="{y + 8}" font-size="7.5" fill="#888" text-anchor="end">{trace}</text>')
+            out.append(f'<text x="{LEFT - 6}" y="{y + 8}" font-size="7.5" fill="#888" text-anchor="end">{name}</text>')
             if value:
                 end = x(value)
-                out.append(f'<rect x="{LEFT}" y="{y}" width="{max(end - LEFT, 1):.1f}" height="{ROW - 2}" fill="{COLOURS[trace[0]]}"/>')
+                out.append(f'<rect x="{LEFT}" y="{y}" width="{max(end - LEFT, 1):.1f}" height="{ROW - 2}" fill="{colour}"/>')
                 out.append(f'<text x="{end + 5:.1f}" y="{y + 8.5}" font-size="9">{label(value)}</text>')
             else:
                 out.append(f'<text x="{LEFT + 5}" y="{y + 8.5}" font-size="9" fill="#888">{"nothing" if value == 0 else "did not finish"}</text>')
@@ -77,33 +88,16 @@ def main(results_path, out_dir):
     time = chart(
         results,
         "ms",
-        [
-            ("eg-strider", "", "strider_first"),
-            ("Eg-walker", "", "egwalker"),
-            ("Loro", "", "loro"),
-            ("Yjs", "", "yjs"),
-            ("Automerge", "", "automerge"),
-        ],
         milliseconds,
         "Time taken to merge all events into a document, from its stored history. Log scale. (Less is better)",
         [(0.1, "0.1 ms"), (1, "1 ms"), (10, "10 ms"), (100, "100 ms"), (1000, "1 sec"), (10000, "10 sec"), (100000, "100 sec")],
     )
-    ram = chart(
-        results,
-        "bytes",
-        [
-            ("eg-strider", "", "strider_first"),
-            ("Eg-walker", "", "egwalker"),
-            ("Loro", "", "loro"),
-            ("Yjs", "", "yjs"),
-            ("Automerge", "", "automerge"),
-        ],
-        memory,
-        "Peak RAM used while merging, beyond the stored history. Log scale. (Less is better)",
-        [(2**10 * 100, "100 KiB"), (2**20, "1 MiB"), (2**20 * 10, "10 MiB"), (2**20 * 100, "100 MiB"), (2**30, "1 GiB")],
-    )
+    sizes = [(2**10 * 100, "100 KiB"), (2**20, "1 MiB"), (2**20 * 10, "10 MiB"), (2**20 * 100, "100 MiB"), (2**30, "1 GiB")]
+    peak = chart(results, "bytes", memory, "Peak RAM used while merging, beyond the stored history. Log scale. (Less is better)", sizes)
+    kept = chart(results, "kept", memory, "RAM still in use once merged, beyond the stored history. Log scale. (Less is better)", sizes)
     open(f"{out_dir}/time.svg", "w").write(time)
-    open(f"{out_dir}/memory.svg", "w").write(ram)
+    open(f"{out_dir}/memory-peak.svg", "w").write(peak)
+    open(f"{out_dir}/memory-kept.svg", "w").write(kept)
 
 
 if __name__ == "__main__":

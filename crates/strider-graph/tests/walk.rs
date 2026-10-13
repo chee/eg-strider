@@ -84,13 +84,13 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
         applied[region.start..region.start + known].fill(true);
 
         walker.walk(blocks, &region, known, |step| match step {
-            Move::Retreat(events) => {
-                for e in events {
+            Move::Retreat(stretch) => {
+                for e in blocks.start(stretch.start)..blocks.start(stretch.end) {
                     assert!(std::mem::replace(&mut version[e as usize], false), "retreated an event that was not there");
                 }
             }
-            Move::Advance(events) => {
-                for e in events {
+            Move::Advance(stretch) => {
+                for e in blocks.start(stretch.start)..blocks.start(stretch.end) {
                     assert!(!std::mem::replace(&mut version[e as usize], true), "advanced an event that was there");
                 }
             }

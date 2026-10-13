@@ -45,9 +45,10 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
                 let i = at.index(list.len());
                 let old = list[i].1;
                 let taken = [share[0].index(old[0] as usize + 1) as u32, share[1].index(old[1] as usize + 1) as u32];
-                let id = tree.split_entry(tree.cursor(list[i].0), w(taken), before);
+                let (id, parts) = tree.split_entry(tree.cursor(list[i].0), w(taken), before);
                 list[i].1 = [old[0] - taken[0], old[1] - taken[1]];
                 list.insert(i + !before as usize, (id, taken));
+                prop_assert_eq!(parts.map(|part| tree.id(part)), [list[i].0, list[i + 1].0]);
             }
             Edit::SetWidths { at, widths } => {
                 let i = at.index(list.len());

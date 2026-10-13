@@ -217,12 +217,13 @@ impl OpLog {
         }
     }
 
-    /// Finds, for each event in `starts`, which must ascend, the index of the op containing it.
+    /// Finds, for each event in `starts`, which must ascend, the index of the op containing it:
+    /// the number of ops, for the event after the last.
     pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = u32>) -> Vec<u32> {
         let mut op = 0;
         starts
             .map(|lv| {
-                while self.ops[op].lv + self.ops[op].len <= lv {
+                while self.ops.get(op).is_some_and(|op| op.lv + op.len <= lv) {
                     op += 1;
                 }
                 op as u32
@@ -230,19 +231,15 @@ impl OpLog {
             .collect()
     }
 
-    /// Iterates over the part of each op that falls inside `events`. `first_op` must be the index of the
-    /// op containing the first of them.
-    pub(crate) fn ops(&self, first_op: u32, events: Range<u32>) -> impl DoubleEndedIterator<Item = OpSlice> + '_ {
-        let ops = &self.ops[first_op as usize..];
-        // Gallop to an op that starts at or after the end, then search back from it.
-        let mut reach = 1;
-        while reach < ops.len() && ops[reach].lv < events.end {
-            reach *= 2;
-        }
-        // With no events there is nothing, though an op starts before where they would be.
-        let ops = if events.is_empty() { &ops[..0] } else { &ops[..reach.min(ops.len())] };
-        let count = ops.partition_point(|op| op.lv < events.end);
-        ops[..count].iter().map(move |op| self.slice(op, &events))
+    /// Iterates over the part of each op that falls inside `events`. `ops` must run from the
+    /// index of the op containing the first of them to that of the op containing the event
+    /// after the last.
+    pub(crate) fn ops(&self, ops: Range<u32>, events: Range<u32>) -> impl DoubleEndedIterator<Item = OpSlice> + '_ {
+        // The op containing the event after the last holds some of these too if it starts
+        // before then.
+        let straddles = self.ops.get(ops.end as usize).is_some_and(|op| op.lv < events.end);
+        let count = if events.is_empty() { 0 } else { (ops.end - ops.start) as usize + straddles as usize };
+        self.ops[ops.start as usize..][..count].iter().map(move |op| self.slice(op, &events))
     }
 
     /// Returns the inserted text that an [`OpSlice`]'s range refers to.
@@ -251,7 +248,7 @@ impl OpLog {
     }
 
     /// Counts how many characters `events` insert and how many they remove, given that they are
-    /// applied as recorded. `first_op` as for [`ops`](Self::ops).
+    /// applied as recorded. `first_op` is the index of the op containing the first of them.
     pub(crate) fn lengths(&self, first_op: u32, events: Range<u32>) -> (u32, u32) {
         let (mut inserted, mut removed) = (0, 0);
         for op in &self.ops[first_op as usize..] {
@@ -267,6 +264,17 @@ impl OpLog {
         (inserted, removed)
     }
 
+    /// Finds the bytes holding characters `from..to` of the inserted text at `content`.
+    #[cold]
+    fn cut(&self, content: (u32, u32), from: u32, to: u32) -> (u32, u32) {
+        let text = self.text(content);
+        // Where each character starts, then where the text ends.
+        let mut starts = text.char_indices().map(|(byte, _)| byte as u32).chain([text.len() as u32]);
+        let first = starts.nth(from as usize).expect("an op is cut within its text");
+        let last = if from < to { starts.nth((to - from - 1) as usize).expect("an op is cut within its text") } else { first };
+        (content.0 + first, content.0 + last)
+    }
+
     /// Cuts out the part of `op` that falls inside `events`.
     #[inline]
     fn slice(&self, op: &Op, events: &Range<u32>) -> OpSlice {
@@ -275,16 +283,14 @@ impl OpLog {
         let (pos, text) = match (op.kind, op.fwd) {
             (OpKind::Ins, _) => {
                 let (start, end) = op.content;
-                // Characters and bytes coincide unless the text is not all ASCII.
-                let byte = |ch: u32| {
-                    if end - start == op.len {
-                        ch
-                    } else {
-                        let text = self.text(op.content);
-                        text.char_indices().nth(ch as usize).map_or(text.len(), |(b, _)| b) as u32
-                    }
+                let text = if to - from == op.len {
+                    op.content
+                } else if end - start == op.len {
+                    // All ASCII: characters and bytes coincide.
+                    (start + from, start + to)
+                } else {
+                    self.cut(op.content, from, to)
                 };
-                let text = if to - from == op.len { op.content } else { (start + byte(from), start + byte(to)) };
                 (op.pos + from, text)
             }
             // Each forward delete lands on the same position, so a later slice starts where

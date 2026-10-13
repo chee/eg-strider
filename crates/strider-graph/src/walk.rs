@@ -8,13 +8,13 @@
 use crate::Blocks;
 use std::ops::Range;
 
-/// One step of a walk. Ranges are of events.
+/// One step of a walk. Ranges are of blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Move {
-    /// Take these events out of the working version.
-    Retreat(Range<u32>),
-    /// Put these events back into the working version.
-    Advance(Range<u32>),
+    /// Take these blocks out of the working version.
+    Retreat(Range<usize>),
+    /// Put these blocks back into the working version.
+    Advance(Range<usize>),
     /// The working version is now this block's parents: merge the block, which also adds it to
     /// the working version.
     Apply(usize),
@@ -303,17 +303,16 @@ impl Walker {
         schedule.build(graph, blocks, region, known);
         chains.start(known, current);
 
-        // Blocks numbered one after another hold events numbered one after another.
-        let events = |first: u32, last: u32| blocks.start(region.start + first as usize)..blocks.start(region.start + last as usize + 1);
+        let stretch = |first: u32, last: u32| region.start + first as usize..region.start + last as usize + 1;
         let mut last = None;
         while let Some(block) = schedule.take_nearest(graph, chains, current, last) {
             for (chain, &now) in current.iter().enumerate() {
                 let leaving = chains.between(chain, chains.seen(block, chain)..now);
-                each_stretch(leaving, |first, last| visit(Move::Retreat(events(first, last))));
+                each_stretch(leaving, |first, last| visit(Move::Retreat(stretch(first, last))));
             }
             for (chain, &now) in current.iter().enumerate() {
                 let returning = chains.between(chain, now..chains.seen(block, chain));
-                each_stretch(returning, |first, last| visit(Move::Advance(events(first, last))));
+                each_stretch(returning, |first, last| visit(Move::Advance(stretch(first, last))));
             }
             visit(Move::Apply(region.start + block));
             chains.arrive(block, current);
