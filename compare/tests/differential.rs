@@ -86,7 +86,7 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
     prop_assert_eq!(log.checkout(), expected.as_str(), "first checkout");
     prop_assert_eq!(log.checkout(), expected.as_str(), "second checkout");
 
-    // Growing a little at a time and checking out at each step, so that zones are extended
+    // Growing a little at a time and checking out at each step, so that regions are extended
     // and absorbed while the log holds what it resolved for their earlier shapes.
     let mut growing = OpLog::new();
     for part in 1..=8 {

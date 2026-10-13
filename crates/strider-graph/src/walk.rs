@@ -1,7 +1,11 @@
-//! Planning a walk through a zone.
+//! Plans the order in which a region's blocks are merged. The tracker can merge a block
+//! only when its working version equals the block's parents, and moving that version costs
+//! time in proportion to the events moved. The plan is a topological sort (Kahn's
+//! algorithm) that takes, among the blocks that are ready, the one nearest the current
+//! version. A version is held as a version vector: the region's blocks are split into
+//! chains, and a version is how far along each chain it reaches.
 
-use crate::Runs;
-use std::collections::BinaryHeap;
+use crate::Blocks;
 use std::ops::Range;
 
 /// One step of a walk. Ranges are of events.
@@ -11,329 +15,321 @@ pub enum Move {
     Retreat(Range<u32>),
     /// Put these events back into the working version.
     Advance(Range<u32>),
-    /// The working version is now this run's parents: merge the run, which also adds it to
+    /// The working version is now this block's parents: merge the block, which also adds it to
     /// the working version.
     Apply(usize),
 }
 
-/// Plans walks. Holds scratch space that is reused from one zone to the next.
-pub struct Walker {
-    // The zone's runs are numbered locally from 0. Parents inside the zone, then the same
-    // edges reversed.
-    parent_start: Vec<u32>,
-    parents: Vec<u32>,
-    child_start: Vec<u32>,
-    children: Vec<u32>,
-    /// Which 127ths of the zone's events lie at or after each run: a cheap stand-in for the
-    /// size of its set of descendants that does not count shared descendants twice.
-    cover: Vec<u128>,
-    waiting: Vec<u32>,
-    ready: Vec<u32>,
-    order: Vec<u32>,
-    /// Row `i`: the set of runs in run `i`'s history.
-    ancestors: Vec<u64>,
-    current: Vec<u64>,
-    bitset_limit: usize,
+/// A list of lists stored flat: row `i` is `items[start[i]..start[i + 1]]`.
+#[derive(Default)]
+struct Rows {
+    start: Vec<u32>,
+    items: Vec<u32>,
 }
 
-/// When no run continues straight on from the last one, how many of the most recently
-/// readied runs to consider as the next stop.
+impl Rows {
+    /// Empties the list, leaving one open row to push to.
+    fn clear(&mut self) {
+        self.start.clear();
+        self.start.push(0);
+        self.items.clear();
+    }
+
+    /// Closes the open row and opens the next.
+    fn end_row(&mut self) {
+        self.start.push(self.items.len() as u32);
+    }
+
+    /// Returns how many closed rows there are.
+    fn len(&self) -> usize {
+        self.start.len() - 1
+    }
+
+    fn row(&self, i: usize) -> &[u32] {
+        &self.items[self.start[i] as usize..self.start[i + 1] as usize]
+    }
+
+    /// Rebuilds the list as `rows` rows from `(row, item)` pairs, keeping the order of the
+    /// items within each row.
+    fn group(&mut self, rows: usize, pairs: impl Iterator<Item = (u32, u32)> + Clone) {
+        self.start.clear();
+        self.start.resize(rows + 1, 0);
+        for (row, _) in pairs.clone() {
+            self.start[row as usize + 1] += 1;
+        }
+        for i in 1..=rows {
+            self.start[i] += self.start[i - 1];
+        }
+        self.items.clear();
+        self.items.resize(self.start[rows] as usize, 0);
+        for (row, item) in pairs {
+            self.items[self.start[row as usize] as usize] = item;
+            self.start[row as usize] += 1;
+        }
+        // Each start has moved to its row's end, which is where the next row starts.
+        self.start.rotate_right(1);
+        self.start[0] = 0;
+    }
+}
+
+/// The edges between a region's blocks, which are numbered from 0 within it.
+#[derive(Default)]
+struct RegionGraph {
+    parents: Rows,
+    children: Rows,
+}
+
+impl RegionGraph {
+    fn build(&mut self, blocks: &Blocks, region: &Range<usize>) {
+        let RegionGraph { parents, children } = self;
+        parents.clear();
+        for block in region.start..region.end {
+            let inside = blocks.parents(block).iter().filter_map(|&p| (p as usize).checked_sub(region.start));
+            parents.items.extend(inside.map(|p| p as u32));
+            parents.end_row();
+        }
+        let edges = (0..region.len()).flat_map(|block| parents.row(block).iter().map(move |&p| (p, block as u32)));
+        children.group(region.len(), edges);
+    }
+}
+
+/// A region's blocks split into chains, in which every block has the one before it in its
+/// history. A history then holds a prefix of each chain, and is stored as those lengths.
+#[derive(Default)]
+struct Chains {
+    /// The chain each block is on, and how many blocks come before it there.
+    chain: Vec<u32>,
+    place: Vec<u32>,
+    /// Each chain's blocks, in order.
+    members: Rows,
+    /// For each chain, the number of events in its first `j` blocks, for every `j`.
+    events_before: Rows,
+    /// Each block's history: how many blocks along each chain are in it. Chains that began
+    /// after the block are left off.
+    seen: Rows,
+}
+
+impl Chains {
+    /// Splits the blocks into chains and works out each block's history. A block joins a
+    /// chain it has seen the whole of, if there is one.
+    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<usize>) {
+        let Chains { chain, place, members, events_before, seen } = self;
+        chain.clear();
+        place.clear();
+        seen.clear();
+        let mut lens: Vec<u32> = Vec::new();
+        for block in 0..region.len() {
+            let from = seen.items.len();
+            seen.items.resize(from + lens.len(), 0);
+            let (earlier, row) = seen.items.split_at_mut(from);
+            for &p in graph.parents.row(block) {
+                let p = p as usize;
+                let theirs = &earlier[seen.start[p] as usize..seen.start[p + 1] as usize];
+                for (mine, &theirs) in row.iter_mut().zip(theirs) {
+                    *mine = (*mine).max(theirs);
+                }
+                let own = &mut row[chain[p] as usize];
+                *own = (*own).max(place[p] + 1);
+            }
+            let joined = row.iter().zip(&lens).position(|(seen, len)| seen == len).unwrap_or_else(|| {
+                lens.push(0);
+                seen.items.push(0);
+                lens.len() - 1
+            });
+            seen.end_row();
+            chain.push(joined as u32);
+            place.push(lens[joined]);
+            lens[joined] += 1;
+        }
+
+        members.group(lens.len(), chain.iter().copied().zip(0..));
+        events_before.clear();
+        for of_chain in 0..members.len() {
+            let mut events = 0;
+            events_before.items.push(0);
+            for &member in members.row(of_chain) {
+                events += blocks.events(region.start + member as usize).len() as u32;
+                events_before.items.push(events);
+            }
+            events_before.end_row();
+        }
+    }
+
+    /// Returns how many blocks along `chain` are in a block's history.
+    fn seen(&self, block: usize, chain: usize) -> u32 {
+        self.seen.row(block).get(chain).copied().unwrap_or(0)
+    }
+
+    /// Returns the blocks at `places` along a chain, or none if `places` runs backwards.
+    fn between(&self, chain: usize, places: Range<u32>) -> &[u32] {
+        self.members.row(chain).get(places.start as usize..places.end as usize).unwrap_or(&[])
+    }
+
+    /// Counts the events between the version `current` and a block's history, giving up once
+    /// past `limit`.
+    fn distance(&self, current: &[u32], block: usize, limit: u64) -> u64 {
+        let mut events = 0;
+        for (chain, &now) in current.iter().enumerate() {
+            let before = self.events_before.row(chain);
+            events += before[now as usize].abs_diff(before[self.seen(block, chain) as usize]) as u64;
+            if events > limit {
+                break;
+            }
+        }
+        events
+    }
+
+    /// Sets `current` to the version holding the first `known` blocks.
+    fn start(&self, known: usize, current: &mut Vec<u32>) {
+        current.clear();
+        current.resize(self.members.len(), 0);
+        for block in 0..known {
+            current[self.chain[block] as usize] = self.place[block] + 1;
+        }
+    }
+
+    /// Sets `current` to a block's history plus the block itself.
+    fn arrive(&self, block: usize, current: &mut [u32]) {
+        let row = self.seen.row(block);
+        current[..row.len()].copy_from_slice(row);
+        current[row.len()..].fill(0);
+        current[self.chain[block] as usize] = self.place[block] + 1;
+    }
+}
+
+/// When no block continues straight on from the last one, how many of the most recently
+/// readied blocks to consider as the next stop.
 const CANDIDATES: usize = 64;
 
-impl Default for Walker {
-    fn default() -> Self {
-        Self::new()
-    }
+/// The state of the topological sort: which blocks can be visited next.
+#[derive(Default)]
+struct Schedule {
+    /// Which 127ths of the region's events lie at or after each block: a cheap stand-in for
+    /// the size of its set of descendants that does not count shared descendants twice.
+    cover: Vec<u128>,
+    /// How many of each block's parents have not been visited yet.
+    waiting: Vec<u32>,
+    /// The blocks waiting on nothing, in the order they became so.
+    ready: Vec<u32>,
 }
 
-impl Walker {
-    pub fn new() -> Self {
-        // 16384 runs need 32 MB of ancestor sets.
-        Self::with_bitset_limit(16384)
-    }
-
-    /// Zones of up to `runs` runs are planned with each run's full set of ancestors held as
-    /// a bitset, which takes `runs² / 8` bytes.
-    pub fn with_bitset_limit(runs: usize) -> Self {
-        Walker {
-            parent_start: Vec::new(),
-            parents: Vec::new(),
-            child_start: Vec::new(),
-            children: Vec::new(),
-            cover: Vec::new(),
-            waiting: Vec::new(),
-            ready: Vec::new(),
-            order: Vec::new(),
-            ancestors: Vec::new(),
-            current: Vec::new(),
-            bitset_limit: runs,
-        }
-    }
-
-    /// Walks the runs in `zone`, which must lie between two critical versions, calling
-    /// `visit` with each step.
-    pub fn walk(&mut self, runs: &Runs, zone: &Range<usize>, known: usize, mut visit: impl FnMut(Move)) {
-        let count = zone.len();
-        self.build(runs, zone, known);
-        let events = |run: u32| runs.events(zone.start + run as usize);
-
-        if count <= self.bitset_limit {
-            let words = count.div_ceil(64);
-            self.build_ancestors(count, words);
-            self.order_by_nearest(runs, zone, words, known);
-
-            self.start_version(words, known);
-            for &run in &self.order {
-                let target = &self.ancestors[run as usize * words..][..words];
-                for (i, (&now, &want)) in self.current.iter().zip(target).enumerate() {
-                    each_bit(now & !want, |bit| visit(Move::Retreat(events(i as u32 * 64 + bit))));
-                }
-                for (i, (&now, &want)) in self.current.iter().zip(target).enumerate() {
-                    each_bit(want & !now, |bit| visit(Move::Advance(events(i as u32 * 64 + bit))));
-                }
-                visit(Move::Apply(zone.start + run as usize));
-                self.current.copy_from_slice(target);
-                self.current[run as usize / 64] |= 1 << (run % 64);
-            }
-        } else {
-            self.order_depth_first();
-            // The working version, as the runs in it that have no children in it.
-            let mut version: Vec<u32> = (0..known as u32)
-                .filter(|&run| self.children(run as usize).iter().all(|&c| c as usize >= known))
-                .collect();
-            let (mut out, mut back) = (Vec::new(), Vec::new());
-            for i in 0..self.order.len() {
-                let run = self.order[i];
-                self.difference(&version, self.parents(run as usize), &mut out, &mut back);
-                out.iter().for_each(|&r| visit(Move::Retreat(events(r))));
-                back.iter().rev().for_each(|&r| visit(Move::Advance(events(r))));
-                visit(Move::Apply(zone.start + run as usize));
-                version.clear();
-                version.push(run);
-            }
-        }
-    }
-
-    fn parents(&self, run: usize) -> &[u32] {
-        &self.parents[self.parent_start[run] as usize..self.parent_start[run + 1] as usize]
-    }
-
-    fn children(&self, run: usize) -> &[u32] {
-        &self.children[self.child_start[run] as usize..self.child_start[run + 1] as usize]
-    }
-
-    /// Builds the zone's own graph, each run's descendant coverage, and the set of runs
-    /// that are ready to be visited: those whose parents in the zone are all known.
-    fn build(&mut self, runs: &Runs, zone: &Range<usize>, known: usize) {
-        let count = zone.len();
-        self.parent_start.clear();
-        self.parents.clear();
-        self.child_start.clear();
-        self.child_start.resize(count + 2, 0);
-        for run in zone.start..zone.end {
-            self.parent_start.push(self.parents.len() as u32);
-            for &p in runs.parents(run) {
-                if p as usize >= zone.start {
-                    let p = p - zone.start as u32;
-                    self.parents.push(p);
-                    self.child_start[p as usize + 2] += 1;
-                }
-            }
-        }
-        self.parent_start.push(self.parents.len() as u32);
-
-        // child_start[i + 1] serves as the fill position for run i, which leaves
-        // child_start[i] as the start of its children once every edge is placed.
-        for i in 2..count + 2 {
-            self.child_start[i] += self.child_start[i - 1];
-        }
-        self.children.clear();
-        self.children.resize(self.parents.len(), 0);
-        for run in 0..count {
-            for k in self.parent_start[run]..self.parent_start[run + 1] {
-                let p = self.parents[k as usize] as usize;
-                self.children[self.child_start[p + 1] as usize] = run as u32;
-                self.child_start[p + 1] += 1;
-            }
-        }
-
-        let (from, to) = (runs.start(zone.start), runs.start(zone.end));
+impl Schedule {
+    /// Starts with the first `known` blocks counted as visited.
+    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<usize>, known: usize) {
+        let count = region.len();
+        let (from, to) = (blocks.start(region.start), blocks.start(region.end));
         let per_bit = (to - from).div_ceil(127).max(1);
         self.cover.clear();
         self.cover.resize(count, 0);
-        for run in (0..count).rev() {
-            let events = runs.events(zone.start + run);
+        for block in (0..count).rev() {
+            let events = blocks.events(region.start + block);
             let low = (events.start - from) / per_bit;
             let high = (events.end - from).div_ceil(per_bit);
             let mut cover = (1u128 << high) - (1u128 << low);
-            for &c in self.children(run) {
-                cover |= self.cover[c as usize];
+            for &child in graph.children.row(block) {
+                cover |= self.cover[child as usize];
             }
-            self.cover[run] = cover;
+            self.cover[block] = cover;
         }
 
         self.waiting.clear();
         self.ready.clear();
-        self.order.clear();
-        for run in 0..count {
-            let waiting = self.parents(run).iter().filter(|&&p| p as usize >= known).count() as u32;
+        for block in 0..count {
+            let waiting = graph.parents.row(block).iter().filter(|&&p| p as usize >= known).count() as u32;
             self.waiting.push(waiting);
-            if waiting == 0 && run >= known {
-                self.ready.push(run as u32);
+            if waiting == 0 && block >= known {
+                self.ready.push(block as u32);
             }
         }
     }
 
-    fn build_ancestors(&mut self, count: usize, words: usize) {
-        self.ancestors.clear();
-        self.ancestors.resize(count * words, 0);
-        for run in 0..count {
-            let (before, row) = self.ancestors.split_at_mut(run * words);
-            let row = &mut row[..words];
-            for &p in &self.parents[self.parent_start[run] as usize..self.parent_start[run + 1] as usize] {
-                let p = p as usize;
-                for (r, a) in row.iter_mut().zip(&before[p * words..][..words]) {
-                    *r |= a;
-                }
-                row[p / 64] |= 1 << (p % 64);
+    /// Takes the ready block nearest the version `current`: a child of the `last` block
+    /// visited when one is ready, since that moves the version nowhere.
+    fn take_nearest(&mut self, graph: &RegionGraph, chains: &Chains, current: &[u32], last: Option<u32>) -> Option<usize> {
+        let mut best = (u64::MAX, u32::MAX, None);
+        let oldest = self.ready.len().saturating_sub(CANDIDATES);
+        for at in (oldest..self.ready.len()).rev() {
+            let block = self.ready[at] as usize;
+            let weight = self.cover[block].count_ones();
+            // A block whose only parent is the last block visited sees exactly the current
+            // version.
+            let cost = if last.is_some_and(|last| graph.parents.row(block) == [last]) {
+                0
+            } else if best.0 == 0 {
+                continue;
+            } else {
+                chains.distance(current, block, best.0)
+            };
+            if (cost, weight) < (best.0, best.1) {
+                best = (cost, weight, Some(at));
             }
         }
+        Some(self.ready.remove(best.2?) as usize)
     }
 
-    /// Sets the current version to the first `known` runs.
-    fn start_version(&mut self, words: usize, known: usize) {
-        self.current.clear();
-        self.current.resize(words, 0);
-        for run in 0..known {
-            self.current[run / 64] |= 1 << (run % 64);
-        }
-    }
-
-    /// Adds `run` to the order and readies any children that were only waiting on it.
-    fn visit(&mut self, run: u32) {
-        self.order.push(run);
-        for k in self.child_start[run as usize]..self.child_start[run as usize + 1] {
-            let child = self.children[k as usize] as usize;
-            self.waiting[child] -= 1;
-            if self.waiting[child] == 0 {
-                self.ready.push(child as u32);
-            }
-        }
-    }
-
-    /// Chooses the order to visit runs in. Carry straight on to a child of the last run
-    /// when one is ready, since that moves the working version nowhere.
-    fn order_by_nearest(&mut self, runs: &Runs, zone: &Range<usize>, words: usize, known: usize) {
-        let events = |run: usize| runs.events(zone.start + run).len() as u64;
-        self.start_version(words, known);
-
-        while !self.ready.is_empty() {
-            let last = self.order.last().copied();
-            let mut best = (u64::MAX, u32::MAX, 0usize);
-            let oldest = self.ready.len().saturating_sub(CANDIDATES);
-            for at in (oldest..self.ready.len()).rev() {
-                let run = self.ready[at] as usize;
-                let weight = self.cover[run].count_ones();
-                // A run whose only parent is the last run visited sees exactly the current
-                // version.
-                let cost = if last.is_some_and(|last| self.parents(run) == [last]) {
-                    0
-                } else if best.0 == 0 {
-                    continue;
-                } else {
-                    let target = &self.ancestors[run * words..][..words];
-                    let mut cost = 0;
-                    'count: for (i, (&now, &want)) in self.current.iter().zip(target).enumerate() {
-                        let mut differ = now ^ want;
-                        while differ != 0 {
-                            cost += events(i * 64 + differ.trailing_zeros() as usize);
-                            if cost > best.0 {
-                                break 'count;
-                            }
-                            differ &= differ - 1;
-                        }
-                    }
-                    cost
-                };
-                if (cost, weight) < (best.0, best.1) {
-                    best = (cost, weight, at);
-                }
-            }
-
-            let run = self.ready.remove(best.2);
-            self.visit(run);
-            self.current.copy_from_slice(&self.ancestors[run as usize * words..][..words]);
-            self.current[run as usize / 64] |= 1 << (run % 64);
-        }
-    }
-
-    /// The order for zones too large for ancestor sets: depth first, always taking the most
-    /// recently readied run, lighter branches before heavier ones.
-    fn order_depth_first(&mut self) {
-        let lightest_last = |cover: &[u128], ready: &mut [u32]| {
-            ready.sort_unstable_by_key(|&run| std::cmp::Reverse(cover[run as usize].count_ones()));
-        };
-        lightest_last(&self.cover, &mut self.ready);
-        while let Some(run) = self.ready.pop() {
-            let before = self.ready.len();
-            self.visit(run);
-            lightest_last(&self.cover, &mut self.ready[before..]);
-        }
-    }
-
-    /// The runs in the history of version `old` but not of `new`, and of `new` but not of
-    /// `old`, both highest first. Found by walking back from both until only shared history
-    /// remains.
-    fn difference(&self, old: &[u32], new: &[u32], only_old: &mut Vec<u32>, only_new: &mut Vec<u32>) {
-        const OLD: u8 = 0;
-        const NEW: u8 = 1;
-        const BOTH: u8 = 2;
-        only_old.clear();
-        only_new.clear();
-        let mut heap: BinaryHeap<(u32, u8)> = BinaryHeap::new();
-        heap.extend(old.iter().map(|&run| (run, OLD)));
-        heap.extend(new.iter().map(|&run| (run, NEW)));
-        let mut shared = 0usize;
-
-        // Runs come off the heap highest first, so by the time one is taken everything that
-        // descends from it has already left its mark.
-        while let Some((run, mut side)) = heap.pop() {
-            if side == BOTH {
-                shared -= 1;
-            }
-            while let Some(&(next, other)) = heap.peek() {
-                if next != run {
-                    break;
-                }
-                heap.pop();
-                if other == BOTH {
-                    shared -= 1;
-                }
-                if other != side {
-                    side = BOTH;
-                }
-            }
-            match side {
-                OLD => only_old.push(run),
-                NEW => only_new.push(run),
-                _ => {}
-            }
-            for &p in self.parents(run as usize) {
-                heap.push((p, side));
-                if side == BOTH {
-                    shared += 1;
-                }
-            }
-            if heap.len() == shared {
-                break;
+    /// Marks a block visited, readying any children that were only waiting on it.
+    fn visited(&mut self, graph: &RegionGraph, block: usize) {
+        for &child in graph.children.row(block) {
+            self.waiting[child as usize] -= 1;
+            if self.waiting[child as usize] == 0 {
+                self.ready.push(child);
             }
         }
     }
 }
 
-fn each_bit(mut bits: u64, mut f: impl FnMut(u32)) {
-    while bits != 0 {
-        f(bits.trailing_zeros());
-        bits &= bits - 1;
+/// Plans walks. Holds scratch space that is reused from one region to the next.
+#[derive(Default)]
+pub struct Walker {
+    graph: RegionGraph,
+    chains: Chains,
+    schedule: Schedule,
+    /// The working version: how far along each chain it reaches.
+    current: Vec<u32>,
+}
+
+impl Walker {
+    /// Creates a walker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Walks the blocks in `region`, which must lie between two critical versions, calling
+    /// `visit` with each step. The first `known` blocks are already in the working version.
+    pub fn walk(&mut self, blocks: &Blocks, region: &Range<usize>, known: usize, mut visit: impl FnMut(Move)) {
+        let Walker { graph, chains, schedule, current } = self;
+        graph.build(blocks, region);
+        chains.build(graph, blocks, region);
+        schedule.build(graph, blocks, region, known);
+        chains.start(known, current);
+
+        // Blocks numbered one after another hold events numbered one after another.
+        let events = |first: u32, last: u32| blocks.start(region.start + first as usize)..blocks.start(region.start + last as usize + 1);
+        let mut last = None;
+        while let Some(block) = schedule.take_nearest(graph, chains, current, last) {
+            for (chain, &now) in current.iter().enumerate() {
+                let leaving = chains.between(chain, chains.seen(block, chain)..now);
+                each_stretch(leaving, |first, last| visit(Move::Retreat(events(first, last))));
+            }
+            for (chain, &now) in current.iter().enumerate() {
+                let returning = chains.between(chain, now..chains.seen(block, chain));
+                each_stretch(returning, |first, last| visit(Move::Advance(events(first, last))));
+            }
+            visit(Move::Apply(region.start + block));
+            chains.arrive(block, current);
+            schedule.visited(graph, block);
+            last = Some(block as u32);
+        }
+    }
+}
+
+/// Calls `f` with the first and last of each stretch of blocks numbered one after another.
+fn each_stretch(blocks: &[u32], mut f: impl FnMut(u32, u32)) {
+    let mut from = 0;
+    for to in 1..=blocks.len() {
+        if to == blocks.len() || blocks[to] != blocks[to - 1] + 1 {
+            f(blocks[from], blocks[to - 1]);
+            from = to;
+        }
     }
 }

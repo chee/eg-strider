@@ -1,48 +1,55 @@
-//! Merging a zone without the tracker, where its concurrent edits keep apart.
+//! Merges a region without CRDT state when its concurrent edits do not touch. This is the
+//! simple case of operational transformation: an edit's position is moved by the net length
+//! of the concurrent edits before it. Edited stretches of the document are kept as
+//! clusters, separated by text every remaining block has seen. An edit landing in a cluster
+//! that holds edits it has not seen cannot be placed this way, and the region goes to the
+//! tracker. A block is stable once every later block has seen it (causal stability).
 
 use crate::oplog::{OpKind, OpLog};
 use crate::replay::Edits;
 use std::ops::Range;
-use strider_graph::Runs;
+use strider_graph::Blocks;
 
-/// Zones with more runs than this go straight to the tracker: the sets of runs kept for
-/// each run would take too much room.
-const MAX_RUNS: usize = 2048;
+/// Regions with more blocks than this go straight to the tracker. The sets of blocks kept for
+/// each block grow with the square of this: 256 KB here.
+const MAX_BLOCKS: usize = 1024;
 
-/// A zone with more clusters than this at once is too scattered for a list of them to be
-/// the right tool.
-const MAX_CLUSTERS: usize = 32;
+/// With more clusters than this at once, looking through the list for every edit costs
+/// more than the tracker would.
+const MAX_CLUSTERS: usize = 64;
 
-/// A stretch of the document that runs of the zone have edited. `start` and `len` are in
+/// A stretch of the document that blocks of the region have edited. `start` and `len` are in
 /// the document as merged so far.
 struct Cluster {
     start: i64,
     len: i64,
-    /// The runs that edited here and are not settled, and by how much each changed the
+    /// The blocks that edited here and are not stable, and by how much each changed the
     /// cluster's length.
     members: Vec<(u32, i64)>,
 }
 
 impl Cluster {
-    fn add(&mut self, run: u32, grew: i64) {
+    /// Records that `block` changed the cluster's length by `grew`.
+    fn add(&mut self, block: u32, grew: i64) {
         match self.members.last_mut() {
-            Some((last, by)) if *last == run => *by += grew,
-            _ => self.members.push((run, grew)),
+            Some((last, by)) if *last == block => *by += grew,
+            _ => self.members.push((block, grew)),
         }
     }
 }
 
-/// The run whose edits are being placed.
+/// The block whose edits are being placed.
 struct Viewer<'a> {
-    run: u32,
-    /// The zone's runs in its version, itself included.
+    block: u32,
+    /// The region's blocks in its version, itself included.
     seen: &'a [u64],
-    /// The runs that it and every run after it have seen.
-    settled: &'a [u64],
+    /// The blocks that it and every block after it have seen.
+    stable: &'a [u64],
 }
 
-fn has(set: &[u64], run: u32) -> bool {
-    set[run as usize / 64] >> (run % 64) & 1 == 1
+/// Tells whether `block` is in `set`.
+fn has(set: &[u64], block: u32) -> bool {
+    set[block as usize / 64] >> (block % 64) & 1 == 1
 }
 
 #[derive(Default)]
@@ -53,6 +60,7 @@ struct Clusters {
 }
 
 impl Clusters {
+    /// Empties the list, keeping its allocations for the next region.
     fn clear(&mut self) {
         for mut cluster in self.list.drain(..) {
             cluster.members.clear();
@@ -60,16 +68,16 @@ impl Clusters {
         }
     }
 
-    /// How much longer cluster `i` is than `viewer` knows, with whether any run it has not
-    /// seen edited there. Forgets settled runs first; if none are left, the cluster is
+    /// Works out how much longer cluster `i` is than `viewer` knows, with whether any block it has not
+    /// seen edited there. Forgets stable blocks first; if none are left, the cluster is
     /// dropped and `None` returned, and `i` is then the cluster that followed.
     fn unseen(&mut self, i: usize, viewer: &Viewer) -> Option<(i64, bool)> {
         let (mut longer, mut any) = (0, false);
-        self.list[i].members.retain(|&(run, grew)| {
-            if has(viewer.settled, run) {
+        self.list[i].members.retain(|&(block, grew)| {
+            if has(viewer.stable, block) {
                 return false;
             }
-            if !has(viewer.seen, run) {
+            if !has(viewer.seen, block) {
                 longer += grew;
                 any = true;
             }
@@ -88,15 +96,15 @@ impl Clusters {
             return None;
         }
         let mut members = self.spare.pop().unwrap_or_default();
-        members.push((viewer.run, grew));
+        members.push((viewer.block, grew));
         self.list.insert(i, Cluster { start, len, members });
         Some(())
     }
 
-    /// Where an insert of `len` characters at `pos`, in the document as `viewer` knows it,
+    /// Finds where an insert of `len` characters at `pos`, in the document as `viewer` knows it,
     /// goes in the document as merged so far.
     fn insert(&mut self, viewer: &Viewer, pos: i64, len: i64) -> Option<i64> {
-        let own = !has(viewer.settled, viewer.run);
+        let own = !has(viewer.stable, viewer.block);
         // `shift`: how much further along the merged document is than the viewer's.
         let (mut i, mut shift, mut inside) = (0, 0, false);
         while i < self.list.len() {
@@ -121,7 +129,7 @@ impl Clusters {
         if inside {
             self.list[i].len += len;
             if own {
-                self.list[i].add(viewer.run, len);
+                self.list[i].add(viewer.block, len);
             }
             i += 1;
         } else if own {
@@ -134,10 +142,10 @@ impl Clusters {
         Some(at)
     }
 
-    /// Where a removal of the `len` characters at `pos`, in the document as `viewer` knows
+    /// Finds where a removal of the `len` characters at `pos`, in the document as `viewer` knows
     /// it, goes in the document as merged so far.
     fn remove(&mut self, viewer: &Viewer, pos: i64, len: i64) -> Option<i64> {
-        let own = !has(viewer.settled, viewer.run);
+        let own = !has(viewer.stable, viewer.block);
         // Clusters that end before the removed text, with a character in between.
         let (mut i, mut shift) = (0, 0);
         while i < self.list.len() {
@@ -180,7 +188,7 @@ impl Clusters {
             self.list[i].start = start;
             self.list[i].len = end - start - len;
             if own {
-                self.list[i].add(viewer.run, -len);
+                self.list[i].add(viewer.block, -len);
             }
             i += 1;
         } else if own {
@@ -194,31 +202,31 @@ impl Clusters {
     }
 }
 
-/// Working room for merging zones by shifting.
+/// Working room for merging regions by shifting.
 #[derive(Default)]
 pub(crate) struct Shifter {
-    /// For each run of the zone: the zone's runs in its version, itself included.
+    /// For each block of the region: the region's blocks in its version, itself included.
     seen: Vec<u64>,
-    /// For each run of the zone: the runs that it and every later run have seen.
-    settled: Vec<u64>,
+    /// For each block of the region: the blocks that it and every later block have seen.
+    stable: Vec<u64>,
     clusters: Clusters,
 }
 
 impl Shifter {
-    /// Merges a zone by shifting, adding the edits it comes to to `doc`. Returns false,
-    /// with `doc` as it was, if the zone needs the tracker.
-    pub fn merge(&mut self, log: &OpLog, runs: &Runs, first_op: &[u32], zone: &Range<usize>, doc: &mut Edits) -> bool {
-        if zone.len() > MAX_RUNS {
+    /// Merges a region by shifting, adding the edits it comes to to `doc`. Returns false,
+    /// with `doc` as it was, if the region needs the tracker.
+    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[u32], region: &Range<usize>, doc: &mut Edits) -> bool {
+        if region.len() > MAX_BLOCKS {
             return false;
         }
-        let words = self.sets(runs, zone);
-        let Shifter { seen, settled, clusters } = self;
+        let words = self.sets(blocks, region);
+        let Shifter { seen, stable, clusters } = self;
         clusters.clear();
 
         let mark = doc.mark();
-        for (i, run) in (zone.start..zone.end).enumerate() {
-            let viewer = Viewer { run: i as u32, seen: &seen[i * words..][..words], settled: &settled[i * words..][..words] };
-            for op in log.ops(first_op[run], runs.events(run)) {
+        for (i, block) in (region.start..region.end).enumerate() {
+            let viewer = Viewer { block: i as u32, seen: &seen[i * words..][..words], stable: &stable[i * words..][..words] };
+            for op in log.ops(first_op[block], blocks.events(block)) {
                 let at = match op.kind {
                     OpKind::Ins => clusters.insert(&viewer, op.pos as i64, op.len as i64),
                     OpKind::Del => clusters.remove(&viewer, op.pos as i64, op.len as i64),
@@ -236,29 +244,29 @@ impl Shifter {
         true
     }
 
-    /// Fills in `seen` and `settled` for the zone. Returns how many words each set has.
-    fn sets(&mut self, runs: &Runs, zone: &Range<usize>) -> usize {
-        let count = zone.len();
+    /// Fills in `seen` and `stable` for the region. Returns how many words each set has.
+    fn sets(&mut self, blocks: &Blocks, region: &Range<usize>) -> usize {
+        let count = region.len();
         let words = count.div_ceil(64);
         self.seen.clear();
         self.seen.resize(count * words, 0);
         for i in 0..count {
             let (earlier, own) = self.seen.split_at_mut(i * words);
             let own = &mut own[..words];
-            // Parents from before the zone are before a critical version: all have them.
-            for parent in runs.parents(zone.start + i).iter().filter_map(|&p| (p as usize).checked_sub(zone.start)) {
+            // Parents from before the region are before a critical version: all have them.
+            for parent in blocks.parents(region.start + i).iter().filter_map(|&p| (p as usize).checked_sub(region.start)) {
                 for (word, theirs) in own.iter_mut().zip(&earlier[parent * words..][..words]) {
                     *word |= theirs;
                 }
             }
             own[i / 64] |= 1 << (i % 64);
         }
-        self.settled.clear();
-        self.settled.resize(count * words, u64::MAX);
+        self.stable.clear();
+        self.stable.resize(count * words, u64::MAX);
         for i in (0..count).rev() {
             for word in 0..words {
-                let later = if i + 1 < count { self.settled[(i + 1) * words + word] } else { u64::MAX };
-                self.settled[i * words + word] = later & self.seen[i * words + word];
+                let later = if i + 1 < count { self.stable[(i + 1) * words + word] } else { u64::MAX };
+                self.stable[i * words + word] = later & self.seen[i * words + word];
             }
         }
         words

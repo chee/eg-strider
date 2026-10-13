@@ -1,13 +1,18 @@
-//! Works out a document's final text from the edits that were made to it.
+//! Builds a document's final text from the edits made to it. A replay only wants the text
+//! at the end and knows every edit beforehand, so instead of applying the edits to a rope
+//! it takes them back from last to first. What it tracks is a piece table over the final
+//! text: each piece of the document at that moment either maps to a place in the final text
+//! or was deleted later. Taking back an insert copies whichever of its characters survive
+//! straight to their final place.
 
-mod runs;
+mod pieces;
 
-use runs::Runs;
+use pieces::PieceTable;
 
 /// A document being taken back from its final state to empty, one edit at a time, last edit
 /// first. Positions and lengths count characters.
 pub struct Rewind {
-    runs: Runs,
+    pieces: PieceTable,
     /// Length of the document with the edits taken back so far undone.
     len: u32,
     text: Text,
@@ -23,12 +28,13 @@ enum Text {
 impl Rewind {
     /// Starts from the final document, which is `len` characters long.
     pub fn new(len: u32) -> Self {
-        Rewind { runs: Runs::new(len), len, text: Text::Ascii(vec![0; len as usize]) }
+        Rewind { pieces: PieceTable::new(len), len, text: Text::Ascii(vec![0; len as usize]) }
     }
 
     /// Takes back an insert that put `text`, `len` characters long, at `pos`.
     pub fn undo_insert(&mut self, pos: u32, text: &str, len: u32) {
         assert!(pos.checked_add(len).is_some_and(|end| end <= self.len), "insert was not within the document");
+        // Debug builds only: counting takes as long as the text.
         debug_assert_eq!(text.chars().count(), len as usize);
         if len == 0 {
             return;
@@ -39,7 +45,7 @@ impl Rewind {
             self.text = Text::Wide(bytes.iter().map(|&b| b as char).collect());
         }
         match &mut self.text {
-            Text::Ascii(slots) => self.runs.remove(pos, len, |at, skip, n| {
+            Text::Ascii(slots) => self.pieces.remove(pos, len, |at, skip, n| {
                 let (at, skip, n) = (at as usize, skip as usize, n as usize);
                 slots[at..at + n].copy_from_slice(&text.as_bytes()[skip..skip + n]);
             }),
@@ -47,7 +53,7 @@ impl Rewind {
                 // The survivors come in the order they have in `text`, so one pass over it
                 // reaches them all. `passed` counts the characters gone by.
                 let (mut rest, mut passed) = (text.chars(), 0);
-                self.runs.remove(pos, len, |at, skip, n| {
+                self.pieces.remove(pos, len, |at, skip, n| {
                     let slots = &mut slots[at as usize..(at + n) as usize];
                     if ascii {
                         for (slot, &b) in slots.iter_mut().zip(&text.as_bytes()[skip as usize..]) {
@@ -74,10 +80,10 @@ impl Rewind {
             return;
         }
         self.len = self.len.checked_add(len).expect("document too long");
-        self.runs.insert_doomed(pos, len);
+        self.pieces.insert_deleted(pos, len);
     }
 
-    /// The final text.
+    /// Returns the final text.
     pub fn finish(self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");
         match self.text {

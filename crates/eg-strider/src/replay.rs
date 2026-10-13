@@ -1,13 +1,18 @@
-//! Replaying an operation log into a document.
+//! Replays an operation log into the document's text. The history is cut at its critical
+//! versions. A stretch with no concurrency is applied as recorded. A region is first tried by
+//! offset arithmetic ([`shift`](crate::shift)) and otherwise walked with the tracker; what
+//! the tracker resolves is memoised at the region's critical version, since it never changes,
+//! so later replays place those events directly. The resulting edits are then taken back
+//! from last to first to assemble the text.
 
 use crate::oplog::{OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
 use crate::tracker::Tracker;
 use std::ops::Range;
-use strider_graph::{Move, Runs, Segment, Walker};
+use strider_graph::{Move, Blocks, Segment, Walker};
 use strider_text::Rewind;
 
-/// The edits that merged zones come to, in the order they are made.
+/// The edits that merged regions come to, in the order they are made.
 #[derive(Default)]
 pub(crate) struct Edits {
     made: Vec<Edit>,
@@ -23,17 +28,19 @@ struct Edit {
 }
 
 impl Edits {
+    /// Records an insert of `len` characters at `pos`.
     pub(crate) fn insert(&mut self, pos: u32, text: (u32, u32), len: u32) {
         self.len += len;
         self.made.push(Edit { pos, len, text });
     }
 
+    /// Records a removal of `len` characters at `pos`.
     pub(crate) fn remove(&mut self, pos: u32, len: u32) {
         self.len -= len;
         self.made.push(Edit { pos, len, text: (0, 0) });
     }
 
-    /// Where things stand, to come back to with [`undo_to`](Self::undo_to).
+    /// Notes where things stand, to come back to with [`undo_to`](Self::undo_to).
     pub(crate) fn mark(&self) -> (usize, u32) {
         (self.made.len(), self.len)
     }
@@ -45,11 +52,11 @@ impl Edits {
     }
 }
 
-/// What the critical version at the start of a zone keeps about it, once the zone has been
+/// What the critical version at the start of a region keeps about it, once the region has been
 /// through the tracker.
 #[derive(Default)]
 struct Kept {
-    /// How many of the zone's events, counting from its start, `resolved` covers.
+    /// How many of the region's events, counting from its start, `resolved` covers.
     events: u32,
     /// Tracker items, op by op in log order. An insert: the left origin of its first
     /// character, then the right origin all share. A delete: for each stretch of
@@ -66,74 +73,75 @@ pub(crate) struct Memo {
     tracker: Tracker,
     walker: Walker,
     shifter: Shifter,
-    /// How many edits the zones came to last time: room to set aside for them next time.
-    zone_edits: usize,
+    /// How many edits the regions came to last time: room to set aside for them next time.
+    region_edits: usize,
 }
 
 /// The shape of the history, valid while the log has the same number of events.
 struct Plan {
     events: usize,
-    runs: Runs,
+    blocks: Blocks,
     segments: Vec<Segment>,
-    /// For each run, the index of the op containing its first event.
+    /// For each block, the index of the op containing its first event.
     first_op: Vec<u32>,
     /// For each segment, what the critical version it starts at keeps. Nothing, unless the
-    /// segment is a zone that has been through the tracker.
+    /// segment is a region that has been through the tracker.
     kept: Vec<Kept>,
 }
 
 impl Plan {
-    /// Analyses the log. Zones that start from a critical version of the `previous` plan
+    /// Analyses the log. Regions that start from a critical version of the `previous` plan
     /// take over what it kept for them.
     fn new(log: &OpLog, mut previous: Option<Plan>) -> Self {
-        let runs = log.graph.runs();
-        let segments = runs.segments();
-        let first_op = log.ops_containing((0..runs.len()).map(|run| runs.start(run)));
+        let blocks = log.graph.blocks();
+        let segments = blocks.segments();
+        let first_op = log.ops_containing((0..blocks.len()).map(|block| blocks.start(block)));
         let kept = segments
             .iter()
             .map(|segment| match (segment, &mut previous) {
-                (Segment::Zone(zone), Some(previous)) => previous.take_kept(runs.start(zone.start)),
+                (Segment::Region(region), Some(previous)) => previous.take_kept(blocks.start(region.start)),
                 _ => Kept::default(),
             })
             .collect();
-        Plan { events: log.len(), runs, segments, first_op, kept }
+        Plan { events: log.len(), blocks, segments, first_op, kept }
     }
 
-    /// What is kept for the zone that starts at event `start`, if there is one.
+    /// Takes what is kept for the region that starts at event `start`, if there is one.
     fn take_kept(&mut self, start: u32) -> Kept {
-        let runs = &self.runs;
-        match self.segments.binary_search_by_key(&start, |segment| runs.start(segment.runs().start)) {
+        let blocks = &self.blocks;
+        match self.segments.binary_search_by_key(&start, |segment| blocks.start(segment.blocks().start)) {
             Ok(at) => std::mem::take(&mut self.kept[at]),
             Err(_) => Kept::default(),
         }
     }
 
-    /// How many zones have been through the tracker.
-    fn tracked_zones(&self) -> usize {
+    /// Counts the regions that have been through the tracker.
+    fn tracked_regions(&self) -> usize {
         self.kept.iter().filter(|kept| kept.events > 0).count()
     }
 }
 
 impl Memo {
-    /// How many zones the last checkout could not merge by shifting alone.
-    pub(crate) fn tracked_zones(&self) -> usize {
-        self.plan.as_ref().map_or(0, Plan::tracked_zones)
+    /// Returns how many regions the last checkout could not merge by shifting alone.
+    pub(crate) fn tracked_regions(&self) -> usize {
+        self.plan.as_ref().map_or(0, Plan::tracked_regions)
     }
 }
 
+/// Merges every event in the log into the document's text, reusing and updating `memo`.
 pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     // The log only ever grows, so the same length means the same events.
     if memo.plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
         memo.plan = Some(Plan::new(log, memo.plan.take()));
     }
-    let Memo { plan, tracker, walker, shifter, zone_edits } = memo;
-    let plan = plan.as_mut().unwrap();
+    let Memo { plan, tracker, walker, shifter, region_edits } = memo;
+    let plan = plan.as_mut().expect("a plan was just made");
     let mut kept = std::mem::take(&mut plan.kept);
 
-    // Forwards: merge the zones. The events of a linear stretch are edits already, so all
+    // Forwards: merge the regions. The events of a linear stretch are edits already, so all
     // that is needed of them for now is what they do to the document's length.
-    let linear_events = |linear: &Range<usize>| plan.runs.start(linear.start)..plan.runs.start(linear.end);
-    let mut doc = Edits { made: Vec::with_capacity(*zone_edits), len: 0 };
+    let linear_events = |linear: &Range<usize>| plan.blocks.start(linear.start)..plan.blocks.start(linear.end);
+    let mut doc = Edits { made: Vec::with_capacity(*region_edits), len: 0 };
     let mut edits_before = Vec::with_capacity(plan.segments.len());
     for (segment, kept) in plan.segments.iter().zip(&mut kept) {
         edits_before.push(doc.made.len());
@@ -142,7 +150,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
                 let (inserted, removed) = log.lengths(plan.first_op[linear.start], linear_events(linear));
                 doc.len = doc.len + inserted - removed;
             }
-            Segment::Zone(zone) => merge_zone(log, plan, zone, kept, tracker, walker, shifter, &mut doc),
+            Segment::Region(region) => merge_region(log, plan, region, kept, tracker, walker, shifter, &mut doc),
         }
     }
 
@@ -159,7 +167,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
                     }
                 }
             }
-            Segment::Zone(_) => {
+            Segment::Region(_) => {
                 for edit in doc.made[edits_start..edits_end].iter().rev() {
                     if edit.text.0 < edit.text.1 {
                         text.undo_insert(edit.pos, log.text(edit.text), edit.len);
@@ -172,29 +180,29 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
         edits_end = edits_start;
     }
     plan.kept = kept;
-    *zone_edits = doc.made.len();
+    *region_edits = doc.made.len();
     text.finish()
 }
 
-/// Merges one zone, adding the edits it comes to to `doc`.
+/// Merges one region, adding the edits it comes to to `doc`.
 #[allow(clippy::too_many_arguments)]
-fn merge_zone(log: &OpLog, plan: &Plan, zone: &Range<usize>, kept: &mut Kept, tracker: &mut Tracker, walker: &mut Walker, shifter: &mut Shifter, doc: &mut Edits) {
-    // Nothing kept: the zone has not needed the tracker so far. See whether it does now.
-    if kept.events == 0 && shifter.merge(log, &plan.runs, &plan.first_op, zone, doc) {
+fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept, tracker: &mut Tracker, walker: &mut Walker, shifter: &mut Shifter, doc: &mut Edits) {
+    // Nothing kept: the region has not needed the tracker so far. See whether it does now.
+    if kept.events == 0 && shifter.merge(log, &plan.blocks, &plan.first_op, region, doc) {
         return;
     }
-    let runs = &plan.runs;
-    let (start, end) = (runs.start(zone.start), runs.start(zone.end));
-    let first_op = plan.first_op[zone.start];
+    let blocks = &plan.blocks;
+    let (start, end) = (blocks.start(region.start), blocks.start(region.end));
+    let first_op = plan.first_op[region.start];
     let goes_before = |a: u32, b: u32| log.inserts_before(start + a, start + b);
-    tracker.begin_zone((end - start) as usize);
+    tracker.begin_region((end - start) as usize);
 
-    // Runs resolved in full by earlier replays are placed by id. Their events stay in the
+    // Blocks resolved in full by earlier replays are placed by id. Their events stay in the
     // tracker's prepare version, which is where the walk of the rest begins.
-    let known_runs = (zone.start..zone.end).take_while(|&run| runs.start(run + 1) - start <= kept.events).count();
+    let known_blocks = (region.start..region.end).take_while(|&block| blocks.start(block + 1) - start <= kept.events).count();
     let mut resolved = kept.resolved.iter().copied();
     let mut next = || resolved.next().expect("something kept for every resolved event");
-    for op in log.ops(first_op, start..runs.start(zone.start + known_runs)) {
+    for op in log.ops(first_op, start..blocks.start(region.start + known_blocks)) {
         let lv = op.lv - start;
         match op.kind {
             OpKind::Ins => {
@@ -214,21 +222,21 @@ fn merge_zone(log: &OpLog, plan: &Plan, zone: &Range<usize>, kept: &mut Kept, tr
             }
         }
     }
-    if known_runs == zone.len() {
+    if known_blocks == region.len() {
         return;
     }
 
-    walker.walk(runs, zone, known_runs, |step| match step {
+    walker.walk(blocks, region, known_blocks, |step| match step {
         Move::Retreat(events) => tracker.retreat(events.start - start..events.end - start),
         Move::Advance(events) => tracker.advance(events.start - start..events.end - start),
-        Move::Apply(run) => {
-            for op in log.ops(plan.first_op[run], runs.events(run)) {
+        Move::Apply(block) => {
+            for op in log.ops(plan.first_op[block], blocks.events(block)) {
                 walk_op(start, op, tracker, &goes_before, doc);
             }
         }
     });
 
-    // The tracker now knows what every event of the zone resolved to. Keep that.
+    // The tracker now knows what every event of the region resolved to. Keep that.
     kept.events = end - start;
     kept.resolved.clear();
     for op in log.ops(first_op, start..end) {

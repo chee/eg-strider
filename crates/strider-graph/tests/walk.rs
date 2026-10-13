@@ -40,18 +40,18 @@ fn graph_of(replicas: usize, steps: &[Step]) -> Graph {
 
 /// Every event in each event's history, by brute force.
 fn histories(graph: &Graph) -> Vec<Vec<bool>> {
-    let runs = graph.runs();
+    let blocks = graph.blocks();
     let mut of_event: Vec<Vec<bool>> = Vec::new();
-    for run in 0..runs.len() {
+    for block in 0..blocks.len() {
         let mut seen = vec![false; graph.len() as usize];
-        for &p in runs.parents(run) {
-            let last = runs.events(p as usize).end as usize - 1;
+        for &p in blocks.parents(block) {
+            let last = blocks.events(p as usize).end as usize - 1;
             seen[last] = true;
             for (s, &a) in seen.iter_mut().zip(&of_event[last]) {
                 *s |= a;
             }
         }
-        for event in runs.events(run) {
+        for event in blocks.events(block) {
             of_event.push(seen.clone());
             seen[event as usize] = true;
         }
@@ -69,21 +69,21 @@ fn reduce(graph: &Graph, version: &[u32]) -> Vec<u32> {
     reduced
 }
 
-/// Follows the moves of a walk on plain sets, checking that every run is applied exactly
-/// once and that the working version is then exactly the run's history.
+/// Follows the moves of a walk on plain sets, checking that every block is applied exactly
+/// once and that the working version is then exactly the block's history.
 fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
-    let runs = graph.runs();
+    let blocks = graph.blocks();
     let histories = histories(graph);
-    let mut applied = vec![false; runs.len()];
-    for segment in runs.segments() {
-        let Segment::Zone(zone) = segment else { continue };
-        let known = zone.len() * known_quarters / 4;
-        let base = runs.start(zone.start) as usize;
+    let mut applied = vec![false; blocks.len()];
+    for segment in blocks.segments() {
+        let Segment::Region(region) = segment else { continue };
+        let known = region.len() * known_quarters / 4;
+        let base = blocks.start(region.start) as usize;
         let mut version = vec![false; graph.len() as usize];
-        version[..runs.start(zone.start + known) as usize].fill(true);
-        applied[zone.start..zone.start + known].fill(true);
+        version[..blocks.start(region.start + known) as usize].fill(true);
+        applied[region.start..region.start + known].fill(true);
 
-        walker.walk(&runs, &zone, known, |step| match step {
+        walker.walk(&blocks, &region, known, |step| match step {
             Move::Retreat(events) => {
                 for e in events {
                     assert!(std::mem::replace(&mut version[e as usize], false), "retreated an event that was not there");
@@ -94,25 +94,23 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
                     assert!(!std::mem::replace(&mut version[e as usize], true), "advanced an event that was there");
                 }
             }
-            Move::Apply(run) => {
-                assert!(!std::mem::replace(&mut applied[run], true), "run applied twice");
-                let first = runs.events(run).start as usize;
-                assert_eq!(version[base..], histories[first][base..], "wrong version for run {run}");
-                for e in runs.events(run) {
+            Move::Apply(block) => {
+                assert!(!std::mem::replace(&mut applied[block], true), "block applied twice");
+                let first = blocks.events(block).start as usize;
+                assert_eq!(version[base..], histories[first][base..], "wrong version for block {block}");
+                for e in blocks.events(block) {
                     version[e as usize] = true;
                 }
             }
         });
-        assert!(applied[zone.start..zone.end].iter().all(|&a| a), "a run was never applied");
+        assert!(applied[region.start..region.end].iter().all(|&a| a), "a block was never applied");
     }
 }
 
 proptest! {
     #[test]
-    fn every_run_is_applied_at_its_parents_version(replicas in 2usize..6, steps in steps(), known_quarters in 0usize..4) {
+    fn every_block_is_applied_at_its_parents_version(replicas in 2usize..6, steps in steps(), known_quarters in 0usize..4) {
         let graph = graph_of(replicas, &steps);
         check_walk(&graph, &mut Walker::new(), known_quarters);
-        // A limit of 0 forces the path that searches the graph for each move.
-        check_walk(&graph, &mut Walker::with_bitset_limit(0), known_quarters);
     }
 }

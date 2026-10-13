@@ -17,6 +17,7 @@ static MOST: AtomicUsize = AtomicUsize::new(0);
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
+/// Counts `bytes` more in use, raising the high-water mark if it is passed.
 fn took(bytes: usize) {
     MOST.fetch_max(IN_USE.fetch_add(bytes, Relaxed) + bytes, Relaxed);
 }
@@ -53,6 +54,7 @@ struct Memory {
     kept: usize,
 }
 
+/// Runs `f` and reports what it did to the memory in use.
 fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
     let before = IN_USE.load(Relaxed);
     MOST.store(before, Relaxed);
@@ -60,7 +62,7 @@ fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
     (result, Memory { peak: MOST.load(Relaxed) - before, kept: IN_USE.load(Relaxed).saturating_sub(before) })
 }
 
-/// The history as Loro updates and as a Loro snapshot, with the notes on its replay.
+/// Loads the history as Loro updates and as a Loro snapshot, with the notes on its replay.
 fn in_loro(path: &str, dt: &ListOpLog, replay: bool) -> Result<(Vec<u8>, Vec<u8>, String), &'static str> {
     let (updates, notes) = replayed::<compare::replicas::Loro>(path, "loro", dt, replay)?;
     let doc = LoroDoc::new();
@@ -72,7 +74,7 @@ fn in_loro(path: &str, dt: &ListOpLog, replay: bool) -> Result<(Vec<u8>, Vec<u8>
 /// How long replaying a history into another library may take before it is given up on.
 const LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// The history in another library's format, with how many peers it took and how many
+/// Loads the history in another library's format, with how many peers it took and how many
 /// edits had to be moved. Replayed into the library on first use and kept beside the trace.
 fn replayed<R: compare::replicas::Replica>(path: &str, kind: &str, dt: &ListOpLog, replay: bool) -> Result<(Vec<u8>, String), &'static str> {
     let file = |suffix: &str| format!("{path}.{kind}{suffix}");
@@ -96,7 +98,7 @@ fn replayed<R: compare::replicas::Replica>(path: &str, kind: &str, dt: &ListOpLo
     Ok((replayed.saved, notes))
 }
 
-/// The text of an Automerge document saved as `bytes`.
+/// Loads an Automerge document saved as `bytes` and returns its text.
 fn automerge_load(bytes: &[u8]) -> String {
     use automerge::ReadDoc;
     let doc = automerge::AutoCommit::load(bytes).unwrap();
@@ -104,7 +106,7 @@ fn automerge_load(bytes: &[u8]) -> String {
     doc.text(&text).unwrap()
 }
 
-/// The text of a Yjs document (in its Rust port, yrs) given its history as an update.
+/// Applies a history to a new Yjs document (its Rust port, yrs) and returns its text.
 fn yjs_load(bytes: &[u8]) -> String {
     use yrs::updates::decoder::Decode;
     use yrs::{GetString, Transact};
@@ -115,7 +117,7 @@ fn yjs_load(bytes: &[u8]) -> String {
     string
 }
 
-/// The best time in milliseconds of up to `reps` runs, fewer once they have taken three
+/// Returns the best time in milliseconds of up to `reps` runs, fewer once they have taken three
 /// seconds, and the last result.
 fn best_of<T>(reps: u32, mut f: impl FnMut() -> T) -> (f64, T) {
     let (mut best, mut spent, mut runs) = (f64::MAX, 0.0, 0);
@@ -130,13 +132,14 @@ fn best_of<T>(reps: u32, mut f: impl FnMut() -> T) -> (f64, T) {
     }
 }
 
-/// A new Loro document with `bytes` imported, and its text.
+/// Imports `bytes` into a new Loro document and returns its text.
 fn loro_import(bytes: &[u8]) -> String {
     let doc = LoroDoc::new();
     doc.import(bytes).unwrap();
     doc.get_text(TEXT).to_string()
 }
 
+/// Formats a byte count in megabytes.
 fn mb(bytes: usize) -> String {
     format!("{:.2} MB", bytes as f64 / (1 << 20) as f64)
 }

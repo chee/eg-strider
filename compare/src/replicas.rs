@@ -1,4 +1,8 @@
-//! Replaying a history into another library's documents, with the same event graph.
+//! Replays a history into another library (Loro, Automerge, Yjs) so that all of them are
+//! measured on the same thing. Each chunk of events has to be made by a document that holds
+//! exactly what its author had seen, so there is one replica per peer, sent just the
+//! updates it lacks before it makes its next edits. An agent with events concurrent to its
+//! own becomes several peers, and a new peer starts as a copy of an existing replica.
 
 use diamond_types::list::operation::ListOpKind;
 use diamond_types::list::ListOpLog;
@@ -20,18 +24,20 @@ pub trait Replica {
     /// What a batch of edits turns into, to pass to other replicas.
     type Update;
 
+    /// Creates an empty replica for `peer`. `ascii` says whether all the text to come is ASCII.
     fn new(peer: u64, ascii: bool) -> Self;
 
-    /// A copy of this replica, for another peer to carry on from.
+    /// Copies this replica, for another peer to carry on from.
     fn fork(&mut self, peer: u64) -> Self;
 
+    /// Takes in what other replicas made.
     fn apply(&mut self, updates: &[&Self::Update]);
 
     /// Makes the edits. Returns what they made, if anything, and how many could not be
     /// made where they were recorded and were moved to the end or cut short.
     fn edit(&mut self, edits: &[Edit]) -> (Option<Self::Update>, usize);
 
-    /// Everything the replica holds, in the library's own format.
+    /// Saves everything the replica holds, in the library's own format.
     fn save(&mut self) -> Vec<u8>;
 }
 
@@ -42,7 +48,7 @@ pub struct Replayed {
 }
 
 /// Events made one after another that no other event branches from part-way.
-struct Atom {
+struct Block {
     start: usize,
     len: usize,
     agent: usize,
@@ -50,13 +56,14 @@ struct Atom {
     edits: Vec<Edit>,
 }
 
-fn atoms(dt: &ListOpLog) -> Vec<Atom> {
+/// Cuts a log into blocks: its chunks, split wherever an event is some other event's parent.
+fn blocks(dt: &ListOpLog) -> Vec<Block> {
     let chunks = dt.as_chunked_operation_vec();
     let mut cuts: Vec<usize> = chunks.iter().flat_map(|chunk| chunk.parents.as_ref().iter().map(|&p| p + 1)).collect();
     cuts.sort_unstable();
     cuts.dedup();
 
-    let mut atoms = Vec::new();
+    let mut blocks = Vec::new();
     for chunk in &chunks {
         let (start, end) = (chunk.span.start, chunk.span.end);
         let inside = &cuts[cuts.partition_point(|&cut| cut <= start)..cuts.partition_point(|&cut| cut < end)];
@@ -80,17 +87,17 @@ fn atoms(dt: &ListOpLog) -> Vec<Atom> {
                 first += n;
             }
             let parents = if from == start { chunk.parents.as_ref().to_vec() } else { vec![from - 1] };
-            atoms.push(Atom { start: from, len: to - from, agent: chunk.agent_span.agent as usize, parents, edits });
+            blocks.push(Block { start: from, len: to - from, agent: chunk.agent_span.agent as usize, parents, edits });
             from = to;
         }
     }
-    atoms
+    blocks
 }
 
-/// Which peer makes an atom, and what its author had seen.
+/// Which peer makes an block, and what its author had seen.
 struct Plan {
     peer: usize,
-    /// The peer's events before this atom.
+    /// The peer's events before this block.
     counter: usize,
     /// For each peer known at the time, how many of its events the author had seen.
     seen: Vec<usize>,
@@ -103,12 +110,12 @@ struct Plan {
 /// these libraries need each peer's events to be made one after another.
 pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
     let began = Instant::now();
-    let atoms = atoms(dt);
-    let ascii = atoms.iter().all(|atom| atom.edits.iter().all(|edit| edit.text.is_ascii()));
+    let blocks = blocks(dt);
+    let ascii = blocks.iter().all(|block| block.edits.iter().all(|edit| edit.text.is_ascii()));
 
     // Ties between concurrent inserts are broken by peer id where diamond-types uses
     // the agent's name: numbering peers in name order makes most of them agree.
-    let agents = atoms.iter().map(|atom| atom.agent + 1).max().unwrap_or(0);
+    let agents = blocks.iter().map(|block| block.agent + 1).max().unwrap_or(0);
     let mut by_name: Vec<usize> = (0..agents).collect();
     by_name.sort_by_key(|&agent| dt.get_agent_name(agent as _));
     let mut rank = vec![0u64; agents];
@@ -116,34 +123,34 @@ pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
         rank[agent] = place as u64 + 1;
     }
 
-    let mut plans: Vec<Plan> = Vec::with_capacity(atoms.len());
+    let mut plans: Vec<Plan> = Vec::with_capacity(blocks.len());
     let mut ids: Vec<u64> = Vec::new();
     let mut next: Vec<usize> = Vec::new();
     let mut last_use: Vec<usize> = Vec::new();
     let mut peers_of: Vec<Vec<usize>> = vec![Vec::new(); agents];
-    // After each atom, the new peers that start out as copies of the replica that made it.
+    // After each block, the new peers that start out as copies of the replica that made it.
     // Starting them empty would mean replaying all they have seen, once for every peer.
-    let mut copies: Vec<Vec<usize>> = vec![Vec::new(); atoms.len()];
-    for (i, atom) in atoms.iter().enumerate() {
+    let mut copies: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
+    for (i, block) in blocks.iter().enumerate() {
         let mut seen = vec![0; next.len()];
-        let made_by = |parent: usize| atoms.partition_point(|a| a.start <= parent) - 1;
-        for k in atom.parents.iter().map(|&parent| made_by(parent)) {
+        let made_by = |parent: usize| blocks.partition_point(|a| a.start <= parent) - 1;
+        for k in block.parents.iter().map(|&parent| made_by(parent)) {
             for (mine, &theirs) in seen.iter_mut().zip(&plans[k].seen) {
                 *mine = (*mine).max(theirs);
             }
-            seen[plans[k].peer] = seen[plans[k].peer].max(plans[k].counter + atoms[k].len);
+            seen[plans[k].peer] = seen[plans[k].peer].max(plans[k].counter + blocks[k].len);
         }
         // A peer of this agent all of whose events the author had seen can carry on.
-        let peer = match peers_of[atom.agent].iter().find(|&&peer| seen[peer] == next[peer]) {
+        let peer = match peers_of[block.agent].iter().find(|&&peer| seen[peer] == next[peer]) {
             Some(&peer) => peer,
             None => {
                 // It starts from the parent that had seen the most.
-                let had_seen = |k: &usize| plans[*k].seen.iter().sum::<usize>() + atoms[*k].len;
-                if let Some(from) = atom.parents.iter().map(|&parent| made_by(parent)).max_by_key(had_seen) {
+                let had_seen = |k: &usize| plans[*k].seen.iter().sum::<usize>() + blocks[*k].len;
+                if let Some(from) = block.parents.iter().map(|&parent| made_by(parent)).max_by_key(had_seen) {
                     copies[from].push(next.len());
                 }
-                ids.push(rank[atom.agent] << 20 | peers_of[atom.agent].len() as u64);
-                peers_of[atom.agent].push(next.len());
+                ids.push(rank[block.agent] << 20 | peers_of[block.agent].len() as u64);
+                peers_of[block.agent].push(next.len());
                 next.push(0);
                 last_use.push(0);
                 seen.push(0);
@@ -151,19 +158,19 @@ pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
             }
         };
         plans.push(Plan { peer, counter: next[peer], seen });
-        next[peer] += atom.len;
+        next[peer] += block.len;
         last_use[peer] = i;
     }
 
     let peers = next.len();
-    eprintln!("  {} stretches of events, {peers} peers", atoms.len());
+    eprintln!("  {} stretches of events, {peers} peers", blocks.len());
     let mut docs: Vec<Option<R>> = (0..peers).map(|_| None).collect();
     let mut held: Vec<Vec<usize>> = vec![Vec::new(); peers];
-    let mut updates: Vec<Option<R::Update>> = Vec::with_capacity(atoms.len());
-    // For each peer, the atoms it has made: its events before each, and the atom.
+    let mut updates: Vec<Option<R::Update>> = Vec::with_capacity(blocks.len());
+    // For each peer, the blocks it has made: its events before each, and the block.
     let mut made: Vec<Vec<(usize, usize)>> = vec![Vec::new(); peers];
     let mut moved = 0;
-    for (i, (atom, plan)) in atoms.iter().zip(&plans).enumerate() {
+    for (i, (block, plan)) in blocks.iter().zip(&plans).enumerate() {
         if i % 64 == 0 && began.elapsed() > limit {
             return None;
         }
@@ -180,12 +187,12 @@ pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
         if !wanted.is_empty() {
             doc.apply(&wanted);
         }
-        let (update, shifted) = doc.edit(&atom.edits);
+        let (update, shifted) = doc.edit(&block.edits);
         moved += shifted;
         updates.push(update);
         made[plan.peer].push((plan.counter, i));
         held[plan.peer].clone_from(&plan.seen);
-        held[plan.peer][plan.peer] = plan.counter + atom.len;
+        held[plan.peer][plan.peer] = plan.counter + block.len;
         for &new in &copies[i] {
             let copy = docs[plan.peer].as_mut().unwrap().fork(ids[new]);
             docs[new] = Some(copy);
@@ -335,6 +342,7 @@ pub struct Loro {
 }
 
 impl Loro {
+    /// Wraps a document, giving it `peer` as its id.
     fn with_peer(doc: loro::LoroDoc, peer: u64) -> Self {
         doc.set_peer_id(peer).unwrap();
         Loro { doc }

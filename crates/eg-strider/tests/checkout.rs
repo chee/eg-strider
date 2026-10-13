@@ -14,7 +14,7 @@ fn concurrent_edits_that_keep_apart_are_merged_by_shifting() {
     let y = log.add_insert_at(b, &[y.end - 1], 14, "4"); // "one two three 4!"
     log.add_insert_at(a, &[x.end - 1, y.end - 1], 1, "st");
     assert_eq!(log.checkout(), "1st two three 4!");
-    assert_eq!(log.tracked_zones(), 0);
+    assert_eq!(log.tracked_regions(), 0);
     assert_eq!(log.checkout(), "1st two three 4!");
 }
 
@@ -26,7 +26,7 @@ fn concurrent_edits_at_one_place_go_to_the_tracker() {
     log.add_insert_at(a, &base, 1, "x");
     log.add_insert_at(b, &base, 1, "y");
     assert_eq!(log.checkout(), "<xy>");
-    assert_eq!(log.tracked_zones(), 1);
+    assert_eq!(log.tracked_regions(), 1);
     assert_eq!(log.checkout(), "<xy>");
 }
 
@@ -87,7 +87,7 @@ fn checking_out_again_and_after_growing_gives_the_same_document() {
     assert_eq!(log.checkout(), "01!aa6789");
     assert_eq!(log.checkout(), "01!aa6789");
 
-    // A late branch from before the merge reopens the zone and extends it.
+    // A late branch from before the merge reopens the region and extends it.
     log.add_insert_at(a, &[left], 0, ">");
     log.add_insert_at(b, &[merged], 0, "#");
     let grown = log.checkout();
