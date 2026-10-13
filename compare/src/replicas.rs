@@ -273,7 +273,7 @@ impl Replica for Yjs {
     type Update = Vec<u8>;
 
     fn new(peer: u64, ascii: bool) -> Self {
-        let options = yrs::Options { client_id: peer, skip_gc: true, offset_kind: yrs::OffsetKind::Bytes, ..Default::default() };
+        let options = yrs::Options { client_id: yrs::block::ClientID::new(peer), skip_gc: true, offset_kind: yrs::OffsetKind::Bytes, ..Default::default() };
         let doc = yrs::Doc::with_options(options);
         let text = doc.get_or_insert_text("text");
         Yjs { doc, text, chars: (!ascii).then(Vec::new) }
@@ -284,7 +284,7 @@ impl Replica for Yjs {
         use yrs::{ReadTxn, StateVector, Transact};
         let state = self.doc.transact().encode_state_as_update_v1(&StateVector::default());
         let copy = Yjs { chars: self.chars.clone(), ..Yjs::new(peer, true) };
-        copy.doc.transact_mut().apply_update(yrs::Update::decode_v1(&state).unwrap());
+        copy.doc.transact_mut().apply_update(yrs::Update::decode_v1(&state).unwrap()).unwrap();
         copy
     }
 
@@ -293,7 +293,7 @@ impl Replica for Yjs {
         use yrs::{GetString, Transact};
         let mut txn = self.doc.transact_mut();
         for update in updates {
-            txn.apply_update(yrs::Update::decode_v1(update).unwrap());
+            txn.apply_update(yrs::Update::decode_v1(update).unwrap()).unwrap();
         }
         if let Some(chars) = &mut self.chars {
             *chars = self.text.get_string(&txn).chars().collect();

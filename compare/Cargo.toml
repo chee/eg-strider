@@ -13,8 +13,8 @@ eg-strider = { path = "../crates/eg-strider" }
 # correctness and speed. Pinned to the commit of the paper's artifact repository.
 diamond-types = { git = "https://github.com/josephg/egwalker-paper", rev = "4d9bef55e4f2e3b3b8b0efe8f91cd35d34ed35a8" }
 loro = "1.16.2"
-automerge = "0.5.11"
-yrs = "0.20.0"
+automerge = "0.12.0"
+yrs = "0.28.0"
 
 [dev-dependencies]
 proptest.workspace = true

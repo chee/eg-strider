@@ -99,43 +99,85 @@ fn replayed<R: compare::replicas::Replica>(path: &str, kind: &str, dt: &ListOpLo
     Ok((replayed.saved, notes))
 }
 
-/// Loads an Automerge document saved as `bytes` and returns it with its text.
-fn automerge_load(bytes: &[u8]) -> (automerge::AutoCommit, String) {
+/// Rewrites a saved Automerge document as its changes, each after its length: the history
+/// as one peer would send it to another.
+fn automerge_changes(saved: &[u8]) -> Vec<u8> {
+    let mut doc = automerge::AutoCommit::load(saved).unwrap();
+    let mut out = Vec::new();
+    for change in doc.get_changes(&[]) {
+        let raw = change.raw_bytes();
+        out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        out.extend_from_slice(raw);
+    }
+    out
+}
+
+/// Reads Automerge changes into memory, without applying them to a document.
+fn automerge_decode(mut bytes: &[u8]) -> Vec<automerge::Change> {
+    let mut changes = Vec::new();
+    while let Some((len, rest)) = bytes.split_first_chunk::<4>() {
+        let (raw, rest) = rest.split_at(u32::from_le_bytes(*len) as usize);
+        changes.push(automerge::Change::try_from(raw).unwrap());
+        bytes = rest;
+    }
+    changes
+}
+
+/// Applies changes to a new Automerge document and returns it with its text.
+fn automerge_apply(changes: Vec<automerge::Change>) -> (automerge::AutoCommit, String) {
     use automerge::ReadDoc;
-    let doc = automerge::AutoCommit::load(bytes).unwrap();
+    let mut doc = automerge::AutoCommit::new();
+    doc.apply_changes(changes).unwrap();
     let (_, text) = doc.get(automerge::ROOT, "text").unwrap().unwrap();
     let string = doc.text(&text).unwrap();
     (doc, string)
 }
 
-/// Applies a history to a new Yjs document (its Rust port, yrs) and returns it with its text.
-fn yjs_load(bytes: &[u8]) -> (yrs::Doc, String) {
-    use yrs::updates::decoder::Decode;
-    use yrs::{GetString, Transact};
-    let doc = yrs::Doc::new();
-    let text = doc.get_or_insert_text("text");
-    doc.transact_mut().apply_update(yrs::Update::decode_v2(bytes).unwrap());
-    let string = text.get_string(&doc.transact());
-    (doc, string)
-}
-
-/// Reads a saved Yjs history into memory, without applying it to a document.
+/// Reads a saved Yjs history into memory (through yrs, its Rust port), without applying it
+/// to a document.
 fn yjs_decode(bytes: &[u8]) -> yrs::Update {
     use yrs::updates::decoder::Decode;
     yrs::Update::decode_v2(bytes).unwrap()
 }
 
-/// Loads a history into another library: the time and memory it takes, and a line saying so.
-/// The memory kept is the document the library is left holding.
-fn measure<D>(replayed: Result<(Vec<u8>, String), &'static str>, load: fn(&[u8]) -> (D, String), reps: u32, expected: &str) -> (Option<(f64, Memory)>, String) {
+/// Applies a history to a new Yjs document and returns it with its text.
+fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
+    use yrs::{GetString, Transact};
+    let doc = yrs::Doc::new();
+    let text = doc.get_or_insert_text("text");
+    doc.transact_mut().apply_update(update).unwrap();
+    let string = text.get_string(&doc.transact());
+    (doc, string)
+}
+
+/// What reading a history into another library and then merging it took.
+#[derive(Clone, Copy)]
+struct Measured {
+    load_ms: f64,
+    merge_ms: f64,
+    memory: Memory,
+    /// Whether the text came out as diamond-types has it.
+    same: bool,
+}
+
+/// Reads a history into another library with `read` and merges it with `merge`: what the two
+/// took, and a line saying so. The memory kept is the document the library is left holding.
+fn measure<H, D>(replayed: Result<(Vec<u8>, String), &'static str>, read: fn(&[u8]) -> H, merge: fn(H) -> (D, String), reps: u32, expected: &str) -> (Option<Measured>, String) {
     match replayed {
         Ok((bytes, notes)) => {
-            let memory = memory_of(|| load(&bytes).0).1;
-            let (ms, text) = median_of(reps, || load(&bytes).1);
-            let same = if text == expected { "same text" } else { "different text" };
-            (Some((ms, memory)), format!("{notes} {ms:>10.2} ms {:>12} {:>12} {same:>15}", mb(memory.peak), mb(memory.kept)))
+            let memory = memory_of(|| merge(read(&bytes)).0).1;
+            let load_ms = median_of(reps, || (), |()| read(&bytes)).0;
+            let (merge_ms, text) = median_of(reps, || read(&bytes), |history| merge(history).1);
+            let same = text == expected;
+            let row = format!(
+                "{notes} {load_ms:>10.2} ms {merge_ms:>10.2} ms {:>12} {:>12} {:>15}",
+                mb(memory.peak),
+                mb(memory.kept),
+                if same { "same text" } else { "different text" }
+            );
+            (Some(Measured { load_ms, merge_ms, memory, same }), row)
         }
-        Err(why) => (None, format!("{why:>68}")),
+        Err(why) => (None, format!("{why:>82}")),
     }
 }
 
@@ -146,17 +188,16 @@ fn median(mut times: Vec<f64>) -> f64 {
     times.get(below).map_or(f64::NAN, |low| (low + times[above]) / 2.0)
 }
 
-/// Returns the median time in milliseconds of up to `reps` runs, fewer once they have taken
-/// three seconds, and the last result.
-fn median_of<T>(reps: u32, mut f: impl FnMut() -> T) -> (f64, T) {
-    let (mut times, mut spent) = (Vec::with_capacity(reps as usize), 0.0);
+/// Returns the median time in milliseconds of `reps` runs of `f`, each on what `setup` makes
+/// for it outside the timing, and the last result.
+fn median_of<S, T>(reps: u32, mut setup: impl FnMut() -> S, mut f: impl FnMut(S) -> T) -> (f64, T) {
+    let mut times = Vec::with_capacity(reps as usize);
     loop {
+        let input = setup();
         let t = Instant::now();
-        let result = f();
-        let ms = t.elapsed().as_secs_f64() * 1e3;
-        times.push(ms);
-        spent += ms;
-        if times.len() >= reps as usize || spent > 3000.0 {
+        let result = f(input);
+        times.push(t.elapsed().as_secs_f64() * 1e3);
+        if times.len() >= reps as usize {
             return (median(times), result);
         }
     }
@@ -251,8 +292,8 @@ fn main() {
         let [dt_ms, first_ms, later_ms, import_ms, loro_load_ms, merge_ms, snapshot_ms] = times.map(median);
 
         // Loading alone, each from its own file.
-        let dt_load_ms = median_of(reps, || ListOpLog::load_from(&bytes).unwrap()).0;
-        let load_ms = median_of(reps, || compare::file::load(&saved)).0;
+        let dt_load_ms = median_of(reps, || (), |()| ListOpLog::load_from(&bytes).unwrap()).0;
+        let load_ms = median_of(reps, || (), |()| compare::file::load(&saved)).0;
 
         // Memory. A closure's result counts as kept only if it is returned, so here the text
         // is measured and dropped.
@@ -311,34 +352,29 @@ fn main() {
 
         // Automerge and Yjs, on the same histories replayed into each.
         let expected = dt.checkout_tip().content().to_string();
-        let (automerge, automerge_row) = measure(replayed::<compare::replicas::Automerge>(path, "automerge", &dt, replay), automerge_load, reps, &expected);
-        let in_yjs = replayed::<compare::replicas::Yjs>(path, "yrs", &dt, replay);
-        let yjs_load_ms = in_yjs.as_ref().ok().map(|(bytes, _)| median_of(reps, || yjs_decode(bytes)).0);
-        let (yjs, yjs_row) = measure(in_yjs, yjs_load, reps, &expected);
+        let as_changes = replayed::<compare::replicas::Automerge>(path, "automerge", &dt, replay).map(|(saved, notes)| (automerge_changes(&saved), notes));
+        let (automerge, automerge_row) = measure(as_changes, automerge_decode, automerge_apply, reps, &expected);
+        let (yjs, yjs_row) = measure(replayed::<compare::replicas::Yjs>(path, "yrs", &dt, replay), yjs_decode, yjs_apply, reps, &expected);
         others.push(format!("{name:6} {automerge_row}   {yjs_row}"));
 
         let ms = |v: Option<f64>| v.map_or("null".to_string(), |v| format!("{v:.4}"));
         let bytes = |v: Option<usize>| v.map_or("null".to_string(), |v| v.to_string());
         let loro_ms = |v: f64| in_loro.as_ref().ok().map(|_| v);
-        // Yjs and Loro are timed from bytes to document, and what reading the bytes in leaves
-        // of that is their merge. Automerge has no such step apart, so all of its time is.
-        let load_of = [Some(load_ms), Some(dt_load_ms), yjs_load_ms, loro_ms(loro_load_ms)];
-        let merge_of = [
-            Some(first_ms),
-            Some(dt_ms),
-            yjs.zip(yjs_load_ms).map(|(whole, load)| whole.0 - load),
-            loro_ms(import_ms - loro_load_ms),
-            automerge.map(|m| m.0),
-        ];
+        // Loro is timed from bytes to document, and what reading the bytes into its log
+        // leaves of that is its merge: attaching a detached document is a slower way there.
+        let load_of = [Some(load_ms), Some(dt_load_ms), yjs.map(|m| m.load_ms), loro_ms(loro_load_ms), automerge.map(|m| m.load_ms)];
+        let merge_of = [Some(first_ms), Some(dt_ms), yjs.map(|m| m.merge_ms), loro_ms(import_ms - loro_load_ms), automerge.map(|m| m.merge_ms)];
+        let same_as = |same: Option<bool>| same.map_or("null".to_string(), |same| same.to_string());
         let shown = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{v:.2} ms"));
         loads.push(format!(
-            "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
             mb(disk),
             mb(saved.len()),
             shown(load_of[1]),
             shown(load_of[0]),
             shown(load_of[2]),
             shown(load_of[3]),
+            shown(load_of[4]),
             shown(merge_of[1]),
             shown(merge_of[0]),
             shown(merge_of[2]),
@@ -346,15 +382,16 @@ fn main() {
             shown(merge_of[4]),
         ));
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"load_ms\":{{\"strider_first\":{},\"egwalker\":{},\"yjs\":{},\"loro\":{}}},\"merge_ms\":{{\"strider_first\":{},\"egwalker\":{},\"yjs\":{},\"loro\":{},\"automerge\":{}}},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"retained\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"reps\":{reps},\"disk\":{disk},\"same\":{{\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"load_ms\":{{\"strider_first\":{},\"egwalker\":{},\"yjs\":{},\"loro\":{},\"automerge\":{}}},\"merge_ms\":{{\"strider_first\":{},\"egwalker\":{},\"yjs\":{},\"loro\":{},\"automerge\":{}}},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"retained\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
             dt.len(),
-            ms(load_of[0]), ms(load_of[1]), ms(load_of[2]), ms(load_of[3]),
+            same_as(in_loro.as_ref().ok().map(|_| loro_same)), same_as(automerge.map(|m| m.same)), same_as(yjs.map(|m| m.same)),
+            ms(load_of[0]), ms(load_of[1]), ms(load_of[2]), ms(load_of[3]), ms(load_of[4]),
             ms(merge_of[0]), ms(merge_of[1]), ms(merge_of[2]), ms(merge_of[3]), ms(merge_of[4]),
-            ms(Some(first_ms)), ms(Some(later_ms)), ms(Some(dt_ms)), ms(loro_ms(import_ms)), ms(loro_ms(merge_ms)), ms(loro_ms(snapshot_ms)), ms(automerge.map(|m| m.0)), ms(yjs.map(|m| m.0)),
+            ms(Some(first_ms)), ms(Some(later_ms)), ms(Some(dt_ms)), ms(loro_ms(import_ms)), ms(loro_ms(merge_ms)), ms(loro_ms(snapshot_ms)), ms(automerge.map(|m| m.load_ms + m.merge_ms)), ms(yjs.map(|m| m.load_ms + m.merge_ms)),
             from_disk.peak, dt_from_disk.peak,
-            bytes(loro_memory.map(|m| m.0.peak)), bytes(loro_memory.map(|m| m.1)), bytes(automerge.map(|m| m.1.peak)), bytes(yjs.map(|m| m.1.peak)),
+            bytes(loro_memory.map(|m| m.0.peak)), bytes(loro_memory.map(|m| m.1)), bytes(automerge.map(|m| m.memory.peak)), bytes(yjs.map(|m| m.memory.peak)),
             from_disk.kept, dt_from_disk.kept,
-            bytes(loro_memory.map(|m| m.0.kept)), bytes(automerge.map(|m| m.1.kept)), bytes(yjs.map(|m| m.1.kept)),
+            bytes(loro_memory.map(|m| m.0.kept)), bytes(automerge.map(|m| m.memory.kept)), bytes(yjs.map(|m| m.memory.kept)),
             first_checkout.peak, later_checkout.peak, first_checkout.kept, dt_checkout.peak,
         ));
 
@@ -370,8 +407,8 @@ fn main() {
 
     println!("\nloading and merging apart: each history's file, as diamond-types stores it and as `compare::file` does; the time to read a history into memory; and the time to merge it from there");
     println!(
-        "{:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "trace", "dt file", "file", "dt load", "load", "yjs load", "loro load", "dt merge", "merge", "yjs merge", "loro merge", "automerge"
+        "{:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "trace", "dt file", "file", "dt load", "load", "yjs load", "loro load", "am load", "dt merge", "merge", "yjs merge", "loro merge", "am merge"
     );
     for line in loads {
         println!("{line}");
@@ -394,7 +431,7 @@ fn main() {
     for line in loro {
         println!("{line}");
     }
-    println!("\nAutomerge, then Yjs (yrs), on the same histories: peers, edits moved, time to load, most memory in use, what the document then holds, and whether the text is the same");
+    println!("\nAutomerge, then Yjs (yrs), on the same histories: peers, edits moved, time to read the history in, time to merge it, most memory in use, what the document then holds, and whether the text is the same");
     for line in others {
         println!("{line}");
     }
