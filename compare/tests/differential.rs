@@ -85,17 +85,27 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
     let mut log = compare::convert(&dt);
     prop_assert_eq!(log.checkout(), expected.as_str(), "first checkout");
     prop_assert_eq!(log.checkout(), expected.as_str(), "second checkout");
-    prop_assert_eq!(compare::file::load(&compare::file::save(&dt)).checkout(), expected.as_str(), "loaded from a file");
+    let (mut loaded, text) = OpLog::load(&log.save()).expect("a saved log loads");
+    prop_assert_eq!(text.as_str(), expected.as_str(), "the saved document");
+    prop_assert_eq!(loaded.checkout(), expected.as_str(), "merged again after loading");
 
     // Growing a little at a time and checking out at each step, so that regions are extended
-    // and absorbed while the log holds what it resolved for their earlier shapes.
-    let mut growing = OpLog::new();
+    // and absorbed while the log holds what it resolved for their earlier shapes. A second
+    // log grows the same way but is saved and loaded at each step, so that it carries on from
+    // what the file kept of its graph.
+    let history = compare::History::of(&dt);
+    let (mut growing, mut reloaded) = (OpLog::new(), OpLog::new());
     for part in 1..=8 {
         let limit = if part == 8 { usize::MAX } else { dt.len() * part / 8 };
-        compare::extend(&mut growing, &dt, limit);
+        compare::extend(&mut growing, &history, limit);
         let mut fresh = OpLog::new();
-        compare::extend(&mut fresh, &dt, limit);
+        compare::extend(&mut fresh, &history, limit);
         prop_assert_eq!(growing.checkout(), fresh.checkout(), "after growing to part {} of 8", part);
+
+        compare::extend(&mut reloaded, &history, limit);
+        let saved = reloaded.save();
+        prop_assert_eq!(&saved, &fresh.save(), "saved at part {} of 8", part);
+        reloaded = OpLog::load(&saved).expect("a saved log loads").0;
     }
     prop_assert_eq!(growing.checkout(), expected.as_str(), "after growing");
     Ok(())

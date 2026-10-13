@@ -12,6 +12,9 @@ eg-strider = { path = "../crates/eg-strider" }
 # The diamond-types that the Eg-walker paper benchmarked: the reference for both
 # correctness and speed. Pinned to the commit of the paper's artifact repository.
 diamond-types = { git = "https://github.com/josephg/egwalker-paper", rev = "4d9bef55e4f2e3b3b8b0efe8f91cd35d34ed35a8" }
+# The rope diamond-types keeps a document's text in, and what compresses its saved text.
+jumprope = "1.1"
+lz4_flex = "0.11"
 loro = "1.16.2"
 automerge = "0.12.0"
 yrs = "0.28.0"

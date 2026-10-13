@@ -9,8 +9,8 @@ import sys
 
 # Each system's name, its key in the results, and its colour.
 SYSTEMS = [
-    ("eg-strider", "strider_first", "#d55e00"),
-    ("diamond-types", "egwalker", "#0072b2"),
+    ("eg-strider", "strider", "#d55e00"),
+    ("diamond-types", "dt", "#0072b2"),
     ("Yjs (yrs)", "yjs", "#e69f00"),
     ("Loro", "loro", "#009e73"),
     ("Automerge", "automerge", "#cc79a7"),
@@ -40,7 +40,7 @@ def times(ratio):
 
 def chart(results, kind, label, caption, ticks, baseline=None, share=()):
     """Draws one bar per system for each trace. `baseline` names a figure of the trace
-    itself to draw above them, with what to call it. The axis counts decades from the
+    itself to draw above them, with what to call it. The axis runs in decades of the
     first tick, and is long enough for the kinds of figure in `share` too, so that charts
     of them line up. A system whose text came out unlike diamond-types' is starred."""
     by_trace = {r["trace"]: r[kind] for r in results}
@@ -51,7 +51,7 @@ def chart(results, kind, label, caption, ticks, baseline=None, share=()):
     value_of = lambda trace, key: base[trace] if key is None else by_trace[trace].get(key)
     origin = ticks[0][0]
     values = [r[k].get(key) for r in results for k in (kind, *share) for _, key, _ in SYSTEMS] + list(base.values())
-    decades = [math.log10(v / origin) for v in values + [origin] if v]
+    decades = [math.log10(v / origin) for v in values if v]
     low, high = math.floor(min(decades)), math.ceil(max(decades))
     x = lambda v: LEFT + (math.log10(v / origin) - low) / (high - low) * (RIGHT - LEFT)
 
@@ -105,17 +105,19 @@ def chart(results, kind, label, caption, ticks, baseline=None, share=()):
 
 def main(results_path, out_dir):
     results = json.load(open(results_path))
-    runs = f"Median of {results[0]['reps']} runs. Log scale. (Less is better)"
-    load = chart(results, "load_ms", milliseconds, f"Time taken to read a history from its file into memory, ready to merge. {runs}", TIMES, share=["merge_ms"])
-    merge = chart(results, "merge_ms", milliseconds, f"Time taken to merge a history in memory into a document. {runs}", TIMES, share=["load_ms"])
-    sizes = [(2**20 * 10**k, text) for k, text in ((-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
-    on_disk = ("disk", "Trace file")
-    peak = chart(results, "peak", memory, "Most memory allocated while loading and merging a history. Log scale. (Less is better)", sizes, on_disk, ["retained"])
-    retained = chart(results, "retained", memory, "Memory still allocated afterwards, ready to merge again. Log scale. (Less is better)", sizes, on_disk, ["peak"])
-    open(f"{out_dir}/time-load.svg", "w").write(load)
-    open(f"{out_dir}/time-merge.svg", "w").write(merge)
-    open(f"{out_dir}/memory-peak.svg", "w").write(peak)
-    open(f"{out_dir}/memory-retained.svg", "w").write(retained)
+    scale = "Log scale. (Less is better)"
+    runs = f"Median of {results[0]['reps']} runs. {scale}"
+    sizes = [(2**20 * 10**k, text) for k, text in ((-2, "0.01 MiB"), (-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
+    trace = ("disk", "Trace file")
+    charts = {
+        "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to merge a history whose ops are already in memory. {runs}", TIMES, share=["open_ms"]),
+        "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES, share=["merge_ms"]),
+        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. {scale}", sizes, trace, ["open_kept"]),
+        "memory-retained": chart(results, "open_kept", memory, f"Memory a reopened document holds, ready for more edits. {scale}", sizes, trace, ["merge_peak"]),
+        "file-size": chart(results, "saved", memory, f"Size of a saved document. {scale}", sizes, trace),
+    }
+    for name, drawn in charts.items():
+        open(f"{out_dir}/{name}.svg", "w").write(drawn)
 
 
 if __name__ == "__main__":
