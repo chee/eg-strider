@@ -71,6 +71,9 @@ fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
     (result, Memory { peak: MOST.load(Relaxed) - before, kept: IN_USE.load(Relaxed).saturating_sub(before) })
 }
 
+/// How long each trace's merges are run for before any is timed.
+const WARM_UP: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// How long replaying a history into another library may take before it is given up on.
 const LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
@@ -319,7 +322,7 @@ fn main() {
     assert!(!paths.is_empty(), "usage: compare <trace.dt>... [--reps N]");
 
     println!("merging a history whose ops are in memory: appending them, then merging; and merging again with what the first merge kept");
-    println!("{:6} {:>8} {:>26} {:>36} {:>12}  result", "trace", "events", "diamond-types", "eg-strider", "again");
+    println!("{:6} {:>8} {:>32} {:>42} {:>12}  result", "trace", "events", "diamond-types", "eg-strider", "again");
     let mut all_match = true;
     let (mut merges, mut opens, mut others, mut json) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for path in paths {
@@ -332,30 +335,41 @@ fn main() {
         let expected = dt.checkout_tip().content().to_string();
 
         // The two systems under comparison take turns, each straight after the other, which
-        // is slower for both than running one of them over and over.
+        // is slower for both than running one of them over and over. The first runs of a short
+        // task are up to twice as slow as the rest, until the processor has sped up, so runs
+        // only count once some time has gone by.
         let mut times: [Vec<f64>; 5] = std::array::from_fn(|_| Vec::with_capacity(reps as usize));
-        let [dt_append_ms, dt_ms, append_ms, merge_ms, again_ms] = &mut times;
-        let mut same = true;
-        for _ in 0..reps {
+        let (mut same, started) = (true, Instant::now());
+        while times[0].len() < reps as usize {
             let t = Instant::now();
             let oplog = dt_append(&dt_history);
-            dt_append_ms.push(since(t));
+            let dt_append_ms = since(t);
             let branch = oplog.checkout_tip();
-            dt_ms.push(since(t));
+            let dt_ms = since(t);
             same &= branch.content().to_string() == expected;
             drop((oplog, branch));
 
             let t = Instant::now();
             let mut log = OpLog::new();
             compare::extend(&mut log, &history, usize::MAX);
-            append_ms.push(since(t));
+            let append_ms = since(t);
             let text = log.checkout();
-            merge_ms.push(since(t));
+            let merge_ms = since(t);
             let t = Instant::now();
             let again = log.checkout();
-            again_ms.push(since(t));
+            let again_ms = since(t);
             same &= text == expected && again == expected;
+
+            if started.elapsed() >= WARM_UP {
+                for (times, ms) in times.iter_mut().zip([dt_append_ms, dt_ms, append_ms, merge_ms, again_ms]) {
+                    times.push(ms);
+                }
+            }
         }
+        let spread = [&times[1], &times[3]].map(|times| {
+            let mean = times.iter().sum::<f64>() / times.len() as f64;
+            100.0 * (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64).sqrt() / mean
+        });
         let [dt_append_ms, dt_ms, append_ms, merge_ms, again_ms] = times.map(median);
 
         // Reopening, each from its own saved document.
@@ -389,12 +403,14 @@ fn main() {
         };
         all_match &= same;
         println!(
-            "{name:6} {:>8} {:>7.2} + {:>6.2} = {dt_ms:>6.2} ms {:>7.2} + {:>6.2} = {merge_ms:>6.2} ms ({:>5.2}x) {again_ms:>9.2} ms  {}",
+            "{name:6} {:>8} {:>7.2} + {:>6.2} = {dt_ms:>6.2} ms ±{:>3.0}% {:>7.2} + {:>6.2} = {merge_ms:>6.2} ms ±{:>3.0}% ({:>5.2}x) {again_ms:>9.2} ms  {}",
             dt.len(),
             dt_append_ms,
             dt_ms - dt_append_ms,
+            spread[0],
             append_ms,
             merge_ms - append_ms,
+            spread[1],
             dt_ms / merge_ms,
             if same { "identical" } else { "DIFFERENT" }
         );
