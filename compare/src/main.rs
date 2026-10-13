@@ -119,6 +119,12 @@ fn yjs_load(bytes: &[u8]) -> (yrs::Doc, String) {
     (doc, string)
 }
 
+/// Reads a saved Yjs history into memory, without applying it to a document.
+fn yjs_decode(bytes: &[u8]) -> yrs::Update {
+    use yrs::updates::decoder::Decode;
+    yrs::Update::decode_v2(bytes).unwrap()
+}
+
 /// Loads a history into another library: the time and memory it takes, and a line saying so.
 /// The memory kept is the document the library is left holding.
 fn measure<D>(replayed: Result<(Vec<u8>, String), &'static str>, load: fn(&[u8]) -> (D, String), reps: u32, expected: &str) -> (Option<(f64, Memory)>, String) {
@@ -202,8 +208,8 @@ fn main() {
         let in_loro = in_loro(path, &dt, replay);
 
         // Times first, so that measuring memory cannot disturb them.
-        let mut times: [Vec<f64>; 6] = std::array::from_fn(|_| Vec::with_capacity(reps as usize));
-        let [dt_ms, first_ms, later_ms, import_ms, merge_ms, snapshot_ms] = &mut times;
+        let mut times: [Vec<f64>; 7] = std::array::from_fn(|_| Vec::with_capacity(reps as usize));
+        let [dt_ms, first_ms, later_ms, import_ms, loro_load_ms, merge_ms, snapshot_ms] = &mut times;
         let (mut same, mut loro_same) = (true, true);
         for _ in 0..reps {
             let t = Instant::now();
@@ -225,11 +231,13 @@ fn main() {
             let imported = loro_import(updates).1;
             import_ms.push(t.elapsed().as_secs_f64() * 1e3);
 
-            // A checkout: the updates are taken in while the document is detached, which
+            // A checkout: the updates are read in while the document is detached, which
             // leaves its state untouched, and it is brought up to date on attaching.
             let doc = LoroDoc::new();
             doc.detach();
+            let t = Instant::now();
             doc.import(updates).unwrap();
+            loro_load_ms.push(t.elapsed().as_secs_f64() * 1e3);
             let t = Instant::now();
             doc.attach();
             let merged = doc.get_text(TEXT).to_string();
@@ -240,19 +248,11 @@ fn main() {
             snapshot_ms.push(t.elapsed().as_secs_f64() * 1e3);
             loro_same &= expected == imported && expected == merged && expected == loaded;
         }
-        let [dt_ms, first_ms, later_ms, import_ms, merge_ms, snapshot_ms] = times.map(median);
+        let [dt_ms, first_ms, later_ms, import_ms, loro_load_ms, merge_ms, snapshot_ms] = times.map(median);
 
         // Loading alone, each from its own file.
         let dt_load_ms = median_of(reps, || ListOpLog::load_from(&bytes).unwrap()).0;
         let load_ms = median_of(reps, || compare::file::load(&saved)).0;
-        loads.push(format!(
-            "{name:6} {:>10} {:>10} {dt_load_ms:>7.2} ms {load_ms:>7.2} ms {:>7.2} ms {:>7.2} ms ({:>5.2}x)",
-            mb(disk),
-            mb(saved.len()),
-            dt_load_ms + dt_ms,
-            load_ms + first_ms,
-            (dt_load_ms + dt_ms) / (load_ms + first_ms)
-        ));
 
         // Memory. A closure's result counts as kept only if it is returned, so here the text
         // is measured and dropped.
@@ -312,15 +312,44 @@ fn main() {
         // Automerge and Yjs, on the same histories replayed into each.
         let expected = dt.checkout_tip().content().to_string();
         let (automerge, automerge_row) = measure(replayed::<compare::replicas::Automerge>(path, "automerge", &dt, replay), automerge_load, reps, &expected);
-        let (yjs, yjs_row) = measure(replayed::<compare::replicas::Yjs>(path, "yrs", &dt, replay), yjs_load, reps, &expected);
+        let in_yjs = replayed::<compare::replicas::Yjs>(path, "yrs", &dt, replay);
+        let yjs_load_ms = in_yjs.as_ref().ok().map(|(bytes, _)| median_of(reps, || yjs_decode(bytes)).0);
+        let (yjs, yjs_row) = measure(in_yjs, yjs_load, reps, &expected);
         others.push(format!("{name:6} {automerge_row}   {yjs_row}"));
 
         let ms = |v: Option<f64>| v.map_or("null".to_string(), |v| format!("{v:.4}"));
         let bytes = |v: Option<usize>| v.map_or("null".to_string(), |v| v.to_string());
         let loro_ms = |v: f64| in_loro.as_ref().ok().map(|_| v);
+        // Yjs and Loro are timed from bytes to document, and what reading the bytes in leaves
+        // of that is their merge. Automerge has no such step apart, so all of its time is.
+        let load_of = [Some(load_ms), Some(dt_load_ms), yjs_load_ms, loro_ms(loro_load_ms)];
+        let merge_of = [
+            Some(first_ms),
+            Some(dt_ms),
+            yjs.zip(yjs_load_ms).map(|(whole, load)| whole.0 - load),
+            loro_ms(import_ms - loro_load_ms),
+            automerge.map(|m| m.0),
+        ];
+        let shown = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{v:.2} ms"));
+        loads.push(format!(
+            "{name:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            mb(disk),
+            mb(saved.len()),
+            shown(load_of[1]),
+            shown(load_of[0]),
+            shown(load_of[2]),
+            shown(load_of[3]),
+            shown(merge_of[1]),
+            shown(merge_of[0]),
+            shown(merge_of[2]),
+            shown(merge_of[3]),
+            shown(merge_of[4]),
+        ));
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"load_ms\":{{\"strider_first\":{load_ms:.4},\"egwalker\":{dt_load_ms:.4}}},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"retained\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"disk\":{disk},\"load_ms\":{{\"strider_first\":{},\"egwalker\":{},\"yjs\":{},\"loro\":{}}},\"merge_ms\":{{\"strider_first\":{},\"egwalker\":{},\"yjs\":{},\"loro\":{},\"automerge\":{}}},\"ms\":{{\"strider_first\":{},\"strider_later\":{},\"egwalker\":{},\"loro\":{},\"loro_checkout\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"peak\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"loro_snapshot\":{},\"automerge\":{},\"yjs\":{}}},\"retained\":{{\"strider_first\":{},\"egwalker\":{},\"loro\":{},\"automerge\":{},\"yjs\":{}}},\"beyond_history\":{{\"strider_first\":{},\"strider_later\":{},\"strider_kept\":{},\"egwalker\":{}}}}}",
             dt.len(),
+            ms(load_of[0]), ms(load_of[1]), ms(load_of[2]), ms(load_of[3]),
+            ms(merge_of[0]), ms(merge_of[1]), ms(merge_of[2]), ms(merge_of[3]), ms(merge_of[4]),
             ms(Some(first_ms)), ms(Some(later_ms)), ms(Some(dt_ms)), ms(loro_ms(import_ms)), ms(loro_ms(merge_ms)), ms(loro_ms(snapshot_ms)), ms(automerge.map(|m| m.0)), ms(yjs.map(|m| m.0)),
             from_disk.peak, dt_from_disk.peak,
             bytes(loro_memory.map(|m| m.0.peak)), bytes(loro_memory.map(|m| m.1)), bytes(automerge.map(|m| m.1.peak)), bytes(yjs.map(|m| m.1.peak)),
@@ -339,8 +368,11 @@ fn main() {
         );
     }
 
-    println!("\nloading: each history's file, as diamond-types stores it and as `compare::file` does; the time each takes to load its own; and loading plus merging");
-    println!("{:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}", "trace", "dt file", "file", "dt load", "load", "dt total", "total");
+    println!("\nloading and merging apart: each history's file, as diamond-types stores it and as `compare::file` does; the time to read a history into memory; and the time to merge it from there");
+    println!(
+        "{:6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "trace", "dt file", "file", "dt load", "load", "yjs load", "loro load", "dt merge", "merge", "yjs merge", "loro merge", "automerge"
+    );
     for line in loads {
         println!("{line}");
     }

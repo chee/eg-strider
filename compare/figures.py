@@ -46,7 +46,7 @@ def chart(results, kind, label, caption, ticks, baseline=None):
     traces = [t for t in ORDER if t in by_trace]
     systems = ([(baseline[1], None, "#999999")] if baseline else []) + SYSTEMS
     base = {r["trace"]: r[baseline[0]] for r in results} if baseline else {}
-    value_of = lambda trace, key: base[trace] if key is None else by_trace[trace][key]
+    value_of = lambda trace, key: base[trace] if key is None else by_trace[trace].get(key)
     values = [value_of(t, key) for t in traces for _, key, _ in systems]
     values = [v for v in values if v]
     low, high = math.floor(math.log10(min(values + [ticks[0][0]]))), math.ceil(math.log10(max(values)))
@@ -80,7 +80,7 @@ def chart(results, kind, label, caption, ticks, baseline=None):
         middle = y + len(systems) * ROW / 2
         out.append(f'<text x="{LEFT - 62}" y="{middle + 4:.1f}" font-size="14" text-anchor="end">{trace}</text>')
         out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(systems) * ROW}" stroke="black" stroke-width="1.5"/>')
-        least = min(v for v in (by_trace[trace][key] for _, key, _ in SYSTEMS) if v)
+        least = min(v for v in (by_trace[trace].get(key) for _, key, _ in SYSTEMS) if v)
         for name, key, colour in systems:
             value = value_of(trace, key)
             out.append(f'<text x="{LEFT - 6}" y="{y + 8}" font-size="7.5" fill="#888" text-anchor="end">{name}</text>')
@@ -90,7 +90,9 @@ def chart(results, kind, label, caption, ticks, baseline=None):
                 behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if key and value > least else ""
                 out.append(f'<text x="{end + 5:.1f}" y="{y + 8.5}" font-size="9">{label(value)}{behind}</text>')
             else:
-                out.append(f'<text x="{LEFT + 5}" y="{y + 8.5}" font-size="9" fill="#888">{"nothing" if value == 0 else "did not finish"}</text>')
+                # A system with no figure of this kind at all does the work as part of another.
+                why = "nothing" if value == 0 else "did not finish" if key in by_trace[trace] else "loads as it merges"
+                out.append(f'<text x="{LEFT + 5}" y="{y + 8.5}" font-size="9" fill="#888">{why}</text>')
             y += ROW
         y += GAP
     out.append("</svg>")
@@ -99,11 +101,8 @@ def chart(results, kind, label, caption, ticks, baseline=None):
 
 def main(results_path, out_dir):
     results = json.load(open(results_path))
-    for r in results:
-        # Yjs, Loro and Automerge merge as they load, so their one time stands for both.
-        r["load_ms"] = {**r["ms"], **r["load_ms"]}
-    load = chart(results, "load_ms", milliseconds, "Time taken to load a history from its file. Median of up to 25 runs. Log scale. (Less is better)", TIMES)
-    merge = chart(results, "ms", milliseconds, "Time taken to merge a loaded history into a document. Median of up to 25 runs. Log scale. (Less is better)", TIMES)
+    load = chart(results, "load_ms", milliseconds, "Time taken to read a history from its file into memory. Median of up to 25 runs. Log scale. (Less is better)", TIMES)
+    merge = chart(results, "merge_ms", milliseconds, "Time taken to merge a history in memory into a document. Median of up to 25 runs. Log scale. (Less is better)", TIMES)
     sizes = [(2**10 * 100, "100 KiB"), (2**20, "1 MiB"), (2**20 * 10, "10 MiB"), (2**20 * 100, "100 MiB"), (2**30, "1 GiB")]
     on_disk = ("disk", "On disk")
     peak = chart(results, "peak", memory, "Most memory allocated while loading and merging a history. Log scale. (Less is better)", sizes, on_disk)
