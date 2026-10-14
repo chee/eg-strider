@@ -131,14 +131,16 @@ fn dt_merge(history: &History<TextOperation>) -> (ListOpLog, ListBranch) {
 /// and the document's text, which the paper keeps beside the history so as not to merge again.
 /// The text is compressed as eg-strider's is.
 fn dt_save(file: &[u8], text: &str) -> Vec<u8> {
-    [&(file.len() as u64).to_le_bytes(), file, &lz4_flex::block::compress_prepend_size(text.as_bytes())].concat()
+    let lens = [file.len() as u64, text.len() as u64].map(u64::to_le_bytes).concat();
+    [&lens[..], file, &zstd::bulk::compress(text.as_bytes(), 3).unwrap()].concat()
 }
 
 /// Reads a saved diamond-types document back: its history, and its text as a rope.
 fn dt_open(saved: &[u8]) -> (ListOpLog, JumpRope) {
-    let (len, rest) = saved.split_first_chunk::<8>().unwrap();
-    let (file, text) = rest.split_at(u64::from_le_bytes(*len) as usize);
-    let text = String::from_utf8(lz4_flex::block::decompress_size_prepended(text).unwrap()).unwrap();
+    let (lens, rest) = saved.split_first_chunk::<16>().unwrap();
+    let [file_len, text_len] = [0, 8].map(|at| u64::from_le_bytes(lens[at..at + 8].try_into().unwrap()) as usize);
+    let (file, text) = rest.split_at(file_len);
+    let text = String::from_utf8(zstd::bulk::decompress(text, text_len).unwrap()).unwrap();
     (ListOpLog::load_from(file).unwrap(), JumpRope::from(text.as_str()))
 }
 

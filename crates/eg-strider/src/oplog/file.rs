@@ -16,7 +16,7 @@
 //! - an op's position is stored as how far it is from where the op before left off, and a
 //!   parent as how far back it is;
 //! - the columns of a block, the text it inserts and the document's text are each compressed
-//!   with LZ4.
+//!   with Zstandard.
 
 use super::{AgentRun, Op, OpKind, OpLog, OpSlice};
 use crate::replay::Base;
@@ -26,8 +26,10 @@ use strider_graph::{Graph, Segment};
 
 const MAGIC: &[u8] = b"eg-strider\x04";
 
-/// About how many events go in a block of saved history. Tiny in debug builds, so that tests
-/// on short histories save several.
+/// About how many events go in the last block of saved history. Each block before it is twice
+/// the size of the one after: recent history, which is what an event made at an older version
+/// most often needs, can be read without much else, and the rest packs well in a few large
+/// blocks. Tiny in debug builds, so that tests on short histories save several.
 const BLOCK: u32 = if cfg!(debug_assertions) { 8 } else { 1 << 15 };
 
 /// A file that is not a saved document, or is a damaged one.
@@ -63,7 +65,7 @@ impl OpLog {
         let cuts = self.cuts(floor, cut);
         let blocks: Vec<Cow<[u8]>> = kept.chain(cuts.windows(2).map(|ends| Cow::from(self.pack(ends[0]..ends[1])))).collect();
         let tail = if cut < len { self.pack(cut..len) } else { Vec::new() };
-        let text = lz4_flex::block::compress(self.base.text.as_bytes());
+        let text = squeezed(self.base.text.as_bytes());
 
         let mut out = MAGIC.to_vec();
         number(&mut out, self.agent_names.len());
@@ -181,32 +183,33 @@ impl OpLog {
     }
 
     /// Chooses where to cut the events `from..to`, which the log holds, into blocks: at
-    /// critical versions about [`BLOCK`] events apart. Returns `from` and then the end of each
-    /// block.
+    /// critical versions, about [`BLOCK`] events before the end and twice as far apart each
+    /// time. Returns `from` and then the end of each block.
     fn cuts(&self, from: u32, to: u32) -> Vec<u32> {
         let blocks = self.graph.blocks();
-        let mut cuts = vec![from];
-        for segment in self.graph.segments() {
+        let (mut cuts, mut size) = (vec![to], BLOCK);
+        for segment in self.graph.segments().iter().rev() {
             let stretch = segment.blocks();
             let (start, end) = (blocks.start(stretch.start).max(from), blocks.start(stretch.end).min(to));
             if start >= end {
                 continue;
             }
-            let mut last = *cuts.last().expect("the first cut");
-            if matches!(segment, Segment::Linear(_)) {
-                // Anywhere in a linear stretch is a critical version.
-                while end - last >= 2 * BLOCK {
-                    last = last.max(start) + BLOCK;
-                    cuts.push(last);
-                }
+            // Anywhere in a linear stretch is a critical version; a region has to stay whole.
+            let mut last = *cuts.last().expect("the last cut");
+            while matches!(segment, Segment::Linear(_)) && last - start > size {
+                last -= size;
+                cuts.push(last);
+                size *= 2;
             }
-            if end - last >= BLOCK {
-                cuts.push(end);
+            if last - start >= size {
+                cuts.push(start);
+                size *= 2;
             }
         }
-        if *cuts.last().expect("the first cut") < to {
-            cuts.push(to);
+        if *cuts.last().expect("the last cut") > from {
+            cuts.push(from);
         }
+        cuts.reverse();
         cuts
     }
 
@@ -277,7 +280,7 @@ impl OpLog {
         let text: String = ops().map(|op| &self.content[op.text.0 as usize..op.text.1 as usize]).collect();
         let mut out = Vec::new();
         for part in [&columns[..], text.as_bytes()] {
-            let packed = lz4_flex::block::compress(part);
+            let packed = squeezed(part);
             number(&mut out, part.len());
             number(&mut out, packed.len());
             out.extend_from_slice(&packed);
@@ -423,13 +426,19 @@ fn unzigzag(n: u64) -> i64 {
     (n >> 1) as i64 ^ -((n & 1) as i64)
 }
 
-/// Unpacks `len` bytes that LZ4 compressed.
+/// Compresses bytes.
+fn squeezed(bytes: &[u8]) -> Vec<u8> {
+    zstd::bulk::compress(bytes, 3).expect("compressing into memory")
+}
+
+/// Unpacks `len` bytes that [`squeezed`] compressed.
 fn unpacked(packed: &[u8], len: usize) -> Result<Vec<u8>, Malformed> {
-    // LZ4 cannot pack anything to less than a 255th of its size.
-    if len > packed.len().saturating_mul(255) {
+    // The compressed bytes say for themselves how long they unpack to, so room is only ever
+    // made for a length that both agree on.
+    if zstd::zstd_safe::get_frame_content_size(packed).ok().flatten() != Some(len as u64) {
         return Err(Malformed);
     }
-    lz4_flex::block::decompress(packed, len).ok().filter(|part| part.len() == len).ok_or(Malformed)
+    zstd::bulk::decompress(packed, len).ok().filter(|part| part.len() == len).ok_or(Malformed)
 }
 
 /// What is left to read of a file or of one of its columns.
