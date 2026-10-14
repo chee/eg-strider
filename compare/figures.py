@@ -38,10 +38,8 @@ def times(ratio):
     return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
 
 
-def chart(results, kind, label, caption, ticks, baseline=None, share=(), part=None):
-    """Draws one bar per system for each trace. `baseline` names a figure of the trace
-    itself to draw above them, with what to call it. The axis runs in decades of the
-    first tick, and is long enough for the kinds of figure in `share` too, so that charts
+def chart(results, kind, label, caption, ticks, share=(), part=None):
+    """Draws one bar per system for each trace. The axis runs in decades of the first tick, and is long enough for the kinds of figure in `share` too, so that charts
     of them line up. `part` names a figure that is a part of each bar, with what to call
     it: the bar is drawn lighter up to there. A system whose text came out unlike
     diamond-types' is starred."""
@@ -51,11 +49,9 @@ def chart(results, kind, label, caption, ticks, baseline=None, share=(), part=No
     parts = {r["trace"]: r[part[0]] for r in results} if part else {}
     same = {r["trace"]: r["same"] for r in results}
     traces = [t for t in ORDER if t in by_trace]
-    systems = ([(baseline[1], None, "#999999")] if baseline else []) + shown
-    base = {r["trace"]: r[baseline[0]] for r in results} if baseline else {}
-    value_of = lambda trace, key: base[trace] if key is None else by_trace[trace].get(key)
+    systems = shown
     origin = ticks[0][0]
-    values = [r[k].get(key) for r in results for k in (kind, *share) for _, key, _ in shown] + list(base.values())
+    values = [r[k].get(key) for r in results for k in (kind, *share) for _, key, _ in shown]
     decades = [math.log10(v / origin) for v in values if v]
     low, high = math.floor(min(decades)), math.ceil(max(decades))
     x = lambda v: LEFT + (math.log10(v / origin) - low) / (high - low) * (RIGHT - LEFT)
@@ -92,12 +88,12 @@ def chart(results, kind, label, caption, ticks, baseline=None, share=(), part=No
         out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(systems) * ROW}" stroke="black" stroke-width="1.5"/>')
         least = min(v for v in (by_trace[trace].get(key) for _, key, _ in shown) if v)
         for name, key, colour in systems:
-            value = value_of(trace, key)
+            value = by_trace[trace].get(key)
             out.append(f'<text x="{LEFT - 6}" y="{y + 8}" font-size="7.5" fill="#888" text-anchor="end">{name}</text>')
             if value:
                 end = x(value)
                 out.append(f'<rect x="{LEFT}" y="{y}" width="{max(end - LEFT, 1):.1f}" height="{ROW - 2}" fill="{colour}"/>')
-                behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if key and value > least else ""
+                behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if value > least else ""
                 within = parts.get(trace, {}).get(key)
                 if within:
                     # Both ends of the lighter part can be read off the axis.
@@ -118,13 +114,12 @@ def main(results_path, out_dir):
     scale = "Log scale. (Less is better)"
     runs = f"Median of {results[0]['reps']} runs. {scale}"
     sizes = [(2**20 * 10**k, text) for k, text in ((-2, "0.01 MiB"), (-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
-    text, packed = ("text", "Inserted text"), ("text_packed", "Inserted text, packed")
     charts = {
         "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES, share=["open_ms"]),
         "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES, share=["merge_ms"]),
-        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, text, ["merge_kept"], ("merge_ops", "ops")),
-        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, text, ["merge_peak"]),
-        "file-size": chart(results, "saved", memory, f"Size of a saved document. Inserted text is all the text its history inserts, compressed with Zstandard. {scale}", sizes, packed),
+        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, ["merge_kept"], ("merge_ops", "ops")),
+        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, ["merge_peak"]),
+        "file-size": chart(results, "saved", memory, f"Size of a saved document. {scale}", sizes),
     }
     for name, drawn in charts.items():
         open(f"{out_dir}/{name}.svg", "w").write(drawn)

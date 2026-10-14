@@ -168,14 +168,6 @@ impl History<TextOperation, usize> {
         let parents = self.parents.iter().map(|&parent| parent as EventIndex).collect();
         History { agents: self.agents.clone(), chunks, parents, ops, text }
     }
-
-    /// Returns the bytes of all the text the history inserts, and how many they come to
-    /// compressed with Zstandard as eg-strider compresses its own: what a document that keeps
-    /// its whole history holds of text, in memory and in a file.
-    pub fn text_bytes(&self) -> (usize, usize) {
-        let text: String = self.ops.iter().filter(|op| op.kind == ListOpKind::Ins).filter_map(|op| op.content.as_deref()).collect();
-        (text.len(), zstd::bulk::compress(text.as_bytes(), 3).expect("compressing text in memory").len())
-    }
 }
 
 /// Copies a diamond-types oplog into an eg-strider one, numbering events identically.

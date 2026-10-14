@@ -547,9 +547,7 @@ fn main() {
             columns(all.map(|m| m.map(|m| mb(m.saved))))
         ));
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{events},\"reps\":{reps},\"trace_text\":{trace_text},\"text\":{},\"text_packed\":{},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_ops\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4},\"strider_then\":[{}]}}}}",
-            dt_history.text_bytes().0,
-            dt_history.text_bytes().1,
+            "{{\"trace\":\"{name}\",\"events\":{events},\"reps\":{reps},\"trace_text\":{trace_text},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_ops\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4},\"strider_then\":[{}]}}}}",
             object(all.map(|m| m.map(|m| m.same))),
             object(all.map(|m| m.map(|m| format!("{:.4}", m.merge_ms)))),
             object(all.map(|m| m.map(|m| format!("{:.4}", m.open_ms)))),
