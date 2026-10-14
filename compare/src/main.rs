@@ -177,12 +177,10 @@ fn automerge_text(document: automerge::AutoCommit) -> (automerge::AutoCommit, St
     (document, string)
 }
 
-/// Applies changes to a new Automerge document, one by one as they would arrive.
+/// Applies changes to a new Automerge document, all at once.
 fn automerge_apply(changes: Vec<automerge::Change>) -> (automerge::AutoCommit, String) {
     let mut document = automerge::AutoCommit::new();
-    for change in changes {
-        document.apply_changes([change]).unwrap();
-    }
+    document.apply_changes(changes).unwrap();
     automerge_text(document)
 }
 
@@ -203,18 +201,21 @@ fn yjs_decode_batches(bytes: &[u8]) -> Vec<yrs::Update> {
     batches(bytes).map(|update| yrs::Update::decode_v1(update).unwrap()).collect()
 }
 
-/// Applies updates to a new Yjs document, one by one as they would arrive, and returns it with
-/// its text. Garbage collection is off, so that it keeps the text of deleted characters as every
-/// other library does.
-fn yjs_apply(updates: impl IntoIterator<Item = yrs::Update>) -> (yrs::Doc, String) {
+/// Applies an update to a new Yjs document and returns it with its text. Garbage collection is
+/// off, so that it keeps the text of deleted characters as every other library does.
+fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
     use yrs::{GetString, Transact};
     let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
     let text = document.get_or_insert_text("text");
-    for update in updates {
-        document.transact_mut().apply_update(update).unwrap();
-    }
+    document.transact_mut().apply_update(update).unwrap();
     let string = text.get_string(&document.transact());
     (document, string)
+}
+
+/// Combines updates with yrs's own call for that, and applies them all at once to a new Yjs
+/// document.
+fn yjs_merge(updates: Vec<yrs::Update>) -> (yrs::Doc, String) {
+    yjs_apply(yrs::Update::merge_updates(updates))
 }
 
 /// Saves a Yjs document as one update of its whole state, the only form it has.
@@ -233,23 +234,17 @@ fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
 
 /// Reads the updates each writer sent into memory as ops, without applying them. Loro takes
 /// remote edits as bytes or as ops in its JSON form; the latter starts from ops in memory.
-fn loro_decode_batches(bytes: &[u8]) -> Vec<loro::JsonSchema> {
+fn loro_decode_batches(bytes: &[u8]) -> loro::JsonSchema {
     let reader = LoroDoc::new();
-    batches(bytes)
-        .map(|update| {
-            let before = reader.oplog_vv();
-            reader.import(update).unwrap();
-            reader.export_json_updates(&before, &reader.oplog_vv())
-        })
-        .collect()
+    let sent: Vec<Vec<u8>> = batches(bytes).map(<[u8]>::to_vec).collect();
+    reader.import_batch(&sent).unwrap();
+    reader.export_json_updates(&Default::default(), &reader.oplog_vv())
 }
 
-/// Applies ops to a new Loro document, batch by batch as they would arrive.
-fn loro_apply(batches: Vec<loro::JsonSchema>) -> (LoroDoc, String) {
+/// Applies ops to a new Loro document, all at once.
+fn loro_apply(ops: loro::JsonSchema) -> (LoroDoc, String) {
     let document = LoroDoc::new();
-    for ops in batches {
-        document.import_json_updates(ops).unwrap();
-    }
+    document.import_json_updates(ops).unwrap();
     let string = document.get_text(TEXT).to_string();
     (document, string)
 }
@@ -345,9 +340,9 @@ fn columns(of: [Option<String>; 5]) -> String {
 /// editing traces, and checks that each ends with diamond-types' text, and whether that is the
 /// trace's. The two tasks are merging a history whose ops are in memory, through each library's
 /// own calls, and reopening a saved document from its bytes until it is ready for more edits.
-/// The other libraries merge the batches each writer's replica sent, one by one. The paper's own
-/// Yjs and Automerge files for a trace, when beside it, are opened too, to check the replays'
-/// saved documents against.
+/// The other libraries take every batch each writer's replica sent, all at once, through their
+/// own calls for that. The paper's own Yjs and Automerge files for a trace, when beside it, are
+/// opened too, to check the replays' saved documents against.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let replay = args.iter().any(|a| a == "--replay");
@@ -507,7 +502,7 @@ fn main() {
 
         // The other libraries, on the same history replayed into each.
         let yjs = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay, &left_out)
-            .map(|(sent, notes)| (measure(reps, &expected, || yjs_decode_batches(&sent), yjs_apply, yjs_save, |saved| yjs_apply([yjs_decode(saved)])), notes));
+            .map(|(sent, notes)| (measure(reps, &expected, || yjs_decode_batches(&sent), yjs_merge, yjs_save, |saved| yjs_apply(yjs_decode(saved))), notes));
         let loro = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay, &left_out).map(|(sent, notes)| {
             let ops = loro_decode_batches(&sent);
             (measure(reps, &expected, || ops.clone(), loro_apply, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
@@ -532,7 +527,7 @@ fn main() {
             let text = open(&file);
             (since(t), file.len(), text == expected)
         };
-        let paper_yjs = beside(".yjs").filter(|_| !left_out.contains(&"yrs")).map(|file| opened(file, &|bytes| yjs_apply([yjs_decode(bytes)]).1));
+        let paper_yjs = beside(".yjs").filter(|_| !left_out.contains(&"yrs")).map(|file| opened(file, &|bytes| yjs_apply(yjs_decode(bytes)).1));
         let paper_automerge = beside(".am").filter(|_| !left_out.contains(&"automerge")).map(|file| opened(file, &|bytes| automerge_open(bytes).1));
         let ours = [yjs.as_ref().ok().map(|m| m.0), automerge.as_ref().ok().map(|m| m.0)];
         papers.push(format!(
