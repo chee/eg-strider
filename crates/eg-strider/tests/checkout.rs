@@ -1,4 +1,4 @@
-use eg_strider::{Edit, EventId, OpLog};
+use eg_strider::{Edit, EventIndex, OpLog};
 
 /// Two replicas rewrite different ends of a shared text at once. Nothing either does lands
 /// among what the other did, so the tracker is never needed.
@@ -159,7 +159,7 @@ fn ops_arriving_as_a_run_merge_as_they_do_one_at_a_time() {
     let (a, b) = (together.get_or_create_agent("a"), apart.get_or_create_agent("a"));
     let events = together.add_remote_ops(a, 0, &[], &ops, text);
     one_at_a_time(&mut apart, b, &ops, text);
-    assert_eq!(events, 0..apart.len() as EventId);
+    assert_eq!(events, 0..apart.len() as EventIndex);
     assert_eq!(together.checkout(), "A\u{e9}");
     assert_eq!(apart.checkout(), "A\u{e9}");
 

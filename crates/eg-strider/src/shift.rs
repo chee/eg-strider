@@ -1,7 +1,7 @@
 use crate::oplog::{OpIndex, OpKind, OpLog};
 use crate::replay::Placed;
 use std::ops::Range;
-use strider_graph::{BlockId, Blocks};
+use strider_graph::{BlockIndex, Blocks};
 
 /// Regions with more blocks go straight to the tracker. The sets kept per block grow with its
 /// square: 256 KB here.
@@ -218,7 +218,7 @@ pub(crate) struct Shifter {
 impl Shifter {
     /// Merges a region by shifting, recording in `document` where its ops go. Returns false,
     /// leaving `document` as it was, if the region needs the tracker.
-    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<BlockId>, document: &mut Placed) -> bool {
+    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<BlockIndex>, document: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;
         }
@@ -252,7 +252,7 @@ impl Shifter {
     }
 
     /// Fills in `seen` and `stable` for the region. Returns how many words each set has.
-    fn sets(&mut self, blocks: &Blocks, region: &Range<BlockId>) -> usize {
+    fn sets(&mut self, blocks: &Blocks, region: &Range<BlockIndex>) -> usize {
         let count = region.len();
         let words = count.div_ceil(64);
         self.seen.clear();
@@ -260,7 +260,7 @@ impl Shifter {
         if words == 1 {
             // Most regions are this small: each set is one word, with no slices to cut.
             for i in 0..count {
-                let inside = blocks.parents(region.start + i as BlockId).iter().filter_map(|&p| p.checked_sub(region.start)).map(|p| p as usize);
+                let inside = blocks.parents(region.start + i as BlockIndex).iter().filter_map(|&p| p.checked_sub(region.start)).map(|p| p as usize);
                 let seen = inside.fold(1 << i, |seen, parent| seen | self.seen[parent]);
                 self.seen.push(seen);
             }
@@ -277,7 +277,7 @@ impl Shifter {
             let (earlier, own) = self.seen.split_at_mut(i * words);
             let own = &mut own[..words];
             // Parents from before the region are before a critical version: all have them.
-            for parent in blocks.parents(region.start + i as BlockId).iter().filter_map(|&p| p.checked_sub(region.start)).map(|p| p as usize) {
+            for parent in blocks.parents(region.start + i as BlockIndex).iter().filter_map(|&p| p.checked_sub(region.start)).map(|p| p as usize) {
                 for (word, theirs) in own.iter_mut().zip(&earlier[parent * words..][..words]) {
                     *word |= theirs;
                 }

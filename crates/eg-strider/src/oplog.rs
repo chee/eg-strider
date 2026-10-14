@@ -5,7 +5,7 @@ pub use file::Malformed;
 use crate::replay::{self, Base, Memo};
 use std::cmp::Ordering;
 use std::ops::Range;
-use strider_graph::{EventId, Graph};
+use strider_graph::{EventIndex, Graph};
 
 /// How many events an agent made before this one. With the agent, it names an event on every
 /// replica.
@@ -37,7 +37,7 @@ pub enum Edit {
 
 /// A run of consecutive events of one kind.
 struct Op {
-    first_event: EventId,
+    first_event: EventIndex,
     len: u32,
     kind: OpKind,
     /// Deletes only: false for backspace, whose first event removes the last position.
@@ -53,7 +53,7 @@ struct Op {
 
 /// A run of consecutive events by one agent.
 struct AgentRun {
-    first_event: EventId,
+    first_event: EventIndex,
     len: u32,
     agent: AgentId,
     sequence_number: SequenceNumber,
@@ -62,7 +62,7 @@ struct AgentRun {
 /// Part of an op, as the replay sees it.
 #[derive(Clone, Copy)]
 pub(crate) struct OpSlice {
-    pub first_event: EventId,
+    pub first_event: EventIndex,
     pub len: u32,
     pub kind: OpKind,
     pub forward: bool,
@@ -98,7 +98,7 @@ pub struct OpLog {
     /// History from before the first event held here, from a loaded file, still unread.
     packed: Option<file::Packed>,
     /// Scratch for a new event's parents.
-    parents: Vec<EventId>,
+    parents: Vec<EventIndex>,
     /// The characters the inserts put in, and the characters the deletes take out.
     totals: (u32, u32),
 }
@@ -143,7 +143,7 @@ impl OpLog {
     }
 
     /// Returns the events with no children: the version a local edit builds on.
-    pub fn frontier(&self) -> Vec<EventId> {
+    pub fn frontier(&self) -> Vec<EventIndex> {
         self.graph.frontier().to_vec()
     }
 
@@ -193,29 +193,29 @@ impl OpLog {
     }
 
     /// Inserts `text` at `pos` in the document as of the current frontier.
-    pub fn add_insert(&mut self, agent: AgentId, pos: usize, text: &str) -> Range<EventId> {
+    pub fn add_insert(&mut self, agent: AgentId, pos: usize, text: &str) -> Range<EventIndex> {
         self.push(agent, None, None, OpKind::Ins, true, pos, text.chars().count(), text)
     }
 
     /// Deletes `range` from the document as of the current frontier.
-    pub fn add_delete(&mut self, agent: AgentId, range: Range<usize>) -> Range<EventId> {
+    pub fn add_delete(&mut self, agent: AgentId, range: Range<usize>) -> Range<EventIndex> {
         self.push(agent, None, None, OpKind::Del, true, range.start, range.len(), "")
     }
 
     /// Inserts `text` at `pos` in the document as of version `parents`.
-    pub fn add_insert_at(&mut self, agent: AgentId, parents: &[EventId], pos: usize, text: &str) -> Range<EventId> {
+    pub fn add_insert_at(&mut self, agent: AgentId, parents: &[EventIndex], pos: usize, text: &str) -> Range<EventIndex> {
         self.push(agent, None, Some(parents), OpKind::Ins, true, pos, text.chars().count(), text)
     }
 
     /// Deletes `range` from the document as of version `parents`. `forward` is false for
     /// backspace, which removes the last character first.
-    pub fn add_delete_at(&mut self, agent: AgentId, parents: &[EventId], range: Range<usize>, forward: bool) -> Range<EventId> {
+    pub fn add_delete_at(&mut self, agent: AgentId, parents: &[EventIndex], range: Range<usize>, forward: bool) -> Range<EventIndex> {
         self.push(agent, None, Some(parents), OpKind::Del, forward, range.start, range.len(), "")
     }
 
     /// As [`add_insert_at`](Self::add_insert_at), for an event from elsewhere with a fixed
     /// sequence number.
-    pub fn add_remote_insert(&mut self, agent: AgentId, sequence_number: SequenceNumber, parents: &[EventId], pos: usize, text: &str) -> Range<EventId> {
+    pub fn add_remote_insert(&mut self, agent: AgentId, sequence_number: SequenceNumber, parents: &[EventIndex], pos: usize, text: &str) -> Range<EventIndex> {
         self.push(agent, Some(sequence_number), Some(parents), OpKind::Ins, true, pos, text.chars().count(), text)
     }
 
@@ -225,16 +225,16 @@ impl OpLog {
         &mut self,
         agent: AgentId,
         sequence_number: SequenceNumber,
-        parents: &[EventId],
+        parents: &[EventIndex],
         range: Range<usize>,
         forward: bool,
-    ) -> Range<EventId> {
+    ) -> Range<EventIndex> {
         self.push(agent, Some(sequence_number), Some(parents), OpKind::Del, forward, range.start, range.len(), "")
     }
 
     /// Appends a run of ops by one agent from elsewhere: the first made at `parents`, each
     /// other following the one before. `text` holds the inserts' text, in order.
-    pub fn add_remote_ops(&mut self, agent: AgentId, sequence_number: SequenceNumber, parents: &[EventId], ops: &[Edit], text: &str) -> Range<EventId> {
+    pub fn add_remote_ops(&mut self, agent: AgentId, sequence_number: SequenceNumber, parents: &[EventIndex], ops: &[Edit], text: &str) -> Range<EventIndex> {
         let parts = |edit: &Edit| match *edit {
             Edit::Insert { pos, len } => (OpKind::Ins, true, pos, len),
             Edit::Delete { pos, len, backspace } => (OpKind::Del, !backspace, pos, len),
@@ -287,13 +287,13 @@ impl OpLog {
         &mut self,
         agent: AgentId,
         sequence_number: Option<SequenceNumber>,
-        parents: Option<&[EventId]>,
+        parents: Option<&[EventIndex]>,
         kind: OpKind,
         forward: bool,
         pos: usize,
         len: usize,
         text: &str,
-    ) -> Range<EventId> {
+    ) -> Range<EventIndex> {
         let event = self.graph.len();
         if len == 0 {
             return event..event;
@@ -310,14 +310,14 @@ impl OpLog {
 
     /// Adds a chain of `len` events to the graph, the first at `parents` or else the frontier.
     /// Returns whether they follow the last event, and their ids.
-    fn link(&mut self, parents: Option<&[EventId]>, len: u32) -> (bool, Range<EventId>) {
+    fn link(&mut self, parents: Option<&[EventIndex]>, len: u32) -> (bool, Range<EventIndex>) {
         // History that is still as it was saved has to be read for an event that was made
-        // without all of it: one with no parent held here, and not every old head for parents.
+        // without all of it: one with no parent held here, and not all of the old frontier for parents.
         // A block of it starts at a critical version, so an event has all that comes before
         // the block holding its latest parent.
         if let (Some(packed), Some(parents)) = (&self.packed, parents) {
             let floor = self.graph.floor();
-            if !parents.iter().any(|&parent| parent >= floor) && !packed.heads.iter().all(|head| parents.contains(head)) {
+            if !parents.iter().any(|&parent| parent >= floor) && !packed.frontier.iter().all(|event| parents.contains(event)) {
                 let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent));
                 self.unpack_from(block);
             }
@@ -341,7 +341,7 @@ impl OpLog {
 
     /// Records that `agent` made the `len` events from `event`, numbered from `sequence_number`
     /// or else from where its last left off.
-    fn assign(&mut self, agent: AgentId, sequence_number: Option<SequenceNumber>, event: EventId, len: u32) {
+    fn assign(&mut self, agent: AgentId, sequence_number: Option<SequenceNumber>, event: EventIndex, len: u32) {
         let sequence_number = sequence_number.unwrap_or(self.next_sequence_numbers[agent as usize]);
         let next = &mut self.next_sequence_numbers[agent as usize];
         *next = (*next).max(sequence_number + len);
@@ -380,11 +380,11 @@ impl OpLog {
     }
 
     /// Makes an op start at event `at`, if one runs across it.
-    fn split_op(&mut self, at: EventId) {
+    fn split_op(&mut self, at: EventIndex) {
         let i = self.op_containing(at) as usize;
         let Some(op) = self.ops.get(i).filter(|op| op.first_event < at) else { return };
         let end = op.first_event + op.len;
-        let part = |events: Range<EventId>| {
+        let part = |events: Range<EventIndex>| {
             let part = self.slice(op, &events);
             Op { first_event: part.first_event, len: part.len, kind: part.kind, forward: part.forward, trims: false, pos: part.pos, content: part.text }
         };
@@ -419,14 +419,14 @@ impl OpLog {
     }
 
     /// Returns the agent that made `event`, and its sequence number.
-    fn agent_at(&self, event: EventId) -> (AgentId, SequenceNumber) {
+    fn agent_at(&self, event: EventIndex) -> (AgentId, SequenceNumber) {
         let run = &self.agent_runs[self.agent_runs.partition_point(|r| r.first_event <= event) - 1];
         (run.agent, run.sequence_number + (event - run.first_event))
     }
 
     /// Breaks a tie between concurrent inserts at the same place: does the insert from `a` go
     /// before the one from `b`?
-    pub(crate) fn inserts_before(&self, a: EventId, b: EventId) -> bool {
+    pub(crate) fn inserts_before(&self, a: EventIndex, b: EventIndex) -> bool {
         let (agent_a, sequence_number_a) = self.agent_at(a);
         let (agent_b, sequence_number_b) = self.agent_at(b);
         match self.agent_names[agent_a as usize].cmp(&self.agent_names[agent_b as usize]) {
@@ -438,7 +438,7 @@ impl OpLog {
 
     /// Returns, for each event in ascending `starts`, the index of the op holding it, or the
     /// number of ops for the event after the last.
-    pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = EventId>) -> Vec<OpIndex> {
+    pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = EventIndex>) -> Vec<OpIndex> {
         let mut op = 0;
         starts
             .map(|event| {
@@ -452,7 +452,7 @@ impl OpLog {
 
     /// Iterates over the parts of ops inside `events`. `ops` runs from the op holding the first
     /// event to the op holding the event after the last.
-    pub(crate) fn ops(&self, ops: Range<OpIndex>, events: Range<EventId>) -> impl DoubleEndedIterator<Item = OpSlice> + '_ {
+    pub(crate) fn ops(&self, ops: Range<OpIndex>, events: Range<EventIndex>) -> impl DoubleEndedIterator<Item = OpSlice> + '_ {
         // The op containing the event after the last holds some of these too if it starts
         // before then.
         let straddles = self.ops.get(ops.end as usize).is_some_and(|op| op.first_event < events.end);
@@ -461,7 +461,7 @@ impl OpLog {
     }
 
     /// Returns the index of the op holding `event`.
-    pub(crate) fn op_containing(&self, event: EventId) -> OpIndex {
+    pub(crate) fn op_containing(&self, event: EventIndex) -> OpIndex {
         self.ops.partition_point(|op| op.first_event + op.len <= event) as OpIndex
     }
 
@@ -482,7 +482,7 @@ impl OpLog {
 
     /// Counts the characters `events` insert and remove, applied as recorded. `first_op` is the
     /// op holding the first of them.
-    pub(crate) fn lengths(&self, first_op: OpIndex, events: Range<EventId>) -> (u32, u32) {
+    pub(crate) fn lengths(&self, first_op: OpIndex, events: Range<EventIndex>) -> (u32, u32) {
         let (mut inserted, mut removed) = (0, 0);
         for op in &self.ops[first_op as usize..] {
             if op.first_event.max(events.start) >= events.end {
@@ -511,7 +511,7 @@ impl OpLog {
 
     /// Cuts out the part of `op` inside `events`.
     #[inline]
-    fn slice(&self, op: &Op, events: &Range<EventId>) -> OpSlice {
+    fn slice(&self, op: &Op, events: &Range<EventIndex>) -> OpSlice {
         let from = events.start.max(op.first_event) - op.first_event;
         let to = events.end.min(op.first_event + op.len) - op.first_event;
         // Nearly always the whole op, which needs no working out whatever its kind.

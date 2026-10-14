@@ -2,7 +2,7 @@ use crate::oplog::{ByteRange, OpIndex, OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
 use crate::tracker::{ItemId, Targets, Tracker};
 use std::ops::Range;
-use strider_graph::{BlockId, EventId, Move, Segment, Walker};
+use strider_graph::{BlockIndex, EventIndex, Move, Segment, Walker};
 use strider_text::PieceTable;
 
 /// Where merging put each op of the regions. The rest of each edit is the op itself.
@@ -10,7 +10,7 @@ use strider_text::PieceTable;
 pub(crate) struct Placed {
     /// Stretches of blocks, in merge order. An op that runs from one block into the next is one
     /// op.
-    order: Vec<Range<BlockId>>,
+    order: Vec<Range<BlockIndex>>,
     /// Per op of those stretches. An insert: the index it went in at. A delete: the index and
     /// length of each run it removed, then the number of runs.
     at: Vec<u32>,
@@ -20,14 +20,14 @@ pub(crate) struct Placed {
     len: u32,
     /// The first block whose events the document does not hold. Ops of earlier blocks are not
     /// recorded.
-    new: BlockId,
+    new: BlockIndex,
     /// Whether the current stretch is of those earlier blocks.
     held: bool,
 }
 
 impl Placed {
     /// Starts on a stretch of blocks, which the document holds all of or none of.
-    pub(crate) fn begin(&mut self, stretch: Range<BlockId>) {
+    pub(crate) fn begin(&mut self, stretch: Range<BlockIndex>) {
         self.held = stretch.end <= self.new;
         debug_assert!(self.held || stretch.start >= self.new, "a stretch with events on both sides of the base");
         if !self.held {
@@ -88,7 +88,7 @@ const DESCENDING: u32 = 1 << 31;
 /// The document with the first `events` events merged, which a merge of the rest starts from.
 #[derive(Default)]
 pub(crate) struct Base {
-    pub events: EventId,
+    pub events: EventIndex,
     /// The length of `text` in characters.
     pub chars: u32,
     pub text: String,
@@ -114,7 +114,7 @@ struct Workspace {
 struct Plan {
     events: usize,
     /// The first event of each segment.
-    starts: Vec<EventId>,
+    starts: Vec<EventIndex>,
     segments: Vec<Segment>,
     /// Per block, the op holding its first event; then the number of ops.
     first_op: Vec<OpIndex>,
@@ -142,7 +142,7 @@ impl Plan {
     }
 
     /// Takes what is kept for the region starting at `start`, if anything.
-    fn take_kept(&mut self, start: EventId) -> Kept {
+    fn take_kept(&mut self, start: EventIndex) -> Kept {
         match self.starts.binary_search(&start) {
             Ok(at) => std::mem::take(&mut self.kept[at]),
             Err(_) => Kept::default(),
@@ -151,18 +151,18 @@ impl Plan {
 
     /// Iterates over a stretch's ops, cutting any that run past either end.
     #[inline]
-    fn ops<'a>(&self, log: &'a OpLog, stretch: &Range<BlockId>) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
+    fn ops<'a>(&self, log: &'a OpLog, stretch: &Range<BlockIndex>) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
         self.ops_from(log, stretch, log.graph.blocks().start(stretch.start))
     }
 
     /// Iterates over a stretch's ops from event `from`, which is in it.
     #[inline]
-    fn ops_from<'a>(&self, log: &'a OpLog, stretch: &Range<BlockId>, from: EventId) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
+    fn ops_from<'a>(&self, log: &'a OpLog, stretch: &Range<BlockIndex>, from: EventIndex) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
         log.ops(self.op_at(log, stretch, from)..self.first_op[stretch.end as usize], from..log.graph.blocks().start(stretch.end))
     }
 
     /// Returns the op holding event `from` of a stretch.
-    fn op_at(&self, log: &OpLog, stretch: &Range<BlockId>, from: EventId) -> OpIndex {
+    fn op_at(&self, log: &OpLog, stretch: &Range<BlockIndex>, from: EventIndex) -> OpIndex {
         if from == log.graph.blocks().start(stretch.start) {
             self.first_op[stretch.start as usize]
         } else {
@@ -209,7 +209,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
     // Forwards: merge the regions. The events of a linear stretch are edits already, so all
     // that is needed of them for now is what they do to the document's length.
     let blocks = log.graph.blocks();
-    let events = |stretch: &Range<BlockId>| blocks.start(stretch.start)..blocks.start(stretch.end);
+    let events = |stretch: &Range<BlockIndex>| blocks.start(stretch.start)..blocks.start(stretch.end);
     debug_assert!((log.graph.floor()..log.graph.len()).contains(&base.events), "a base the log does not reach back to");
     let new = blocks.containing(base.events);
     let mut document = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: base.chars, new, held: false };
@@ -296,7 +296,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
 }
 
 /// Merges one region, recording in `document` where its ops go.
-fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Kept, workspace: &mut Workspace, document: &mut Placed) {
+fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockIndex>, kept: &mut Kept, workspace: &mut Workspace, document: &mut Placed) {
     let Workspace { tracker, walker, shifter } = workspace;
     // Nothing kept: the region has not needed the tracker so far. See whether it does now.
     if kept.events == 0 && shifter.merge(log, log.graph.blocks(), &plan.first_op, region, document) {
@@ -304,7 +304,7 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
     }
     let blocks = log.graph.blocks();
     let (start, end) = (blocks.start(region.start), blocks.start(region.end));
-    let goes_before = |a: EventId, b: EventId| log.inserts_before(start + a, start + b);
+    let goes_before = |a: EventIndex, b: EventIndex| log.inserts_before(start + a, start + b);
     // The region's blocks that the document already holds, which are its first. The document
     // was no longer when the region began than it is now plus what those events removed.
     let held = document.new.clamp(region.start, region.end);
@@ -313,7 +313,7 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
     // Blocks resolved in full by earlier replays are placed by id. Their events stay in the
     // tracker's prepare version, which is where the walk of the rest begins.
     let known_blocks = (region.start..region.end).take_while(|&block| blocks.start(block + 1) - start <= kept.events).count();
-    let known = region.start..region.start + known_blocks as BlockId;
+    let known = region.start..region.start + known_blocks as BlockIndex;
     let mut resolved = kept.resolved.iter().copied();
     let mut next = || resolved.next().expect("something kept for every resolved event");
     let parted = held.min(known.end);
@@ -390,7 +390,7 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
 }
 
 /// Merges one op at the tracker's prepare version.
-fn walk_op(start: EventId, op: OpSlice, tracker: &mut Tracker, goes_before: &impl Fn(EventId, EventId) -> bool, document: &mut Placed) {
+fn walk_op(start: EventIndex, op: OpSlice, tracker: &mut Tracker, goes_before: &impl Fn(EventIndex, EventIndex) -> bool, document: &mut Placed) {
     let event = op.first_event - start;
     match op.kind {
         OpKind::Ins => {

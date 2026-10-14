@@ -5,11 +5,11 @@ pub use walk::{Move, Walker};
 use std::ops::Range;
 
 /// Replica local version number/index for an event.
-pub type EventId = u32;
+pub type EventIndex = u32;
 
 /// Index of a block among those the graph holds, in order of their first events. Shifts by one
 /// when an earlier block splits.
-pub type BlockId = u32;
+pub type BlockIndex = u32;
 
 /// The event graph of a document's history: which events each event's author had seen. Merging
 /// is only needed where history is concurrent, so the graph is stored run-length encoded, cut
@@ -18,14 +18,14 @@ pub type BlockId = u32;
 pub struct Graph {
     blocks: Blocks,
     /// Events nothing descends from yet, ascending.
-    heads: Vec<EventId>,
+    frontier: Vec<EventIndex>,
     /// Per block, how many events from the start of history it has seen: exact if it has seen
     /// all before it, else a lower bound.
-    seen: Vec<EventId>,
+    seen: Vec<EventIndex>,
     /// Blocks that start at a critical version, ascending.
-    critical: Vec<BlockId>,
+    critical: Vec<BlockIndex>,
     /// Scratch: the blocks a new event's parents end.
-    ends: Vec<BlockId>,
+    ends: Vec<BlockIndex>,
 }
 
 impl Graph {
@@ -35,18 +35,18 @@ impl Graph {
     }
 
     /// Creates a graph of only the events after the first `events`. Every later event must have
-    /// seen `heads`, the heads of those first events.
-    pub fn after(events: EventId, heads: &[EventId]) -> Self {
-        Graph { blocks: Blocks { start: vec![events], ..Blocks::default() }, heads: heads.to_vec(), ..Self::default() }
+    /// seen `frontier`, the frontier of those first events.
+    pub fn after(events: EventIndex, frontier: &[EventIndex]) -> Self {
+        Graph { blocks: Blocks { start: vec![events], ..Blocks::default() }, frontier: frontier.to_vec(), ..Self::default() }
     }
 
     /// Returns the first event the graph holds.
-    pub fn floor(&self) -> EventId {
+    pub fn floor(&self) -> EventIndex {
         self.blocks.start[0]
     }
 
     /// Returns the number of events.
-    pub fn len(&self) -> EventId {
+    pub fn len(&self) -> EventIndex {
         self.blocks.start(self.blocks.len())
     }
 
@@ -56,24 +56,24 @@ impl Graph {
     }
 
     /// Returns the events nothing descends from yet, ascending.
-    pub fn frontier(&self) -> &[EventId] {
+    pub fn frontier(&self) -> &[EventIndex] {
         // Kept in order: each new event is the highest so far, and goes on the end.
-        &self.heads
+        &self.frontier
     }
 
     /// Tells whether an event with these parents just extends the last event.
-    pub fn continues(&self, parents: &[EventId]) -> bool {
+    pub fn continues(&self, parents: &[EventIndex]) -> bool {
         !self.is_empty() && parents == [self.len() - 1]
     }
 
     /// If some later event has not seen every event before `at`, starts a block at `at` and
     /// returns true.
-    pub fn cut(&mut self, at: EventId) -> bool {
+    pub fn cut(&mut self, at: EventIndex) -> bool {
         if at <= self.floor() || at >= self.len() {
             return false;
         }
         let block = self.blocks.containing(at);
-        let critical = |block: BlockId| self.critical.binary_search(&block).is_ok();
+        let critical = |block: BlockIndex| self.critical.binary_search(&block).is_ok();
         if self.blocks.start(block) == at {
             return !critical(block);
         }
@@ -92,21 +92,21 @@ impl Graph {
     }
 
     /// Appends a chain of `len` events, the first with `parents`. Returns their ids.
-    pub fn push(&mut self, parents: &[EventId], len: u32) -> Range<EventId> {
+    pub fn push(&mut self, parents: &[EventIndex], len: u32) -> Range<EventIndex> {
         // A block with no events would let there be more blocks than events.
         assert!(len > 0, "a run of no events");
         let start = self.len();
         let end = start.checked_add(len).expect("too many events");
         if self.continues(parents) {
             // Nothing else can have the last event as a parent yet, so its block just grows,
-            // and the block's new end is the last head in its place.
+            // and the block's new end replaces the last event of the frontier.
             *self.blocks.start.last_mut().expect("a block to continue") = end;
-            *self.heads.last_mut().expect("the last event is a head") = end - 1;
+            *self.frontier.last_mut().expect("the last event is in the frontier") = end - 1;
             return start..end;
         }
         assert!(parents.iter().all(|&p| p < start), "parent is not a known event");
         // Parents usually arrive in order; only otherwise are they copied to be sorted.
-        let sorted: Vec<EventId>;
+        let sorted: Vec<EventIndex>;
         let parents = if parents.windows(2).all(|pair| pair[0] < pair[1]) {
             parents
         } else {
@@ -130,8 +130,8 @@ impl Graph {
             }
             ends.push(block);
         }
-        // An event that merges every head has seen all there is, and leaves no other head.
-        let merges_all = parents == self.heads;
+        // An event whose parents are the whole frontier has seen everything, and is all the frontier is now.
+        let merges_all = parents == self.frontier;
         let seen = if merges_all { start } else { ends.iter().map(|&block| self.seen_after(block)).max().unwrap_or(floor) };
         let new = self.blocks.len();
         self.blocks.parents.extend_from_slice(&ends);
@@ -149,16 +149,16 @@ impl Graph {
             self.critical.push(new);
         }
         if merges_all {
-            self.heads.clear();
+            self.frontier.clear();
         } else {
-            self.heads.retain(|h| !parents.contains(h));
+            self.frontier.retain(|event| !parents.contains(event));
         }
-        self.heads.push(end - 1);
+        self.frontier.push(end - 1);
         start..end
     }
 
     /// Returns how many events from the start of history a block's last event has seen.
-    fn seen_after(&self, block: BlockId) -> EventId {
+    fn seen_after(&self, block: BlockIndex) -> EventIndex {
         let i = block as usize;
         if self.seen[i] == self.blocks.start[i] {
             self.blocks.start[i + 1]
@@ -168,14 +168,14 @@ impl Graph {
     }
 
     /// Splits a block so that a new one starts at `at`.
-    fn split(&mut self, block: BlockId, at: EventId) {
+    fn split(&mut self, block: BlockIndex, at: EventIndex) {
         let blocks = &mut self.blocks;
         let (first, second, i) = (block, block + 1, block as usize);
         // Later blocks named this one for its last event, which the second part now has;
         // and every block after it moves up one.
         let later = blocks.parent_start[i + 1] as usize;
         for parent in &mut blocks.parents[later..] {
-            *parent += BlockId::from(*parent >= first);
+            *parent += BlockIndex::from(*parent >= first);
         }
         blocks.parents.insert(later, first);
         blocks.start.insert(i + 1, at);
@@ -222,10 +222,10 @@ impl Graph {
 /// version holds a block whole or not at all.
 pub struct Blocks {
     /// Block `i` covers events `start[i]..start[i + 1]`.
-    start: Vec<EventId>,
+    start: Vec<EventIndex>,
     parent_start: Vec<u32>,
     /// Each block's parent blocks: those its first event's parents end.
-    parents: Vec<BlockId>,
+    parents: Vec<BlockIndex>,
 }
 
 impl Default for Blocks {
@@ -238,14 +238,14 @@ impl Default for Blocks {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
     /// Blocks nothing is concurrent with: their events apply as recorded.
-    Linear(Range<BlockId>),
+    Linear(Range<BlockIndex>),
     /// Blocks with concurrency among them, which have to be merged.
-    Region(Range<BlockId>),
+    Region(Range<BlockIndex>),
 }
 
 impl Segment {
     /// Returns the blocks in the segment.
-    pub fn blocks(&self) -> &Range<BlockId> {
+    pub fn blocks(&self) -> &Range<BlockIndex> {
         match self {
             Segment::Linear(blocks) | Segment::Region(blocks) => blocks,
         }
@@ -254,8 +254,8 @@ impl Segment {
 
 impl Blocks {
     /// Returns the number of blocks.
-    pub fn len(&self) -> BlockId {
-        (self.parent_start.len() - 1) as BlockId
+    pub fn len(&self) -> BlockIndex {
+        (self.parent_start.len() - 1) as BlockIndex
     }
 
     /// Tells whether there are no blocks.
@@ -264,23 +264,23 @@ impl Blocks {
     }
 
     /// Returns a block's first event. One past the last block gives the number of events.
-    pub fn start(&self, block: BlockId) -> EventId {
+    pub fn start(&self, block: BlockIndex) -> EventIndex {
         self.start[block as usize]
     }
 
     /// Returns the events in a block.
-    pub fn events(&self, block: BlockId) -> Range<EventId> {
+    pub fn events(&self, block: BlockIndex) -> Range<EventIndex> {
         self.start(block)..self.start(block + 1)
     }
 
     /// Returns the blocks that a block's first event has as parents.
-    pub fn parents(&self, block: BlockId) -> &[BlockId] {
+    pub fn parents(&self, block: BlockIndex) -> &[BlockIndex] {
         let i = block as usize;
         &self.parents[self.parent_start[i] as usize..self.parent_start[i + 1] as usize]
     }
 
     /// Finds the block holding an event.
-    pub fn containing(&self, event: EventId) -> BlockId {
+    pub fn containing(&self, event: EventIndex) -> BlockIndex {
         // Parents are mostly recent events, so the search widens backwards from the last block.
         let (mut end, mut step) = (self.len() as usize, 1);
         while step < end && self.start[end - step] > event {
@@ -288,6 +288,6 @@ impl Blocks {
             step *= 2;
         }
         let from = end.saturating_sub(step);
-        (from + self.start[from..end].partition_point(|&start| start <= event) - 1) as BlockId
+        (from + self.start[from..end].partition_point(|&start| start <= event) - 1) as BlockIndex
     }
 }

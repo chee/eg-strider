@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
-use strider_graph::{BlockId, Graph, Move, Segment, Walker};
+use strider_graph::{BlockIndex, Graph, Move, Segment, Walker};
 
 /// What one of several replicas does next.
 #[derive(Clone, Debug)]
@@ -82,7 +82,7 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_q
         let mut visited = known;
         let base = blocks.start(region.start) as usize;
         let mut version = vec![false; graph.len() as usize];
-        version[..blocks.start(region.start + known as BlockId) as usize].fill(true);
+        version[..blocks.start(region.start + known as BlockIndex) as usize].fill(true);
         applied[region.start as usize..region.start as usize + known].fill(true);
 
         walker.walk(blocks, &region, known, first, |step| match step {
@@ -98,7 +98,7 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_q
             }
             Move::Apply(block) => {
                 assert!(!std::mem::replace(&mut applied[block as usize], true), "block applied twice");
-                assert!(visited >= first || block < region.start + first as BlockId, "block {block} applied before the first {first}");
+                assert!(visited >= first || block < region.start + first as BlockIndex, "block {block} applied before the first {first}");
                 visited += 1;
                 let first = blocks.events(block).start as usize;
                 assert_eq!(version[base..], histories[first][base..], "wrong version for block {block}");

@@ -2,7 +2,7 @@ use compare::replicas::TEXT;
 use compare::History;
 use diamond_types::list::operation::TextOperation;
 use diamond_types::list::{ListBranch, ListOpLog};
-use eg_strider::{EventId, OpLog};
+use eg_strider::{EventIndex, OpLog};
 use jumprope::JumpRope;
 use loro::{ExportMode, LoroDoc};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -408,7 +408,7 @@ fn main() {
                 let typist = log.get_or_create_agent("typist");
                 match back {
                     None => log.add_insert(typist, 0, "!"),
-                    Some(back) => log.add_insert_at(typist, &[(log.len() - 1 - back.min(log.len() - 1)) as EventId], 0, "!"),
+                    Some(back) => log.add_insert_at(typist, &[(log.len() - 1 - back.min(log.len() - 1)) as EventIndex], 0, "!"),
                 };
                 log.checkout();
                 log
@@ -509,16 +509,16 @@ fn main() {
         ));
     }
 
-    let heads = || columns(["eg-strider", "diamond-types", "yrs", "Loro", "Automerge"].map(|name| Some(name.to_string())));
+    let headings = || columns(["eg-strider", "diamond-types", "yrs", "Loro", "Automerge"].map(|name| Some(name.to_string())));
     println!(
         "\nmerging a history whose ops are in memory: the time, the most memory in use, how much of that the ops are, and what the document holds once done"
     );
-    println!("{:6} {}   {}   {}   {}", "trace", heads(), heads(), heads(), heads());
+    println!("{:6} {}   {}   {}   {}", "trace", headings(), headings(), headings(), headings());
     for line in merges {
         println!("{line}");
     }
     println!("\nreopening a saved document from its bytes: the time, what the document then holds, and the size of the file");
-    println!("{:6} {}   {}   {}", "trace", heads(), heads(), heads());
+    println!("{:6} {}   {}   {}", "trace", headings(), headings(), headings());
     for line in opens {
         println!("{line}");
     }

@@ -2,14 +2,14 @@ pub mod replicas;
 
 use diamond_types::list::operation::{ListOpKind, TextOperation};
 use diamond_types::list::ListOpLog;
-use eg_strider::{Edit, EventId, OpLog, SequenceNumber};
+use eg_strider::{Edit, EventIndex, OpLog, SequenceNumber};
 use std::ops::Range;
 
 /// A history with its ops in memory, as one peer would hand it to another, for testing
 /// eg-strider against diamond-types and measuring every library on the same histories. Each
 /// library gets the ops in the form its calls take: diamond-types its [`TextOperation`]s with
-/// `usize` parents, and eg-strider its [`Edit`]s beside their text, with [`EventId`] parents.
-pub struct History<Op = Edit, Parent = EventId> {
+/// `usize` parents, and eg-strider its [`Edit`]s beside their text, with [`EventIndex`] parents.
+pub struct History<Op = Edit, Parent = EventIndex> {
     pub agents: Vec<String>,
     pub chunks: Vec<Chunk>,
     parents: Vec<Parent>,
@@ -102,7 +102,7 @@ impl History<TextOperation, usize> {
                 Chunk { text: start..text.len() as u32, ..chunk.clone() }
             })
             .collect();
-        let parents = self.parents.iter().map(|&parent| parent as EventId).collect();
+        let parents = self.parents.iter().map(|&parent| parent as EventIndex).collect();
         History { agents: self.agents.clone(), chunks, parents, ops, text }
     }
 

@@ -1,4 +1,4 @@
-use eg_strider::{Edit, EventId, Malformed, OpLog};
+use eg_strider::{Edit, EventIndex, Malformed, OpLog};
 
 /// A history with branches that merge, a run of backspaces that a later event cuts in two,
 /// and text beyond ASCII.
@@ -24,7 +24,7 @@ fn carry_on(log: &mut OpLog) {
     let (b, c) = (log.get_or_create_agent("b"), log.get_or_create_agent("c"));
     let tip = log.frontier();
     let side = log.add_insert_at(c, &[3], 2, "mid").end - 1;
-    let both: Vec<EventId> = tip.iter().copied().chain([side]).collect();
+    let both: Vec<EventIndex> = tip.iter().copied().chain([side]).collect();
     log.add_insert_at(b, &both, 0, "#");
 }
 
@@ -73,7 +73,7 @@ fn a_loaded_log_carries_on_as_the_original_does() {
 /// last of them and no more.
 #[test]
 fn an_event_at_an_old_version_reads_only_the_history_since() {
-    const EVENTS: EventId = 100_000;
+    const EVENTS: EventIndex = 100_000;
     let mut log = OpLog::new();
     let a = log.get_or_create_agent("a");
     for at in (0..EVENTS as usize).step_by(4) {
@@ -89,7 +89,7 @@ fn an_event_at_an_old_version_reads_only_the_history_since() {
         }
         assert_eq!(loaded.checkout(), log.checkout());
         if parent > EVENTS / 2 {
-            assert!((EVENTS / 2..=parent).contains(&(loaded.unread() as EventId)), "read back to event {}", loaded.unread());
+            assert!((EVENTS / 2..=parent).contains(&(loaded.unread() as EventIndex)), "read back to event {}", loaded.unread());
             // What is left unread is saved as it was, and the rest again.
             let mut again = OpLog::load(loaded.save()).unwrap();
             assert_eq!(again.checkout(), log.checkout());
