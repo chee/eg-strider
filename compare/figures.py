@@ -116,13 +116,13 @@ def main(results_path, out_dir):
     scale = "Log scale. (Less is better)"
     runs = f"Median of {results[0]['reps']} runs. {scale}"
     sizes = [(2**20 * 10**k, text) for k, text in ((-2, "0.01 MiB"), (-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
-    trace = ("text", "Raw text")
+    text, packed = ("text", "Inserted text"), ("text_packed", "Inserted text, packed")
     charts = {
         "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES, share=["open_ms"]),
         "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES, share=["merge_ms"]),
-        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, trace, ["merge_kept"], ("merge_ops", "ops")),
-        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, trace, ["merge_peak"]),
-        "file-size": chart(results, "saved", memory, f"Size of a saved document. Raw text is the bytes of all the text its history inserts and deletes. {scale}", sizes, trace),
+        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, text, ["merge_kept"], ("merge_ops", "ops")),
+        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, text, ["merge_peak"]),
+        "file-size": chart(results, "saved", memory, f"Size of a saved document. Inserted text is all the text its history inserts, compressed with Zstandard. {scale}", sizes, packed),
     }
     for name, drawn in charts.items():
         open(f"{out_dir}/{name}.svg", "w").write(drawn)

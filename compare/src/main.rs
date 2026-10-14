@@ -503,12 +503,12 @@ fn main() {
         ));
         // The paper's own files for the trace, made by Yjs and Automerge themselves, to check the
         // replays against: the time to merge each, its size, and whether its text is the trace's.
+        // A check, so one run of each will do.
         let beside = |suffix: &str| std::fs::read(path.replace(".json", suffix)).ok();
-        let paper_yjs =
-            beside(".yjs").map(|update| measure(reps, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))));
+        let paper_yjs = beside(".yjs").map(|update| measure(1, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))));
         let paper_automerge = beside(".am").map(|saved| {
             let changes = automerge_changes(&saved);
-            measure(reps, &expected, || automerge_decode(&changes), automerge_apply, |document| document.save(), automerge_open)
+            measure(1, &expected, || automerge_decode(&changes), automerge_apply, |document| document.save(), automerge_open)
         });
         let ours = [yjs.as_ref().ok().map(|m| m.0), automerge.as_ref().ok().map(|m| m.0)];
         papers.push(format!(
@@ -538,8 +538,9 @@ fn main() {
             columns(all.map(|m| m.map(|m| mb(m.saved))))
         ));
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{events},\"reps\":{reps},\"trace_text\":{trace_text},\"text\":{},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_ops\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4},\"strider_then\":[{}]}}}}",
-            dt_history.text_bytes(),
+            "{{\"trace\":\"{name}\",\"events\":{events},\"reps\":{reps},\"trace_text\":{trace_text},\"text\":{},\"text_packed\":{},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_ops\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4},\"strider_then\":[{}]}}}}",
+            dt_history.text_bytes().0,
+            dt_history.text_bytes().1,
             object(all.map(|m| m.map(|m| m.same))),
             object(all.map(|m| m.map(|m| format!("{:.4}", m.merge_ms)))),
             object(all.map(|m| m.map(|m| format!("{:.4}", m.open_ms)))),
