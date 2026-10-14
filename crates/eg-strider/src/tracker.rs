@@ -8,19 +8,19 @@
 use crate::oplog::OpKind;
 use std::cmp::Ordering;
 use std::ops::Range;
-use strider_graph::Event;
+use strider_graph::EventId;
 use strider_tree::{Cursor, PrepareEffectTree, View, Widths};
 
 /// A character the tracker knows: the number within the region of the event that inserted
 /// it, or one of the document as it stood when the region began.
-pub(crate) type Item = u32;
+pub(crate) type ItemId = u32;
 
 /// No item: the start of the document as a left origin, the end as a right origin.
-pub(crate) const NONE: Item = u32::MAX;
+pub(crate) const NONE: ItemId = u32::MAX;
 
 /// Items with this bit set are characters of the document as it stood when the region began
 /// ("underwater"): `UNDERWATER | position`.
-const UNDERWATER: Item = 1 << 31;
+const UNDERWATER: ItemId = 1 << 31;
 /// The placeholder for the pre-region document. Its real length is not needed.
 const UNDERWATER_LEN: u32 = 0x7fff_0000;
 
@@ -38,13 +38,13 @@ const NODE: usize = if cfg!(debug_assertions) { 4 } else { 32 };
 #[derive(Clone, Copy)]
 struct Span {
     /// The first character; the rest follow consecutively.
-    item: Item,
+    item: ItemId,
     len: u32,
     /// The item to the left of the first character when it was inserted. Each later
     /// character's left origin is the character before it.
-    origin_left: Item,
+    origin_left: ItemId,
     /// The first item to the right that existed when these were inserted.
-    origin_right: Item,
+    origin_right: ItemId,
     state: u32,
     ever_deleted: bool,
 }
@@ -54,21 +54,21 @@ struct Span {
 #[derive(Clone, Copy)]
 pub(crate) struct Targets {
     /// The first of the events.
-    pub lv: Event,
+    pub lv: EventId,
     pub len: u32,
     /// The lowest item deleted.
-    pub item: Item,
+    pub item: ItemId,
     pub descending: bool,
 }
 
 impl Targets {
     /// Returns the item that the first event deletes.
-    pub fn first(&self) -> Item {
+    pub fn first(&self) -> ItemId {
         if self.descending { self.item + self.len - 1 } else { self.item }
     }
 
     /// Returns the part of the stretch from event `lv`, of at most `len` events.
-    fn from(&self, lv: Event, len: u32) -> Targets {
+    fn from(&self, lv: EventId, len: u32) -> Targets {
         let (skip, len) = (lv - self.lv, len.min(self.lv + self.len - lv));
         let item = if self.descending { self.item + self.len - skip - len } else { self.item + skip };
         Targets { lv, len, item, descending: self.descending }
@@ -157,14 +157,14 @@ impl Tracker {
     }
 
     /// Finds the span holding `item`, and how far into it.
-    fn locate(&self, item: Item) -> (u32, u32) {
+    fn locate(&self, item: ItemId) -> (u32, u32) {
         let span = if item & UNDERWATER != 0 { self.underwater(item) } else { self.by_event[item as usize] };
         (span, item - self.spans[span as usize].item)
     }
 
     /// Finds the span holding an underwater item: the one holding the first character of
     /// its page, or one further along the document.
-    fn underwater(&self, item: Item) -> u32 {
+    fn underwater(&self, item: ItemId) -> u32 {
         let holds = |id: u32| {
             let span = &self.spans[id as usize];
             span.item & UNDERWATER != 0 && item.wrapping_sub(span.item) < span.len
@@ -195,7 +195,7 @@ impl Tracker {
 
     /// Finds the entry holding `item` and the place just after it, or nothing and the start of
     /// the document for `NONE`.
-    fn after(&self, item: Item) -> (Option<Cursor>, Place) {
+    fn after(&self, item: ItemId) -> (Option<Cursor>, Place) {
         if item == NONE {
             return (None, Place::In(self.tree.first(), 0));
         }
@@ -205,7 +205,7 @@ impl Tracker {
     }
 
     /// Returns the place just before `item`, or the end of the document for `NONE`.
-    fn place_before(&self, item: Item) -> Place {
+    fn place_before(&self, item: ItemId) -> Place {
         if item == NONE {
             return Place::End;
         }
@@ -279,7 +279,7 @@ impl Tracker {
 
     /// Merges an insert of `len` characters at prepare-version index `pos`, made by region
     /// events `lv..lv + len`. Returns the index to insert at in the effect version.
-    pub fn insert(&mut self, lv: Event, len: u32, pos: u32, goes_before: impl Fn(Event, Event) -> bool) -> u32 {
+    pub fn insert(&mut self, lv: EventId, len: u32, pos: u32, goes_before: impl Fn(EventId, EventId) -> bool) -> u32 {
         // `index`: where the place just after the left origin is in the effect version, which
         // finding the origin gives. The origin's own character is there unless it was deleted.
         let (origin_left, left, after_left, index) = if pos == 0 {
@@ -317,7 +317,7 @@ impl Tracker {
     /// Merges an insert whose neighbours are already known, so that no prepare version is
     /// needed: the origins are those [`origins`](Self::origins) reported when the event was
     /// first merged.
-    pub fn insert_by_id(&mut self, lv: Event, len: u32, origin_left: Item, origin_right: Item, goes_before: impl Fn(Event, Event) -> bool) -> u32 {
+    pub fn insert_by_id(&mut self, lv: EventId, len: u32, origin_left: ItemId, origin_right: ItemId, goes_before: impl Fn(EventId, EventId) -> bool) -> u32 {
         let (left, after_left) = self.after(origin_left);
         let next = match after_left {
             Place::End => NONE,
@@ -330,7 +330,7 @@ impl Tracker {
 
     /// Finds where a new insert goes among the concurrent inserts that start at `start`,
     /// the place just after its left origin.
-    fn integrate(&mut self, start: Place, lv: Event, origin_left: Item, origin_right: Item, goes_before: &impl Fn(Event, Event) -> bool) -> Place {
+    fn integrate(&mut self, start: Place, lv: EventId, origin_left: ItemId, origin_right: ItemId, goes_before: &impl Fn(EventId, EventId) -> bool) -> Place {
         // Spans passed over are stamped, so that "is this item in the stretch already
         // scanned?" is one array read rather than a comparison of positions.
         self.scan_stamp += 1;
@@ -395,7 +395,7 @@ impl Tracker {
     /// `left` is the entry holding the left origin, given only when `place` is still the
     /// place just after that origin.
     #[allow(clippy::too_many_arguments)]
-    fn insert_span(&mut self, place: Place, left: Option<Cursor>, lv: Event, len: u32, origin_left: Item, origin_right: Item, index: Option<u32>) -> u32 {
+    fn insert_span(&mut self, place: Place, left: Option<Cursor>, lv: EventId, len: u32, origin_left: ItemId, origin_right: ItemId, index: Option<u32>) -> u32 {
         // Typing on from the character before: extend its span instead of adding one.
         if let Some(at) = left {
             let id = self.tree.id(at);
@@ -432,7 +432,7 @@ impl Tracker {
     }
 
     /// Returns the left and right origins of the character inserted by region event `lv`.
-    pub fn origins(&self, lv: Event) -> [Item; 2] {
+    pub fn origins(&self, lv: EventId) -> [ItemId; 2] {
         let span = &self.spans[self.by_event[lv as usize] as usize];
         [if lv == span.item { span.origin_left } else { lv - 1 }, span.origin_right]
     }
@@ -442,7 +442,7 @@ impl Tracker {
     /// Merges a delete made by region events `lv..lv + len`: of the prepare-version range
     /// `pos..pos + len`, removed first-to-last (`fwd`) or last-to-first. Calls `removed` with
     /// the effect-version index and length of each run of characters that was still there.
-    pub fn delete(&mut self, lv: Event, pos: u32, len: u32, fwd: bool, mut removed: impl FnMut(u32, u32)) {
+    pub fn delete(&mut self, lv: EventId, pos: u32, len: u32, fwd: bool, mut removed: impl FnMut(u32, u32)) {
         let (mut at, mut off, start) = self.tree.locate(View::Prepare, pos);
         // Where the characters to delete next are in the effect version, if they are still
         // there. Finding the first of them gave it; from there it only moves past what is in
@@ -525,24 +525,24 @@ impl Tracker {
 
     /// Returns what the delete events from `lv` deleted, up to event `end` or to where their
     /// targets stop being consecutive items.
-    pub fn targets(&self, lv: Event, end: Event) -> Targets {
+    pub fn targets(&self, lv: EventId, end: EventId) -> Targets {
         self.deleted[self.by_event[lv as usize] as usize].from(lv, end - lv)
     }
 
     // ---------------------------------------------------------------- moving the prepare version
 
     /// Takes region events, all inserts or all deletes, out of the prepare version.
-    pub fn retreat(&mut self, kind: OpKind, events: Range<Event>) {
+    pub fn retreat(&mut self, kind: OpKind, events: Range<EventId>) {
         self.shift(kind, events, 1u32.wrapping_neg());
     }
 
     /// Puts region events, all inserts or all deletes, back into the prepare version.
-    pub fn advance(&mut self, kind: OpKind, events: Range<Event>) {
+    pub fn advance(&mut self, kind: OpKind, events: Range<EventId>) {
         self.shift(kind, events, 1);
     }
 
     /// Moves region events into or out of the prepare version, span by span.
-    fn shift(&mut self, kind: OpKind, events: Range<Event>, delta: u32) {
+    fn shift(&mut self, kind: OpKind, events: Range<EventId>, delta: u32) {
         let mut lv = events.start;
         while lv < events.end {
             match kind {
