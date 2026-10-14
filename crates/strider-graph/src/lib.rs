@@ -20,8 +20,12 @@ pub type EventId = u32;
 /// A block's place in the graph's list of blocks, which is the order of their first events.
 pub type BlockId = usize;
 
-/// A [`BlockId`] kept in four bytes, for the lists that hold one for every block.
+/// A [`BlockId`] kept in four bytes, for the lists that hold one for every block. Converting
+/// either way loses nothing: every block holds at least one event, so there are never more
+/// blocks than events, and events are numbered in a `u32`.
 pub type CompactBlockId = u32;
+
+const _: () = assert!(usize::BITS >= CompactBlockId::BITS, "a CompactBlockId must fit in a BlockId");
 
 /// An append-only event graph, kept cut into blocks and with its critical versions known.
 #[derive(Default)]
@@ -106,6 +110,8 @@ impl Graph {
     /// Adds `len` events in a chain, the first with the given parents. Returns their
     /// numbers.
     pub fn push(&mut self, parents: &[EventId], len: u32) -> Range<EventId> {
+        // A block with no events would let there be more blocks than events.
+        assert!(len > 0, "a run of no events");
         let start = self.len();
         let end = start.checked_add(len).expect("too many events");
         if self.continues(parents) {
