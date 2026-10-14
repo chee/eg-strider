@@ -138,28 +138,28 @@
 <rect x="120" y="288" width="82.5" height="10" fill="#999999"/>
 <text x="207.5" y="296.5" font-size="9">637 KiB</text>
 <text x="114" y="308" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="300" width="202.1" height="10" fill="#d55e00"/>
-<text x="327.1" y="308.5" font-size="9">8.8 MiB</text>
+<rect x="120" y="300" width="201.6" height="10" fill="#d55e00"/>
+<text x="326.6" y="308.5" font-size="9">8.7 MiB</text>
 <text x="114" y="320" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
 <rect x="120" y="312" width="237.1" height="10" fill="#0072b2"/>
-<text x="362.1" y="320.5" font-size="9">19 MiB <tspan fill="#888">(2.17×)</tspan></text>
+<text x="362.1" y="320.5" font-size="9">19 MiB <tspan fill="#888">(2.19×)</tspan></text>
 <text x="114" y="332" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
 <rect x="120" y="324" width="207.9" height="10" fill="#e69f00"/>
-<text x="332.9" y="332.5" font-size="9">10.0 MiB <tspan fill="#888">(1.14×)</tspan></text>
+<text x="332.9" y="332.5" font-size="9">10.0 MiB <tspan fill="#888">(1.15×)</tspan></text>
 <text x="114" y="344" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
 <rect x="120" y="336" width="317.6" height="10" fill="#009e73"/>
-<text x="442.6" y="344.5" font-size="9">113 MiB <tspan fill="#888">(12.9×)</tspan></text>
+<text x="442.6" y="344.5" font-size="9">113 MiB <tspan fill="#888">(13.1×)</tspan></text>
 <text x="114" y="356" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
 <rect x="120" y="348" width="340.1" height="10" fill="#cc79a7"/>
-<text x="465.1" y="356.5" font-size="9">186 MiB <tspan fill="#888">(21.3×)</tspan></text>
+<text x="465.1" y="356.5" font-size="9">186 MiB <tspan fill="#888">(21.5×)</tspan></text>
 <text x="58" y="414.0" font-size="14" text-anchor="end">C2</text>
 <line x1="120" y1="372" x2="120" y2="446" stroke="black" stroke-width="1.5"/>
 <text x="114" y="382" font-size="7.5" fill="#888" text-anchor="end">Raw text</text>
 <rect x="120" y="374" width="79.4" height="10" fill="#999999"/>
 <text x="204.4" y="382.5" font-size="9">594 KiB</text>
 <text x="114" y="394" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="386" width="209.8" height="10" fill="#d55e00"/>
-<text x="334.8" y="394.5" font-size="9">10 MiB <tspan fill="#888">(1.51×)</tspan></text>
+<rect x="120" y="386" width="209.0" height="10" fill="#d55e00"/>
+<text x="334.0" y="394.5" font-size="9">10 MiB <tspan fill="#888">(1.49×)</tspan></text>
 <text x="114" y="406" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
 <rect x="120" y="398" width="245.3" height="10" fill="#0072b2"/>
 <text x="370.3" y="406.5" font-size="9">23 MiB <tspan fill="#888">(3.32×)</tspan></text>
