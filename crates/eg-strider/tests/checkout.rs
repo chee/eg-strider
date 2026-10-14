@@ -187,3 +187,32 @@ fn a_run_that_follows_earlier_typing_is_merged_with_it() {
     assert_eq!(together.checkout(), apart.checkout());
     assert_eq!(together.checkout(), "A\u{e9}xyz");
 }
+
+/// A run of typing, or of deleting, is one op. A merge halfway through it leaves a document
+/// that holds half of the op, and an event made before the run began is concurrent with
+/// both halves.
+#[test]
+fn an_event_from_before_the_last_merge_is_merged_into_it() {
+    for (deleting, expected) in [(false, "01x234é🙂é🙂y56789!"), (true, "01xy6789!")] {
+        let build = |merge_halfway: bool| {
+            let mut log = OpLog::new();
+            let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+            let start = log.add_insert(a, 0, "0123456789").end - 1;
+            let half = |log: &mut OpLog, at: usize| if deleting { log.add_delete(a, 2..4) } else { log.add_insert(a, at, "é🙂") };
+            half(&mut log, 5);
+            if merge_halfway {
+                log.checkout();
+            }
+            let tip = half(&mut log, 7).end - 1;
+            // One away from the run, and one at the very place it began.
+            let side = log.add_insert_at(b, &[start], 2, "x").end - 1;
+            let side = log.add_insert_at(b, &[side], 6, "y").end - 1;
+            let apart = log.checkout().to_string();
+            let end = log.checkout().chars().count();
+            log.add_insert_at(a, &[tip, side], end, "!");
+            (apart, log.checkout().to_string())
+        };
+        assert_eq!(build(true), build(false));
+        assert_eq!(build(true).1, expected);
+    }
+}

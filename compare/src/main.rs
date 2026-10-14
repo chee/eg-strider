@@ -326,7 +326,7 @@ fn main() {
     println!("merging a history whose ops are in memory: appending them, then merging; and then one more edit at the end, merged on top");
     println!("{:6} {:>8} {:>32} {:>42} {:>12}  result", "trace", "events", "diamond-types", "eg-strider", "one more");
     let mut all_match = true;
-    let (mut merges, mut opens, mut others, mut json) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut merges, mut opens, mut afterwards, mut others, mut json) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for path in paths {
         let name = path.rsplit('/').next().unwrap().trim_end_matches(".dt");
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -390,6 +390,31 @@ fn main() {
         let (dt_open_ms, dt_reopened) = median_of(reps, || (), |()| dt_open(&dt_saved));
         same &= reopened.checkout() == expected && dt_reopened.1.to_string() == expected;
         drop((reopened, dt_reopened));
+        // A reopened document has read none of its history, which an edit made at an older
+        // version then needs some of. One edit is added and merged: at the end, and at the
+        // version so many events back.
+        let then = [None, Some(100), Some(dt.len() / 2), Some(dt.len() - 1)].map(|back| {
+            let reopen = || {
+                let mut log = OpLog::load(saved.clone()).unwrap();
+                log.checkout();
+                log
+            };
+            let (ms, mut log) = median_of(reps, reopen, |mut log| {
+                let typist = log.get_or_create_agent("typist");
+                match back {
+                    None => log.add_insert(typist, 0, "!"),
+                    Some(back) => log.add_insert_at(typist, &[log.len() - 1 - back.min(log.len() - 1)], 0, "!"),
+                };
+                log.checkout();
+                log
+            });
+            // Merged from nothing, the history with that edit comes to the same text.
+            let merged = log.checkout().to_string();
+            log.forget();
+            same &= log.checkout() == merged;
+            (ms, log.unread())
+        });
+        afterwards.push(format!("{name:6} {}", then.map(|(ms, _)| format!("{ms:>16.2} ms")).join(" ")));
 
         // Memory after the times, so that measuring it cannot disturb them. The ops each is
         // handed stay in memory throughout, so the most in use while merging is on top of them.
@@ -462,7 +487,7 @@ fn main() {
             columns(all.map(|m| m.map(|m| mb(m.saved))))
         ));
         json.push(format!(
-            "{{\"trace\":\"{name}\",\"events\":{},\"reps\":{reps},\"text\":{},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_ops\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4}}}}}",
+            "{{\"trace\":\"{name}\",\"events\":{},\"reps\":{reps},\"text\":{},\"same\":{},\"merge_ms\":{},\"open_ms\":{},\"merge_ops\":{},\"merge_peak\":{},\"merge_kept\":{},\"open_peak\":{},\"open_kept\":{},\"saved\":{},\"parts_ms\":{{\"strider_append\":{append_ms:.4},\"strider_again\":{again_ms:.4},\"dt_append\":{dt_append_ms:.4},\"strider_then\":[{}]}}}}",
             dt.len(),
             dt_history.text_bytes(),
             object(all.map(|m| m.map(|m| m.same))),
@@ -474,6 +499,7 @@ fn main() {
             object(all.map(|m| m.map(|m| m.opening.peak))),
             object(all.map(|m| m.map(|m| m.opening.kept))),
             object(all.map(|m| m.map(|m| m.saved))),
+            then.map(|(ms, _)| format!("{ms:.4}")).join(","),
         ));
     }
 
@@ -486,6 +512,11 @@ fn main() {
     println!("\nreopening a saved document from its bytes: the time, what the document then holds, and the size of the file");
     println!("{:6} {}   {}   {}", "trace", heads(), heads(), heads());
     for line in opens {
+        println!("{line}");
+    }
+    println!("\neg-strider, reopened, adding one edit and merging it: an edit at the end, and one made at the version so far back");
+    println!("{:6} {:>19} {:>19} {:>19} {:>19}", "trace", "at the end", "100 events back", "halfway back", "at the start");
+    for line in afterwards {
         println!("{line}");
     }
     println!("\nthe other libraries' replays of each history: peers, edits that had to be moved, and whether the text came out the same");

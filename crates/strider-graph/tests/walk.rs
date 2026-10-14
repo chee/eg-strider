@@ -70,20 +70,23 @@ fn reduce(graph: &Graph, version: &[u32]) -> Vec<u32> {
 }
 
 /// Follows the moves of a walk on plain sets, checking that every block is applied exactly
-/// once and that the working version is then exactly the block's history.
-fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
+/// once, that the working version is then exactly the block's history, and that the blocks
+/// to visit first are.
+fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_quarters: usize) {
     let blocks = graph.blocks();
     let histories = histories(graph);
     let mut applied = vec![false; blocks.len()];
     for segment in graph.segments() {
         let Segment::Region(region) = segment else { continue };
         let known = region.len() * known_quarters / 4;
+        let first = region.len() * first_quarters / 4;
+        let mut visited = known;
         let base = blocks.start(region.start) as usize;
         let mut version = vec![false; graph.len() as usize];
         version[..blocks.start(region.start + known) as usize].fill(true);
         applied[region.start..region.start + known].fill(true);
 
-        walker.walk(blocks, &region, known, |step| match step {
+        walker.walk(blocks, &region, known, first, |step| match step {
             Move::Retreat(stretch) => {
                 for e in blocks.start(stretch.start)..blocks.start(stretch.end) {
                     assert!(std::mem::replace(&mut version[e as usize], false), "retreated an event that was not there");
@@ -96,6 +99,8 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
             }
             Move::Apply(block) => {
                 assert!(!std::mem::replace(&mut applied[block], true), "block applied twice");
+                assert!(visited >= first || block < region.start + first, "block {block} applied before the first {first}");
+                visited += 1;
                 let first = blocks.events(block).start as usize;
                 assert_eq!(version[base..], histories[first][base..], "wrong version for block {block}");
                 for e in blocks.events(block) {
@@ -109,8 +114,8 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize) {
 
 proptest! {
     #[test]
-    fn every_block_is_applied_at_its_parents_version(replicas in 2usize..6, steps in steps(), known_quarters in 0usize..4) {
+    fn every_block_is_applied_at_its_parents_version(replicas in 2usize..6, steps in steps(), known_quarters in 0usize..4, first_quarters in 0usize..5) {
         let graph = graph_of(replicas, &steps);
-        check_walk(&graph, &mut Walker::new(), known_quarters);
+        check_walk(&graph, &mut Walker::new(), known_quarters, first_quarters);
     }
 }

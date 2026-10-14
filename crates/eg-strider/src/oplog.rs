@@ -84,13 +84,14 @@ pub struct OpLog {
     next_seq: Vec<u32>,
     agent_runs: Vec<AgentRun>,
     memo: Memo,
-    /// The document at a critical version, which the next merge starts from.
+    /// The document as of some number of the first events, which the next merge starts from.
     base: Base,
-    /// The document with every event merged and how many events that is, when the log ends
-    /// with events that are concurrent with one another and so cannot be a base.
-    latest: Option<(u32, String)>,
+    /// The document with every event merged, when the log ends with events that are concurrent
+    /// with one another. The base is left where it is then: moving it into the middle of
+    /// events still being added to would have each merge cut them up further.
+    latest: Option<Base>,
     /// The history from before the first event held here, if the log was loaded and has not
-    /// had to read it.
+    /// had to read all of it.
     packed: Option<file::Packed>,
     /// Reused to hold the parents of the event being added.
     parents: Vec<u32>,
@@ -146,24 +147,34 @@ impl OpLog {
     /// last merge are gone through, where the history allows it.
     pub fn checkout(&mut self) -> &str {
         let len = self.graph.len();
-        if self.base.events != len && self.latest.as_ref().is_none_or(|latest| latest.0 != len) {
+        if self.base.events != len && self.latest.as_ref().is_none_or(|latest| latest.events != len) {
+            // An event made without all that the base holds is concurrent with some of it.
+            // The merge then has to tell what the base holds from the rest.
+            if self.graph.cut(self.base.events) {
+                self.split_op(self.base.events);
+                self.memo.outdate();
+            }
             let mut memo = std::mem::take(&mut self.memo);
             let (text, chars) = replay::checkout(self, &mut memo, &self.base);
             self.memo = memo;
-            // With one head, every event to come has all of these in its history unless it
-            // is made at an older version, which `link` looks out for.
+            let merged = Base { events: len, chars, text };
             if self.graph.frontier().len() == 1 {
-                (self.base, self.latest) = (Base { events: len, chars, text }, None);
+                (self.base, self.latest) = (merged, None);
             } else {
-                self.latest = Some((len, text));
+                self.latest = Some(merged);
             }
         }
-        self.document()
+        &self.merged().text
     }
 
     /// Returns the document as of the last merge.
-    pub(crate) fn document(&self) -> &str {
-        self.latest.as_ref().map_or(&self.base.text, |latest| &latest.1)
+    fn merged(&self) -> &Base {
+        self.latest.as_ref().unwrap_or(&self.base)
+    }
+
+    /// Returns how many events of a loaded log's history are still as they were saved, unread.
+    pub fn unread(&self) -> usize {
+        self.graph.floor() as usize
     }
 
     /// Returns how many regions the last checkout could not merge by shifting alone.
@@ -173,7 +184,7 @@ impl OpLog {
 
     /// Drops everything earlier checkouts worked out. The next one starts from scratch.
     pub fn forget(&mut self) {
-        self.unpack_all();
+        self.unpack_from(0);
         (self.memo, self.base, self.latest) = (Memo::default(), Base::default(), None);
     }
 
@@ -282,10 +293,13 @@ impl OpLog {
     fn link(&mut self, parents: Option<&[LV]>, len: u32) -> (bool, Range<u32>) {
         // History that is still as it was saved has to be read for an event that was made
         // without all of it: one with no parent held here, and not every old head for parents.
+        // A block of it starts at a critical version, so an event has all that comes before
+        // the block holding its latest parent.
         if let (Some(packed), Some(parents)) = (&self.packed, parents) {
             let floor = self.graph.floor() as LV;
             if !parents.iter().any(|&parent| parent >= floor) && !packed.heads.iter().all(|&head| parents.contains(&(head as LV))) {
-                self.unpack_all();
+                let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent as u32));
+                self.unpack_from(block);
             }
         }
         let lv = self.graph.len();
@@ -302,12 +316,6 @@ impl OpLog {
         }
         let events = self.graph.push(&at, len);
         self.parents = at;
-        if self.graph.last_seen() < self.base.events {
-            // Made at a version from before the base, which is then no base for a merge. The
-            // next one starts from nothing, and needs the whole history for that.
-            self.unpack_all();
-            (self.base, self.latest) = (Base::default(), None);
-        }
         (false, events)
     }
 
@@ -343,6 +351,23 @@ impl OpLog {
                 self.ops.push(op);
                 len
             }
+        }
+    }
+
+    /// Makes an op start at event `at`, if one runs across it.
+    fn split_op(&mut self, at: u32) {
+        let i = self.op_containing(at) as usize;
+        let Some(op) = self.ops.get(i).filter(|op| op.lv < at) else { return };
+        let end = op.lv + op.len;
+        let part = |events: Range<u32>| {
+            let part = self.slice(op, &events);
+            Op { lv: part.lv, len: part.len, kind: part.kind, fwd: part.fwd, trims: false, pos: part.pos, content: part.text }
+        };
+        let parts = [part(op.lv..at), part(at..end)];
+        self.ops.splice(i..=i, parts);
+        // A delete only trims straight after an insert or after another delete that does.
+        for after in self.ops[i + 2..].iter_mut().take_while(|after| after.trims) {
+            after.trims = false;
         }
     }
 

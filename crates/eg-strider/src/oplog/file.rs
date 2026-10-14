@@ -1,15 +1,15 @@
 //! A saved document, laid out so that opening it reads little more than its text:
 //!
-//! - a header: the agents and how far each has counted, how many events the history has, the
-//!   length of the text and the heads of the history it is the text of;
-//! - the text of the document at the last critical version that a merge has reached;
-//! - the history up to there in blocks of events, each ending at a critical version, so that
-//!   a block can be read without the ones after it;
-//! - a last block with whatever events come after that version.
+//! - a header: the agents and how far each has counted, how many events the history has, its
+//!   heads, the length of the text, and how many events and bytes each block of history has;
+//! - the text of the document with every event merged;
+//! - the history in blocks of events, each starting at a critical version, so that a block
+//!   and those after it can be read without the ones before.
 //!
-//! Loading reads the header, the text and the last block, and keeps the rest as it is until an
-//! event arrives that was made at an older version. A block holds its events in columns, one
-//! for each field, so that a field's values sit together and pack well:
+//! Loading reads the header and the text, and keeps the history as it is until an event
+//! arrives that was made at an older version. Then it reads the blocks from the one holding
+//! that version on. A block holds its events in columns, one for each field, so that a
+//! field's values sit together and pack well:
 //!
 //! - a number is a LEB128 varint, and a column is its length in bytes and then its values;
 //! - a column whose values mostly repeat is stored as runs: a value, then how many times;
@@ -24,7 +24,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 use strider_graph::{Graph, Segment};
 
-const MAGIC: &[u8] = b"eg-strider\x04";
+const MAGIC: &[u8] = b"eg-strider\x05";
 
 /// About how many events go in the last block of saved history. Each block before it is twice
 /// the size of the one after: recent history, which is what an event made at an older version
@@ -50,8 +50,17 @@ pub(crate) struct Packed {
     bytes: Vec<u8>,
     /// Where each block of that history is in `bytes`.
     blocks: Vec<Range<usize>>,
+    /// The first event of each block, then the number of events in them all.
+    starts: Vec<u32>,
     /// The events of that history that none of its others descends from.
     pub heads: Vec<u32>,
+}
+
+impl Packed {
+    /// Finds the block holding an event.
+    pub fn block_holding(&self, event: u32) -> usize {
+        self.starts.partition_point(|&start| start <= event) - 1
+    }
 }
 
 impl OpLog {
@@ -59,13 +68,16 @@ impl OpLog {
     /// opens without merging anything.
     pub fn save(&mut self) -> Vec<u8> {
         self.checkout();
-        let (floor, cut, len) = (self.graph.floor(), self.base.events, self.graph.len());
+        let (floor, len) = (self.graph.floor(), self.graph.len());
         // History that was never read is written as it is; the rest is cut into blocks.
-        let kept = self.packed.iter().flat_map(|packed| packed.blocks.iter().map(|block| Cow::from(&packed.bytes[block.clone()])));
-        let cuts = self.cuts(floor, cut);
-        let blocks: Vec<Cow<[u8]>> = kept.chain(cuts.windows(2).map(|ends| Cow::from(self.pack(ends[0]..ends[1])))).collect();
-        let tail = if cut < len { self.pack(cut..len) } else { Vec::new() };
-        let text = squeezed(self.base.text.as_bytes());
+        let kept = self.packed.iter().flat_map(|packed| {
+            packed.blocks.iter().zip(packed.starts.windows(2)).map(|(block, ends)| (Cow::from(&packed.bytes[block.clone()]), ends[1] - ends[0]))
+        });
+        let cuts = self.cuts(floor, len);
+        let new = cuts.windows(2).map(|ends| (Cow::from(self.pack(ends[0]..ends[1])), ends[1] - ends[0]));
+        let blocks: Vec<(Cow<[u8]>, u32)> = kept.chain(new).collect();
+        let document = self.merged();
+        let text = squeezed(document.text.as_bytes());
 
         let mut out = MAGIC.to_vec();
         number(&mut out, self.agent_names.len());
@@ -74,27 +86,28 @@ impl OpLog {
             out.extend_from_slice(name.as_bytes());
             number(&mut out, next as usize);
         }
-        for part in [cut, self.base.chars] {
+        for part in [len, document.chars] {
             number(&mut out, part as usize);
         }
-        let heads = self.heads_at(cut);
+        let heads = self.graph.frontier();
         number(&mut out, heads.len());
-        heads.iter().for_each(|&head| number(&mut out, (cut - head) as usize));
-        number(&mut out, self.base.text.len());
+        heads.iter().for_each(|&head| number(&mut out, (len - head) as usize));
+        number(&mut out, document.text.len());
         number(&mut out, text.len());
         number(&mut out, blocks.len());
-        blocks.iter().for_each(|block| number(&mut out, block.len()));
-        number(&mut out, tail.len());
+        for (block, events) in &blocks {
+            number(&mut out, block.len());
+            number(&mut out, *events as usize);
+        }
         out.extend_from_slice(&text);
-        blocks.iter().for_each(|block| out.extend_from_slice(block));
-        out.extend_from_slice(&tail);
+        blocks.iter().for_each(|(block, _)| out.extend_from_slice(block));
         out
     }
 
     /// Opens a file that [`save`](Self::save) wrote: the log, ready for more events, with its
-    /// document. History from before the saved document is checked only when it is read, which
-    /// is when an event arrives that was made at an older version; if that part of the file is
-    /// damaged, reading it panics.
+    /// document. The history is checked only when it is read, which is when an event arrives
+    /// that was made at an older version; if that part of the file is damaged, reading it
+    /// panics.
     pub fn load(bytes: Vec<u8>) -> Result<OpLog, Malformed> {
         let mut file = Reader(bytes.strip_prefix(MAGIC).ok_or(Malformed)?);
         let mut log = OpLog::new();
@@ -103,12 +116,16 @@ impl OpLog {
             log.agent_names.push(std::str::from_utf8(file.take(len)).map_err(|_| Malformed)?.to_string());
             log.next_seq.push(file.number()?);
         }
-        let (cut, chars) = (file.number()?, file.number()?);
-        let heads = (0..file.count()?).map(|_| cut.checked_sub(file.number()?).ok_or(Malformed)).collect::<Result<Vec<_>, _>>()?;
-        let in_order = heads.windows(2).all(|pair| pair[0] < pair[1]) && heads.last().map_or(cut == 0, |&head| head + 1 == cut);
+        let (events, chars) = (file.number()?, file.number()?);
+        let heads = (0..file.count()?).map(|_| events.checked_sub(file.number()?).ok_or(Malformed)).collect::<Result<Vec<_>, _>>()?;
+        let in_order = heads.windows(2).all(|pair| pair[0] < pair[1]) && heads.last().map_or(events == 0, |&head| head + 1 == events);
         let (text_len, text_packed) = (file.number()? as usize, file.number()? as usize);
-        let lens = (0..file.count()?).map(|_| file.number().map(|len| len as usize)).collect::<Result<Vec<_>, _>>()?;
-        let tail_len = file.number()? as usize;
+        let (mut starts, mut lens, mut end) = (vec![0u32], Vec::new(), 0u32);
+        for _ in 0..file.count()? {
+            lens.push(file.number()? as usize);
+            end = end.checked_add(file.number()?).filter(|&next| next > end).ok_or(Malformed)?;
+            starts.push(end);
+        }
 
         // The parts follow the header, and together are the rest of the file.
         let mut at = bytes.len() - file.0.len();
@@ -118,8 +135,7 @@ impl OpLog {
         };
         let text = part(text_packed)?;
         let blocks = lens.into_iter().map(&mut part).collect::<Result<Vec<_>, Malformed>>()?;
-        let tail = part(tail_len)?;
-        if at != bytes.len() || !in_order {
+        if at != bytes.len() || !in_order || end != events {
             return Err(Malformed);
         }
         let text = String::from_utf8(unpacked(&bytes[text], text_len)?).map_err(|_| Malformed)?;
@@ -127,37 +143,47 @@ impl OpLog {
             return Err(Malformed);
         }
 
-        log.graph = Graph::after(cut, &heads);
-        log.base = Base { events: cut, chars, text };
-        if !tail.is_empty() {
-            log.unpack(&bytes[tail])?;
-        }
-        log.packed = Some(Packed { bytes, blocks, heads }).filter(|_| cut > 0);
+        log.graph = Graph::after(events, &heads);
+        log.base = Base { events, chars, text };
+        log.packed = (events > 0).then_some(Packed { bytes, blocks, starts, heads });
         Ok(log)
     }
 
-    /// Reads all the history that is still as it was saved, so that the log holds every event.
-    /// The next merge starts from nothing.
-    pub(crate) fn unpack_all(&mut self) {
-        let Some(packed) = self.packed.take() else { return };
-        let tail = std::mem::take(self);
-        (self.agent_names, self.next_seq) = (tail.agent_names, tail.next_seq);
-        for block in &packed.blocks {
-            self.unpack(&packed.bytes[block.clone()]).expect("the saved history is damaged");
+    /// Reads the history that is still as it was saved from block `from` on, so that the log
+    /// holds every event since that block's first.
+    pub(crate) fn unpack_from(&mut self, from: usize) {
+        let Some(mut packed) = self.packed.take() else { return };
+        let later = std::mem::take(self);
+        (self.agent_names, self.next_seq, self.memo) = (later.agent_names, later.next_seq, later.memo);
+        (self.base, self.latest) = (later.base, later.latest);
+        self.memo.outdate();
+        self.graph = Graph::after(packed.starts[from], &[]);
+        // The first event of a block has every head of the history before it for parents.
+        let mut heads = Vec::new();
+        for (i, block) in packed.blocks[from..].iter().enumerate() {
+            let first = self.unpack(&packed.bytes[block.clone()]).expect("the saved history is damaged");
+            if i == 0 {
+                heads = first;
+            }
         }
 
         let shift = self.content.len() as u32;
-        self.content.push_str(&tail.content);
-        self.ops.extend(tail.ops.into_iter().map(|op| Op { content: (op.content.0 + shift, op.content.1 + shift), ..op }));
-        self.agent_runs.extend(tail.agent_runs);
-        self.totals = (self.totals.0 + tail.totals.0, self.totals.1 + tail.totals.1);
-        let blocks = tail.graph.blocks();
+        self.content.push_str(&later.content);
+        self.ops.extend(later.ops.into_iter().map(|op| Op { content: (op.content.0 + shift, op.content.1 + shift), ..op }));
+        self.agent_runs.extend(later.agent_runs);
+        self.totals = (self.totals.0 + later.totals.0, self.totals.1 + later.totals.1);
+        let blocks = later.graph.blocks();
         for block in 0..blocks.len() {
             let parents: Vec<u32> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
             // A block of the later events with no block for a parent followed the old heads.
             let parents = if parents.is_empty() { &packed.heads } else { &parents };
             self.graph.push(parents, blocks.events(block).len() as u32);
         }
+
+        packed.blocks.truncate(from);
+        packed.starts.truncate(from + 1);
+        packed.heads = heads;
+        self.packed = (from > 0).then_some(packed);
     }
 
     /// Returns the events that the chain of block `block` starts from: its parents, which for
@@ -169,17 +195,6 @@ impl OpLog {
             Some(packed) if parents.is_empty() => packed.heads.clone(),
             _ => parents,
         }
-    }
-
-    /// Returns the heads of the first `cut` events, which end at a critical version.
-    fn heads_at(&self, cut: u32) -> Vec<u32> {
-        let blocks = self.graph.blocks();
-        if cut == self.graph.len() {
-            return self.graph.frontier().to_vec();
-        }
-        // The event after a critical version has every head before it as a parent.
-        let block = blocks.containing(cut);
-        if blocks.start(block) < cut { vec![cut - 1] } else { self.parents_of(block) }
     }
 
     /// Chooses where to cut the events `from..to`, which the log holds, into blocks: at
@@ -245,8 +260,12 @@ impl OpLog {
         let wide = |op: &OpSlice| op.kind == OpKind::Ins && bytes(op) != op.len as usize;
         column(&mut columns, |out| {
             number(out, ops().count());
+            // A delete only trims an insert that is in the block with it.
+            let mut open = false;
             for op in ops() {
-                let flags = usize::from(op.trims) << 3 | usize::from(wide(&op)) << 2 | usize::from(!op.fwd) << 1 | usize::from(op.kind == OpKind::Del);
+                let trims = op.trims && open;
+                open = op.kind == OpKind::Ins || trims;
+                let flags = usize::from(trims) << 3 | usize::from(wide(&op)) << 2 | usize::from(!op.fwd) << 1 | usize::from(op.kind == OpKind::Del);
                 number(out, (op.len as usize) << 4 | flags);
             }
         });
@@ -289,8 +308,8 @@ impl OpLog {
     }
 
     /// Reads a block that [`pack`](Self::pack) wrote, whose events come straight after those
-    /// the log holds, and adds them.
-    fn unpack(&mut self, block: &[u8]) -> Result<(), Malformed> {
+    /// the log holds, and adds them. Returns the parents of the first.
+    fn unpack(&mut self, block: &[u8]) -> Result<Vec<u32>, Malformed> {
         let mut file = Reader(block);
         let columns = file.packed()?;
         let text = String::from_utf8(file.packed()?).map_err(|_| Malformed)?;
@@ -348,7 +367,7 @@ impl OpLog {
         }
 
         let (mut chains, mut counts, mut backs) = (columns.column()?, Runs::of(columns.column()?), columns.column()?);
-        let mut parents = Vec::new();
+        let (mut parents, mut heads) = (Vec::new(), None);
         let mut first = start;
         for _ in 0..chains.count()? {
             let len = chains.number()?;
@@ -363,11 +382,12 @@ impl OpLog {
             }
             first.checked_add(len).filter(|&end| len > 0 && end <= events).ok_or(Malformed)?;
             self.graph.push(&parents, len);
+            heads.get_or_insert_with(|| parents.clone());
             first += len;
         }
 
         let whole = file.0.is_empty() && columns.0.is_empty() && lv == events && first == events && at == text.len();
-        whole.then_some(()).ok_or(Malformed)
+        heads.filter(|_| whole).ok_or(Malformed)
     }
 }
 

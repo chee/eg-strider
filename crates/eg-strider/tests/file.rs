@@ -69,6 +69,39 @@ fn a_loaded_log_carries_on_as_the_original_does() {
     }
 }
 
+/// A long history is saved in several blocks. An event made a little way back needs the
+/// last of them and no more.
+#[test]
+fn an_event_at_an_old_version_reads_only_the_history_since() {
+    const EVENTS: usize = 100_000;
+    let mut log = OpLog::new();
+    let a = log.get_or_create_agent("a");
+    for at in (0..EVENTS).step_by(4) {
+        log.add_insert(a, at, "abcd");
+    }
+    let mut loaded = OpLog::load(log.save()).unwrap();
+    assert_eq!(loaded.unread(), EVENTS);
+
+    for (parent, text) in [(EVENTS - 10, "recent"), (EVENTS - 3, "more recent"), (10, "old")] {
+        for log in [&mut log, &mut loaded] {
+            let b = log.get_or_create_agent("b");
+            log.add_insert_at(b, &[parent], 5, text);
+        }
+        assert_eq!(loaded.checkout(), log.checkout());
+        if parent > EVENTS / 2 {
+            assert!((EVENTS / 2..=parent).contains(&loaded.unread()), "read back to event {}", loaded.unread());
+            // What is left unread is saved as it was, and the rest again.
+            let mut again = OpLog::load(loaded.save()).unwrap();
+            assert_eq!(again.checkout(), log.checkout());
+            again.forget();
+            assert_eq!(again.checkout(), log.checkout());
+        } else {
+            assert_eq!(loaded.unread(), 0);
+        }
+    }
+    assert_eq!(OpLog::load(loaded.save()).unwrap().checkout(), log.checkout());
+}
+
 #[test]
 fn an_empty_log_is_saved_and_loaded() {
     let mut loaded = OpLog::load(OpLog::new().save()).unwrap();

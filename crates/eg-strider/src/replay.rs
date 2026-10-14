@@ -4,6 +4,11 @@
 //! the tracker resolves is memoised at the region's critical version, since it never changes,
 //! so later replays place those events directly. Merging only works out where each op of a
 //! region goes; the edits are then taken back from last to first to assemble the text.
+//!
+//! A replay starts from a document that already holds the first so many events. Those may
+//! end inside a region, when a later event was made without some of them. The region is then
+//! merged from its start, with the events the document holds gone through first and only
+//! for what they mean to the others.
 
 use crate::oplog::{OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
@@ -26,30 +31,45 @@ pub(crate) struct Placed {
     runs: u32,
     /// Length of the document so far.
     len: u32,
+    /// The first block with events that the document does not hold yet. Where the ops of
+    /// earlier blocks go is not recorded.
+    new: u32,
+    /// Whether the stretch being merged is of those earlier blocks.
+    held: bool,
 }
 
 impl Placed {
-    /// Starts on the ops of a stretch of blocks.
+    /// Starts on the ops of a stretch of blocks, all of which the document holds or none.
     pub(crate) fn begin(&mut self, stretch: Range<usize>) {
-        self.order.push(stretch.start as u32..stretch.end as u32);
+        self.held = stretch.end as u32 <= self.new;
+        debug_assert!(self.held || stretch.start as u32 >= self.new, "a stretch with events on both sides of the base");
+        if !self.held {
+            self.order.push(stretch.start as u32..stretch.end as u32);
+        }
     }
 
     /// Records that an insert of `len` characters went in at `pos`.
     pub(crate) fn insert(&mut self, pos: u32, len: u32) {
-        self.len += len;
-        self.at.push(pos);
+        if !self.held {
+            self.len += len;
+            self.at.push(pos);
+        }
     }
 
     /// Records that the delete being merged removed the `len` characters at `pos`.
     pub(crate) fn remove(&mut self, pos: u32, len: u32) {
-        self.len -= len;
-        self.at.extend([pos, len]);
-        self.runs += 1;
+        if !self.held {
+            self.len -= len;
+            self.at.extend([pos, len]);
+            self.runs += 1;
+        }
     }
 
     /// Ends a delete, once everything it removed is recorded.
     pub(crate) fn end_delete(&mut self) {
-        self.at.push(std::mem::take(&mut self.runs));
+        if !self.held {
+            self.at.push(std::mem::take(&mut self.runs));
+        }
     }
 
     /// Notes where things stand, to come back to with [`undo_to`](Self::undo_to).
@@ -79,8 +99,7 @@ struct Kept {
 
 const DESCENDING: u32 = 1 << 31;
 
-/// The document at a critical version: every event after its first `events` has all of
-/// those in its history, so a merge can start from here.
+/// The document with the first `events` events merged, which a merge of the rest starts from.
 #[derive(Default)]
 pub(crate) struct Base {
     pub events: u32,
@@ -178,10 +197,19 @@ impl Memo {
     pub(crate) fn tracked_regions(&self) -> usize {
         self.plan.as_ref().map_or(0, Plan::tracked_regions)
     }
+
+    /// Notes that the log's blocks are no longer those the last checkout saw, though its
+    /// events are.
+    pub(crate) fn outdate(&mut self) {
+        if let Some(plan) = &mut self.plan {
+            plan.events = usize::MAX;
+        }
+    }
 }
 
 /// Merges the log's events after `base` into the document that `base` holds, reusing and
-/// updating `memo`. Returns the text and its length in characters.
+/// updating `memo`. Returns the text and its length in characters. Where `base` ends inside
+/// a region, a block and an op must start there.
 pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u32) {
     // The log only ever grows, so the same length means the same events.
     if memo.plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
@@ -194,10 +222,11 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
     // that is needed of them for now is what they do to the document's length.
     let blocks = log.graph.blocks();
     let events = |stretch: &Range<usize>| blocks.start(stretch.start)..blocks.start(stretch.end);
-    let mut doc = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: base.chars };
+    debug_assert!((log.graph.floor()..log.graph.len()).contains(&base.events), "a base the log does not reach back to");
+    let new = blocks.containing(base.events) as u32;
+    let mut doc = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: base.chars, new, held: false };
     let mut workspace = Workspace::default();
-    // The segments that have events after the base, and for each the first of those: the
-    // base may fall partway through a linear one, but never inside a region.
+    // The segments that have events after the base, and for each the first of those.
     let after = |segment: &Segment| Some(events(segment.blocks())).filter(|events| events.end > base.events).map(|events| events.start.max(base.events));
     for (segment, kept) in plan.segments.iter().zip(&mut kept) {
         let Some(from) = after(segment) else { continue };
@@ -209,7 +238,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
                 doc.len = doc.len + inserted - removed;
             }
             Segment::Region(region) => {
-                debug_assert_eq!(from, blocks.start(region.start), "a base inside a region");
+                debug_assert_eq!(from, blocks.start((new as usize).max(region.start)), "a base partway through a block of a region");
                 merge_region(log, plan, region, kept, &mut workspace, &mut doc)
             }
         }
@@ -287,34 +316,42 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
     let blocks = log.graph.blocks();
     let (start, end) = (blocks.start(region.start), blocks.start(region.end));
     let goes_before = |a: u32, b: u32| log.inserts_before(start + a, start + b);
-    tracker.begin_region((end - start) as usize, doc.len);
+    // The region's blocks that the document already holds, which are its first. The document
+    // was no longer when the region began than it is now plus what those events removed.
+    let held = (doc.new as usize).clamp(region.start, region.end);
+    tracker.begin_region((end - start) as usize, doc.len + (blocks.start(held) - start));
 
     // Blocks resolved in full by earlier replays are placed by id. Their events stay in the
     // tracker's prepare version, which is where the walk of the rest begins.
     let known_blocks = (region.start..region.end).take_while(|&block| blocks.start(block + 1) - start <= kept.events).count();
+    let known = region.start..region.start + known_blocks;
     let mut resolved = kept.resolved.iter().copied();
     let mut next = || resolved.next().expect("something kept for every resolved event");
-    if known_blocks > 0 {
-        doc.begin(region.start..region.start + known_blocks);
-    }
-    for op in plan.ops(log, &(region.start..region.start + known_blocks)) {
-        let lv = op.lv - start;
-        match op.kind {
-            OpKind::Ins => {
-                let (left, right) = (next(), next());
-                let pos = tracker.insert_by_id(lv, op.len, left, right, goes_before);
-                doc.insert(pos, op.len);
-            }
-            OpKind::Del => {
-                let mut done = 0;
-                while done < op.len {
-                    let (first, stretch) = (next(), next());
-                    let (n, descending) = ((stretch & !DESCENDING).min(op.len - done), stretch & DESCENDING != 0);
-                    let item = if descending { first + 1 - n } else { first };
-                    tracker.delete_by_id(Targets { lv: lv + done, len: n, item, descending }, |pos, len| doc.remove(pos, len));
-                    done += n;
+    let parted = held.min(known.end);
+    for stretch in [known.start..parted, parted..known.end] {
+        if stretch.is_empty() {
+            continue;
+        }
+        doc.begin(stretch.clone());
+        for op in plan.ops(log, &stretch) {
+            let lv = op.lv - start;
+            match op.kind {
+                OpKind::Ins => {
+                    let (left, right) = (next(), next());
+                    let pos = tracker.insert_by_id(lv, op.len, left, right, goes_before);
+                    doc.insert(pos, op.len);
                 }
-                doc.end_delete();
+                OpKind::Del => {
+                    let mut done = 0;
+                    while done < op.len {
+                        let (first, stretch) = (next(), next());
+                        let (n, descending) = ((stretch & !DESCENDING).min(op.len - done), stretch & DESCENDING != 0);
+                        let item = if descending { first + 1 - n } else { first };
+                        tracker.delete_by_id(Targets { lv: lv + done, len: n, item, descending }, |pos, len| doc.remove(pos, len));
+                        done += n;
+                    }
+                    doc.end_delete();
+                }
             }
         }
     }
@@ -322,7 +359,9 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
         return;
     }
 
-    walker.walk(blocks, region, known_blocks, |step| match step {
+    // What the document holds is gone through before anything else, so that where the rest
+    // goes is a place in that document.
+    walker.walk(blocks, region, known_blocks, held - region.start, |step| match step {
         Move::Retreat(stretch) => {
             for op in plan.ops(log, &stretch) {
                 tracker.retreat(op.kind, op.lv - start..op.lv - start + op.len);

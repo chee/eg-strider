@@ -207,15 +207,20 @@ struct Schedule {
     /// Which 127ths of the region's events lie at or after each block: a cheap stand-in for
     /// the size of its set of descendants that does not count shared descendants twice.
     cover: Vec<u128>,
-    /// How many of each block's parents have not been visited yet.
+    /// How many of each block's parents have not been visited yet. A block that is not among
+    /// those to visit first waits on them all as if on one more parent.
     waiting: Vec<u32>,
     /// The blocks waiting on nothing, in the order they became so.
     ready: Vec<u32>,
+    /// The blocks to visit before any other, and how many of them are still to visit.
+    first: Range<usize>,
+    held: usize,
 }
 
 impl Schedule {
-    /// Starts with the first `known` blocks counted as visited.
-    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<usize>, known: usize) {
+    /// Starts with the first `known` blocks counted as visited, and the rest of the first
+    /// `first` to visit before any other.
+    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<usize>, known: usize, first: usize) {
         let count = region.len();
         let (from, to) = (blocks.start(region.start), blocks.start(region.end));
         let per_bit = (to - from).div_ceil(127).max(1);
@@ -234,8 +239,11 @@ impl Schedule {
 
         self.waiting.clear();
         self.ready.clear();
+        self.first = known..first.max(known);
+        self.held = self.first.len();
         for block in 0..count {
-            let waiting = graph.parents.row(block).iter().filter(|&&p| p as usize >= known).count() as u32;
+            let parents = graph.parents.row(block).iter().filter(|&&p| p as usize >= known).count() as u32;
+            let waiting = parents + u32::from(self.held > 0 && block >= self.first.end);
             self.waiting.push(waiting);
             if waiting == 0 && block >= known {
                 self.ready.push(block as u32);
@@ -267,9 +275,14 @@ impl Schedule {
         Some(self.ready.remove(best.2?) as usize)
     }
 
-    /// Marks a block visited, readying any children that were only waiting on it.
+    /// Marks a block visited, readying any blocks that were only waiting on it.
     fn visited(&mut self, graph: &RegionGraph, block: usize) {
-        for &child in graph.children.row(block) {
+        let last_held = self.first.contains(&block) && {
+            self.held -= 1;
+            self.held == 0
+        };
+        let rest = if last_held { self.first.end as u32..self.waiting.len() as u32 } else { 0..0 };
+        for child in graph.children.row(block).iter().copied().chain(rest) {
             self.waiting[child as usize] -= 1;
             if self.waiting[child as usize] == 0 {
                 self.ready.push(child);
@@ -295,12 +308,13 @@ impl Walker {
     }
 
     /// Walks the blocks in `region`, which must lie between two critical versions, calling
-    /// `visit` with each step. The first `known` blocks are already in the working version.
-    pub fn walk(&mut self, blocks: &Blocks, region: &Range<usize>, known: usize, mut visit: impl FnMut(Move)) {
+    /// `visit` with each step. The first `known` blocks are already in the working version,
+    /// and the rest of the first `first` are visited before any other.
+    pub fn walk(&mut self, blocks: &Blocks, region: &Range<usize>, known: usize, first: usize, mut visit: impl FnMut(Move)) {
         let Walker { graph, chains, schedule, current } = self;
         graph.build(blocks, region);
         chains.build(graph, blocks, region);
-        schedule.build(graph, blocks, region, known);
+        schedule.build(graph, blocks, region, known, first);
         chains.start(known, current);
 
         let stretch = |first: u32, last: u32| region.start + first as usize..region.start + last as usize + 1;

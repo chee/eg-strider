@@ -67,10 +67,25 @@ impl Graph {
         !self.is_empty() && parents == [self.len() - 1]
     }
 
-    /// Returns how many events from the start of history are known to be in the history of
-    /// the last block's first event: all of them, if it starts at a critical version.
-    pub fn last_seen(&self) -> u32 {
-        self.seen.last().copied().unwrap_or(0)
+    /// Tells whether some later event lacks one of the first `at` events in its history, and
+    /// if so makes a block start at event `at`: a merge that begins there has to tell the
+    /// events before it from those after.
+    pub fn cut(&mut self, at: u32) -> bool {
+        if at <= self.floor() || at >= self.len() {
+            return false;
+        }
+        let block = self.blocks.containing(at);
+        let critical = |block: usize| self.critical.binary_search(&(block as u32)).is_ok();
+        if self.blocks.start[block] == at {
+            return !critical(block);
+        }
+        // Partway along a block, every later event has what comes before unless something is
+        // concurrent with the block.
+        if critical(block) && (block + 1 == self.blocks.len() || critical(block + 1)) {
+            return false;
+        }
+        self.split(block, at);
+        true
     }
 
     /// Returns the graph's blocks.
