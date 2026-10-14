@@ -120,8 +120,8 @@ def main(results_path, out_dir):
     charts = {
         "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to merge a history whose ops are already in memory. {runs}", TIMES, share=["open_ms"]),
         "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES, share=["merge_ms"]),
-        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, trace, ["open_kept"], ("merge_ops", "ops")),
-        "memory-retained": chart(results, "open_kept", memory, f"Memory a reopened document holds, ready for more edits. {scale}", sizes, trace, ["merge_peak"]),
+        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, trace, ["merge_kept"], ("merge_ops", "ops")),
+        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, trace, ["merge_peak"]),
         "file-size": chart(results, "saved", memory, f"Size of a saved document. Raw text is the bytes of all the text its history inserts and deletes. {scale}", sizes, trace),
     }
     for name, drawn in charts.items():

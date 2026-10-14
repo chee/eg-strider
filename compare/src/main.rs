@@ -475,10 +475,11 @@ fn main() {
 
         let all = [Some(strider), Some(diamond), yjs.ok().map(|m| m.0), loro.ok().map(|m| m.0), automerge.ok().map(|m| m.0)];
         merges.push(format!(
-            "{name:6} {}   {}   {}",
+            "{name:6} {}   {}   {}   {}",
             columns(all.map(|m| m.map(|m| format!("{:.2} ms", m.merge_ms)))),
             columns(all.map(|m| m.map(|m| mb(m.merging.peak)))),
-            columns(all.map(|m| m.map(|m| mb(m.ops))))
+            columns(all.map(|m| m.map(|m| mb(m.ops)))),
+            columns(all.map(|m| m.map(|m| mb(m.merging.kept))))
         ));
         opens.push(format!(
             "{name:6} {}   {}   {}",
@@ -504,8 +505,8 @@ fn main() {
     }
 
     let heads = || columns(["eg-strider", "diamond-types", "yrs", "Loro", "Automerge"].map(|name| Some(name.to_string())));
-    println!("\nmerging a history whose ops are in memory: the time, the most memory in use, and how much of that the ops are");
-    println!("{:6} {}   {}   {}", "trace", heads(), heads(), heads());
+    println!("\nmerging a history whose ops are in memory: the time, the most memory in use, how much of that the ops are, and what the document holds once done");
+    println!("{:6} {}   {}   {}   {}", "trace", heads(), heads(), heads(), heads());
     for line in merges {
         println!("{line}");
     }
