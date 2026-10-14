@@ -212,10 +212,17 @@ fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
     (document, string)
 }
 
-/// Combines updates with yrs's own call for that, and applies them all at once to a new Yjs
-/// document.
+/// Applies updates to a new Yjs document, each in a transaction of its own: yrs's quickest way
+/// to take many. Combining them first with its own call for that takes seconds on C1 and C2.
 fn yjs_merge(updates: Vec<yrs::Update>) -> (yrs::Doc, String) {
-    yjs_apply(yrs::Update::merge_updates(updates))
+    use yrs::{GetString, Transact};
+    let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
+    let text = document.get_or_insert_text("text");
+    for update in updates {
+        document.transact_mut().apply_update(update).unwrap();
+    }
+    let string = text.get_string(&document.transact());
+    (document, string)
 }
 
 /// Saves a Yjs document as one update of its whole state, the only form it has.
