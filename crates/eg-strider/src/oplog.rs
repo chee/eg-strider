@@ -35,20 +35,57 @@ pub enum Edit {
     Delete { pos: u32, len: u32, backspace: bool },
 }
 
-/// A run of consecutive events of one kind.
+/// A run of consecutive events of one kind, in 16 bytes since a log holds so many.
 struct Op {
     first_event: EventIndex,
-    len: u32,
-    kind: OpKind,
-    /// Deletes only: false for backspace, whose first event removes the last position.
-    forward: bool,
-    /// Deletes only: removes the end of what the insert before it put in. Found when a run of
-    /// ops arrives together.
-    trims: bool,
+    /// The number of events, up to [`MAX_OP_LEN`], with [`DELETE`], [`BACKWARD`] and [`TRIMS`]
+    /// above it.
+    len_and_flags: u32,
     /// The positions `pos..pos + len` that the run touches, before its first event.
     pos: u32,
-    /// Inserts only: the inserted text.
-    content: ByteRange,
+    /// Where the run's inserted text ends in [`OpLog::content`]. It starts where the text of the
+    /// op before ends, and a delete has none.
+    content_end: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<Op>() == 16);
+
+/// Marks an op that deletes.
+const DELETE: u32 = 1 << 31;
+/// Deletes only: marks backspace, whose first event removes the last position.
+const BACKWARD: u32 = 1 << 30;
+/// Deletes only: marks a delete that removes the end of what the insert before it put in. Found
+/// when a run of ops arrives together.
+const TRIMS: u32 = 1 << 29;
+/// The most events one op holds.
+const MAX_OP_LEN: u32 = TRIMS - 1;
+
+impl Op {
+    fn new(first_event: EventIndex, len: u32, kind: OpKind, forward: bool, trims: bool, pos: u32, content_end: u32) -> Op {
+        assert!(len <= MAX_OP_LEN, "an edit longer than an op holds");
+        let flags = if kind == OpKind::Del { DELETE } else { 0 } | if forward { 0 } else { BACKWARD } | if trims { TRIMS } else { 0 };
+        Op { first_event, len_and_flags: len | flags, pos, content_end }
+    }
+
+    fn len(&self) -> u32 {
+        self.len_and_flags & MAX_OP_LEN
+    }
+
+    fn kind(&self) -> OpKind {
+        if self.len_and_flags & DELETE == 0 {
+            OpKind::Ins
+        } else {
+            OpKind::Del
+        }
+    }
+
+    fn forward(&self) -> bool {
+        self.len_and_flags & BACKWARD == 0
+    }
+
+    fn trims(&self) -> bool {
+        self.len_and_flags & TRIMS != 0
+    }
 }
 
 /// A run of consecutive events by one agent.
@@ -304,7 +341,7 @@ impl OpLog {
                 }
             };
             let trims = kind == OpKind::Del && open.is_some_and(|(end, left)| pos + len == end && len <= left);
-            let whole = self.store(follows, Op { first_event: next, len, kind, forward, trims, pos, content: (at, at + bytes) });
+            let whole = self.store(follows, Op::new(next, len, kind, forward, trims, pos, at + bytes));
             open = match kind {
                 OpKind::Ins => Some((pos + len, whole)),
                 OpKind::Del if trims => open.map(|(end, left)| (end - len, left - len)),
@@ -337,10 +374,9 @@ impl OpLog {
         let pos = u32::try_from(pos).expect("a position past what a u32 counts");
         let (continues, events) = self.link(parents, len);
         self.assign(agent, sequence_number, event, len);
-        let at = self.content.len() as u32;
         self.content.push_str(text);
         let end = u32::try_from(self.content.len()).expect("more inserted text than a u32 counts");
-        self.store(continues, Op { first_event: event, len, kind, forward, trims: false, pos, content: (at, end) });
+        self.store(continues, Op::new(event, len, kind, forward, false, pos, end));
         events
     }
 
@@ -394,39 +430,43 @@ impl OpLog {
     /// Stores an op, merging it into the last op when it carries it on, as typing, holding
     /// delete or holding backspace does. Returns the length of the op it ends up in.
     fn store(&mut self, follows: bool, op: Op) -> u32 {
-        match op.kind {
-            OpKind::Ins => self.totals.0 += op.len,
-            OpKind::Del => self.totals.1 += op.len,
+        let (len, kind) = (op.len(), op.kind());
+        match kind {
+            OpKind::Ins => self.totals.0 += len,
+            OpKind::Del => self.totals.1 += len,
         }
         match self.ops.last_mut() {
             Some(o)
                 if follows
-                    && o.kind == op.kind
-                    && o.forward
-                    && op.forward
-                    && !o.trims
-                    && ((op.kind == OpKind::Ins && o.pos + o.len == op.pos) || (op.kind == OpKind::Del && o.pos == op.pos)) =>
+                    && o.kind() == kind
+                    && o.forward()
+                    && op.forward()
+                    && !o.trims()
+                    && o.len() + len <= MAX_OP_LEN
+                    && ((kind == OpKind::Ins && o.pos + o.len() == op.pos) || (kind == OpKind::Del && o.pos == op.pos)) =>
             {
-                o.len += op.len;
-                o.content.1 = op.content.1;
-                o.len
+                // The flags are above the length, which stays in its bits.
+                o.len_and_flags += len;
+                o.content_end = op.content_end;
+                o.len()
             }
             // Backspace: a delete that ends where the last began, each removing one character
             // or already running backwards.
             Some(o)
                 if follows
-                    && o.kind == OpKind::Del
-                    && op.kind == OpKind::Del
-                    && o.trims == op.trims
-                    && (o.len == 1 || !o.forward)
-                    && (op.len == 1 || !op.forward)
-                    && op.pos + op.len == o.pos =>
+                    && o.kind() == OpKind::Del
+                    && kind == OpKind::Del
+                    && o.trims() == op.trims()
+                    && (o.len() == 1 || !o.forward())
+                    && (len == 1 || !op.forward())
+                    && o.len() + len <= MAX_OP_LEN
+                    && op.pos + len == o.pos =>
             {
-                (o.pos, o.len, o.forward) = (op.pos, o.len + op.len, false);
-                o.len
+                o.pos = op.pos;
+                o.len_and_flags = (o.len_and_flags | BACKWARD) + len;
+                o.len()
             }
             _ => {
-                let len = op.len;
                 self.ops.push(op);
                 len
             }
@@ -437,16 +477,16 @@ impl OpLog {
     fn split_op(&mut self, at: EventIndex) {
         let i = self.op_containing(at) as usize;
         let Some(op) = self.ops.get(i).filter(|op| op.first_event < at) else { return };
-        let end = op.first_event + op.len;
+        let (start, end) = (op.first_event, op.first_event + op.len());
         let part = |events: Range<EventIndex>| {
-            let part = self.slice(op, &events);
-            Op { first_event: part.first_event, len: part.len, kind: part.kind, forward: part.forward, trims: false, pos: part.pos, content: part.text }
+            let part = self.slice(i, &events);
+            Op::new(part.first_event, part.len, part.kind, part.forward, false, part.pos, part.text.1)
         };
-        let parts = [part(op.first_event..at), part(at..end)];
+        let parts = [part(start..at), part(at..end)];
         self.ops.splice(i..=i, parts);
         // A delete only trims straight after an insert or after another delete that does.
-        for after in self.ops[i + 2..].iter_mut().take_while(|after| after.trims) {
-            after.trims = false;
+        for after in self.ops[i + 2..].iter_mut().take_while(|after| after.trims()) {
+            after.len_and_flags &= !TRIMS;
         }
     }
 
@@ -496,7 +536,7 @@ impl OpLog {
         let mut op = 0;
         starts
             .map(|event| {
-                while self.ops.get(op).is_some_and(|op| op.first_event + op.len <= event) {
+                while self.ops.get(op).is_some_and(|op| op.first_event + op.len() <= event) {
                     op += 1;
                 }
                 op as OpIndex
@@ -511,12 +551,12 @@ impl OpLog {
         // before then.
         let straddles = self.ops.get(ops.end as usize).is_some_and(|op| op.first_event < events.end);
         let count = if events.is_empty() { 0 } else { (ops.end - ops.start) as usize + straddles as usize };
-        self.ops[ops.start as usize..][..count].iter().map(move |op| self.slice(op, &events))
+        (ops.start as usize..ops.start as usize + count).map(move |op| self.slice(op, &events))
     }
 
     /// Returns the index of the op holding `event`.
     pub(crate) fn op_containing(&self, event: EventIndex) -> OpIndex {
-        self.ops.partition_point(|op| op.first_event + op.len <= event) as OpIndex
+        self.ops.partition_point(|op| op.first_event + op.len() <= event) as OpIndex
     }
 
     /// Returns all inserted text, which [`OpSlice`] ranges point into.
@@ -542,10 +582,10 @@ impl OpLog {
             if op.first_event.max(events.start) >= events.end {
                 break;
             }
-            let len = events.end.min(op.first_event + op.len) - events.start.max(op.first_event);
+            let len = events.end.min(op.first_event + op.len()) - events.start.max(op.first_event);
             // Which kind an op is cannot be predicted, so both sums are added to without
             // branching on it.
-            let insert = (op.kind == OpKind::Ins) as u32;
+            let insert = (op.kind() == OpKind::Ins) as u32;
             inserted += len * insert;
             removed += len * (1 - insert);
         }
@@ -563,27 +603,30 @@ impl OpLog {
         (content.0 + first, content.0 + last)
     }
 
-    /// Cuts out the part of `op` inside `events`.
+    /// Cuts out the part of op `i` inside `events`.
     #[inline]
-    fn slice(&self, op: &Op, events: &Range<EventIndex>) -> OpSlice {
+    fn slice(&self, i: usize, events: &Range<EventIndex>) -> OpSlice {
+        let op = &self.ops[i];
+        let (len, kind, forward) = (op.len(), op.kind(), op.forward());
+        let content = (if i == 0 { 0 } else { self.ops[i - 1].content_end }, op.content_end);
         let from = events.start.max(op.first_event) - op.first_event;
-        let to = events.end.min(op.first_event + op.len) - op.first_event;
+        let to = events.end.min(op.first_event + len) - op.first_event;
         // Nearly always the whole op, which needs no working out whatever its kind.
-        if to - from == op.len {
-            return OpSlice { first_event: op.first_event, len: op.len, kind: op.kind, forward: op.forward, trims: op.trims, pos: op.pos, text: op.content };
+        if to - from == len {
+            return OpSlice { first_event: op.first_event, len, kind, forward, trims: op.trims(), pos: op.pos, text: content };
         }
-        let (pos, text) = match (op.kind, op.forward) {
+        let (pos, text) = match (kind, forward) {
             (OpKind::Ins, _) => {
-                let (start, end) = op.content;
+                let (start, end) = content;
                 // Characters and bytes coincide when the text is all ASCII.
-                let text = if end - start == op.len { (start + from, start + to) } else { self.cut(op.content, from, to) };
+                let text = if end - start == len { (start + from, start + to) } else { self.cut(content, from, to) };
                 (op.pos + from, text)
             }
             // Each forward delete lands on the same position, so a later slice starts where
             // the op did.
-            (OpKind::Del, true) => (op.pos, (0, 0)),
-            (OpKind::Del, false) => (op.pos + op.len - to, (0, 0)),
+            (OpKind::Del, true) => (op.pos, content),
+            (OpKind::Del, false) => (op.pos + len - to, content),
         };
-        OpSlice { first_event: op.first_event + from, len: to - from, kind: op.kind, forward: op.forward, trims: false, pos, text }
+        OpSlice { first_event: op.first_event + from, len: to - from, kind, forward, trims: false, pos, text }
     }
 }

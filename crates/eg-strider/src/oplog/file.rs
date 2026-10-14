@@ -1,4 +1,4 @@
-use super::{AgentRun, Op, OpKind, OpLog, OpSlice};
+use super::{AgentRun, Op, OpKind, OpLog, OpSlice, MAX_OP_LEN};
 use crate::replay::Base;
 use std::borrow::Cow;
 use std::ops::Range;
@@ -156,7 +156,7 @@ impl OpLog {
         self.memo.outdate();
         let shift = self.content.len() as u32;
         self.content.push_str(&later.content);
-        self.ops.extend(later.ops.into_iter().map(|op| Op { content: (op.content.0 + shift, op.content.1 + shift), ..op }));
+        self.ops.extend(later.ops.into_iter().map(|op| Op { content_end: op.content_end + shift, ..op }));
         self.agent_runs.extend(later.agent_runs);
         self.totals = (self.totals.0 + later.totals.0, self.totals.1 + later.totals.1);
         let blocks = later.graph.blocks();
@@ -332,13 +332,13 @@ impl OpLog {
         let (mut event, mut at, mut cursor) = (start, 0usize, 0u32);
         for _ in 0..ops {
             let header = op_headers.varint()?;
-            let len = u32::try_from(header >> 4).ok().filter(|&len| len > 0).ok_or(Malformed)?;
+            let len = u32::try_from(header >> 4).ok().filter(|&len| len > 0 && len <= MAX_OP_LEN).ok_or(Malformed)?;
             let pos = u32::try_from(i64::from(cursor) + unzigzag(places.varint()?)).map_err(|_| Malformed)?;
             let (kind, forward) = (if header & 1 == 1 { OpKind::Del } else { OpKind::Ins }, header & 2 == 0);
             cursor = after(kind, pos, len);
             // Only a delete right after an insert, or after another such delete, can trim it.
             let trims = header & 8 != 0;
-            let follows = |before: &Op| before.first_event + before.len == event && (before.kind == OpKind::Ins || before.trims);
+            let follows = |before: &Op| before.first_event + before.len() == event && (before.kind() == OpKind::Ins || before.trims());
             if trims && (kind == OpKind::Ins || !self.ops.last().is_some_and(follows)) {
                 return Err(Malformed);
             }
@@ -354,7 +354,7 @@ impl OpLog {
                 OpKind::Ins => return Err(Malformed),
                 OpKind::Del => self.totals.1 += len,
             }
-            self.ops.push(Op { first_event: event, len, kind, forward, trims, pos, content: (base + at as u32, base + (at + bytes) as u32) });
+            self.ops.push(Op::new(event, len, kind, forward, trims, pos, base + (at + bytes) as u32));
             at += bytes;
             event = event.checked_add(len).ok_or(Malformed)?;
         }
