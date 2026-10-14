@@ -89,6 +89,9 @@ pub struct OpLog {
     /// The document with every event merged and how many events that is, when the log ends
     /// with events that are concurrent with one another and so cannot be a base.
     latest: Option<(u32, String)>,
+    /// The history from before the first event held here, if the log was loaded and has not
+    /// had to read it.
+    packed: Option<file::Packed>,
     /// Reused to hold the parents of the event being added.
     parents: Vec<u32>,
     /// How many characters the inserts put in, and how many the deletes take out.
@@ -170,6 +173,7 @@ impl OpLog {
 
     /// Drops everything earlier checkouts worked out. The next one starts from scratch.
     pub fn forget(&mut self) {
+        self.unpack_all();
         (self.memo, self.base, self.latest) = (Memo::default(), Base::default(), None);
     }
 
@@ -276,6 +280,14 @@ impl OpLog {
     /// any, at the current frontier. Returns whether they simply follow the last event, and
     /// their numbers.
     fn link(&mut self, parents: Option<&[LV]>, len: u32) -> (bool, Range<u32>) {
+        // History that is still as it was saved has to be read for an event that was made
+        // without all of it: one with no parent held here, and not every old head for parents.
+        if let (Some(packed), Some(parents)) = (&self.packed, parents) {
+            let floor = self.graph.floor() as LV;
+            if !parents.iter().any(|&parent| parent >= floor) && !packed.heads.iter().all(|&head| parents.contains(&(head as LV))) {
+                self.unpack_all();
+            }
+        }
         let lv = self.graph.len();
         // Most events follow the last one, whose number is then all the graph needs.
         let continues = lv > 0 && parents.map_or(self.graph.frontier() == [lv - 1], |parents| parents == [(lv - 1) as LV]);
@@ -291,7 +303,9 @@ impl OpLog {
         let events = self.graph.push(&at, len);
         self.parents = at;
         if self.graph.last_seen() < self.base.events {
-            // Made at a version from before the base, which is then no base for a merge.
+            // Made at a version from before the base, which is then no base for a merge. The
+            // next one starts from nothing, and needs the whole history for that.
+            self.unpack_all();
             (self.base, self.latest) = (Base::default(), None);
         }
         (false, events)

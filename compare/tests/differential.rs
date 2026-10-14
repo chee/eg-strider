@@ -85,14 +85,15 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
     let mut log = compare::convert(&dt);
     prop_assert_eq!(log.checkout(), expected.as_str(), "first checkout");
     prop_assert_eq!(log.checkout(), expected.as_str(), "second checkout");
-    let (mut loaded, text) = OpLog::load(&log.save()).expect("a saved log loads");
-    prop_assert_eq!(text.as_str(), expected.as_str(), "the saved document");
-    prop_assert_eq!(loaded.checkout(), expected.as_str(), "merged again after loading");
+    let mut loaded = OpLog::load(log.save()).expect("a saved log loads");
+    prop_assert_eq!(loaded.checkout(), expected.as_str(), "the saved document");
+    loaded.forget();
+    prop_assert_eq!(loaded.checkout(), expected.as_str(), "merged again from the saved history");
 
     // Growing a little at a time and checking out at each step, so that regions are extended
     // and absorbed while the log holds what it resolved for their earlier shapes. A second
     // log grows the same way but is saved and loaded at each step, so that it carries on from
-    // what the file kept of its graph.
+    // a document whose history it has not read.
     let history = compare::History::of(&dt).edits();
     let (mut growing, mut reloaded) = (OpLog::new(), OpLog::new());
     for part in 1..=8 {
@@ -103,9 +104,9 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
         prop_assert_eq!(growing.checkout(), fresh.checkout(), "after growing to part {} of 8", part);
 
         compare::extend(&mut reloaded, &history, limit);
-        let saved = reloaded.save();
-        prop_assert_eq!(&saved, &fresh.save(), "saved at part {} of 8", part);
-        reloaded = OpLog::load(&saved).expect("a saved log loads").0;
+        prop_assert_eq!(reloaded.checkout(), fresh.checkout(), "after loading and growing to part {} of 8", part);
+        reloaded = OpLog::load(reloaded.save()).expect("a saved log loads");
+        prop_assert_eq!(reloaded.checkout(), fresh.checkout(), "loaded at part {} of 8", part);
     }
     prop_assert_eq!(growing.checkout(), expected.as_str(), "after growing");
     Ok(())

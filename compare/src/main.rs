@@ -379,9 +379,14 @@ fn main() {
         // Reopening, each from its own saved document.
         let saved = strider_merge(&history).save();
         let dt_saved = dt_save(&bytes, &expected);
-        let (open_ms, reopened) = median_of(reps, || (), |()| OpLog::load(&saved).unwrap());
+        // eg-strider takes the file's bytes to keep, so each run is handed its own.
+        let (open_ms, mut reopened) = median_of(reps, || saved.clone(), |bytes| {
+            let mut log = OpLog::load(bytes).unwrap();
+            log.checkout();
+            log
+        });
         let (dt_open_ms, dt_reopened) = median_of(reps, || (), |()| dt_open(&dt_saved));
-        same &= reopened.1 == expected && dt_reopened.1.to_string() == expected;
+        same &= reopened.checkout() == expected && dt_reopened.1.to_string() == expected;
         drop((reopened, dt_reopened));
 
         // Memory after the times, so that measuring it cannot disturb them. The ops each is
@@ -392,7 +397,7 @@ fn main() {
             ops: held_by_history.kept,
             merging: with_ops(held_by_history, memory_of(|| strider_merge(&history)).1),
             open_ms,
-            opening: memory_of(|| OpLog::load(&saved).unwrap()).1,
+            opening: memory_of(|| OpLog::load(saved.clone()).unwrap()).1,
             saved: saved.len(),
             same,
         };

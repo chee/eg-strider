@@ -28,33 +28,51 @@ fn carry_on(log: &mut OpLog) {
     log.add_insert_at(b, &both, 0, "#");
 }
 
+/// The same history with two more events that are concurrent with each other, so that it
+/// does not end at a critical version.
+fn open_ended() -> OpLog {
+    let mut log = history();
+    let (a, b, tip) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"), log.frontier());
+    log.add_insert_at(a, &tip, 0, "left ");
+    log.add_insert_at(b, &tip, 3, " right");
+    log
+}
+
 #[test]
 fn a_saved_log_loads_with_its_document() {
-    let mut log = history();
-    let saved = log.save();
-    let (mut loaded, text) = OpLog::load(&saved).unwrap();
-    assert_eq!(text, log.checkout());
-    assert_eq!(loaded.checkout(), text);
-    assert_eq!(loaded.len(), log.len());
-    assert_eq!(loaded.frontier(), log.frontier());
-    assert_eq!(loaded.save(), saved);
+    for mut log in [history(), open_ended()] {
+        let saved = log.save();
+        let mut loaded = OpLog::load(saved.clone()).unwrap();
+        assert_eq!(loaded.checkout(), log.checkout());
+        assert_eq!(loaded.len(), log.len());
+        assert_eq!(loaded.frontier(), log.frontier());
+        assert_eq!(loaded.save(), saved);
+    }
 }
 
 #[test]
 fn a_loaded_log_carries_on_as_the_original_does() {
-    let mut log = history();
-    let (mut loaded, _) = OpLog::load(&log.save()).unwrap();
-    carry_on(&mut log);
-    carry_on(&mut loaded);
-    assert_eq!(loaded.checkout(), log.checkout());
-    assert_eq!(loaded.save(), log.save());
+    for mut log in [history(), open_ended()] {
+        let mut loaded = OpLog::load(log.save()).unwrap();
+        // Typing on at the end needs none of the saved history.
+        for log in [&mut log, &mut loaded] {
+            let a = log.get_or_create_agent("a");
+            log.add_insert(a, 1, "on ");
+        }
+        assert_eq!(loaded.checkout(), log.checkout());
+        // An event made at an old version does.
+        carry_on(&mut log);
+        carry_on(&mut loaded);
+        assert_eq!(loaded.checkout(), log.checkout());
+        let mut again = OpLog::load(loaded.save()).unwrap();
+        assert_eq!(again.checkout(), log.checkout());
+    }
 }
 
 #[test]
 fn an_empty_log_is_saved_and_loaded() {
-    let saved = OpLog::new().save();
-    let (mut loaded, text) = OpLog::load(&saved).unwrap();
-    assert_eq!((text.as_str(), loaded.len()), ("", 0));
+    let mut loaded = OpLog::load(OpLog::new().save()).unwrap();
+    assert_eq!((loaded.len(), loaded.checkout()), (0, ""));
     let a = loaded.get_or_create_agent("a");
     loaded.add_insert(a, 0, "hi");
     assert_eq!(loaded.checkout(), "hi");
@@ -62,21 +80,23 @@ fn an_empty_log_is_saved_and_loaded() {
 
 #[test]
 fn a_file_cut_short_is_refused() {
-    let saved = history().save();
-    for len in 0..saved.len() {
-        assert_eq!(OpLog::load(&saved[..len]).err(), Some(Malformed), "cut to {len} bytes");
+    for mut log in [history(), open_ended()] {
+        let saved = log.save();
+        for len in 0..saved.len() {
+            assert_eq!(OpLog::load(saved[..len].to_vec()).err(), Some(Malformed), "cut to {len} bytes");
+        }
+        assert!(OpLog::load([&saved[..], &[0]].concat()).is_err(), "with a byte too many");
     }
-    assert!(OpLog::load(&[&saved[..], &[0]].concat()).is_err(), "with a byte too many");
 }
 
 #[test]
 fn a_damaged_file_is_refused_or_loaded_but_never_panics() {
-    let saved = history().save();
+    let saved = open_ended().save();
     for at in 0..saved.len() {
         for flip in [0x01, 0x80, 0xff] {
             let mut damaged = saved.clone();
             damaged[at] ^= flip;
-            let _ = OpLog::load(&damaged);
+            let _ = OpLog::load(damaged);
         }
     }
 }
