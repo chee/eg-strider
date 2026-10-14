@@ -33,6 +33,12 @@ pub trait Replica {
 
     /// Returns an update as the library sends it.
     fn bytes(update: &Self::Update) -> Vec<u8>;
+
+    /// Returns what every replica starts from, as updates that a document merging the history
+    /// needs first. Nothing, unless the library has the text made by an update of its own.
+    fn start() -> Vec<Self::Update> {
+        Vec::new()
+    }
 }
 
 pub struct Replayed {
@@ -198,7 +204,7 @@ pub fn replay<R: Replica>(history: &History<TextOperation, usize>, limit: Durati
     }
 
     let mut batches = Vec::new();
-    for update in updates.iter().flatten() {
+    for update in R::start().iter().chain(updates.iter().flatten()) {
         let bytes = R::bytes(update);
         batches.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         batches.extend_from_slice(&bytes);
@@ -211,21 +217,29 @@ pub struct Automerge {
     text: automerge::ObjId,
 }
 
+/// The document every Automerge replica starts from, which holds the text object.
+fn automerge_base() -> &'static [u8] {
+    use automerge::{transaction::Transactable, ActorId, AutoCommit, ObjType, ROOT};
+    static BASE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| {
+        let mut document = AutoCommit::new().with_actor(ActorId::from(vec![0u8; 8]));
+        document.put_object(ROOT, "text", ObjType::Text).unwrap();
+        document.save()
+    })
+}
+
 impl Replica for Automerge {
     type Update = automerge::Change;
 
     fn new(peer: u64, _: bool) -> Self {
-        use automerge::{transaction::Transactable, ActorId, AutoCommit, ObjType, ReadDoc, ROOT};
-        // Every replica starts from the same document, which holds the text object.
-        static BASE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-        let base = BASE.get_or_init(|| {
-            let mut document = AutoCommit::new().with_actor(ActorId::from(vec![0u8; 8]));
-            document.put_object(ROOT, "text", ObjType::Text).unwrap();
-            document.save()
-        });
-        let document = AutoCommit::load(base).unwrap().with_actor(ActorId::from(peer.to_be_bytes().to_vec()));
+        use automerge::{ActorId, AutoCommit, ReadDoc, ROOT};
+        let document = AutoCommit::load(automerge_base()).unwrap().with_actor(ActorId::from(peer.to_be_bytes().to_vec()));
         let (_, text) = document.get(ROOT, "text").unwrap().unwrap();
         Automerge { document, text }
+    }
+
+    fn start() -> Vec<Self::Update> {
+        automerge::AutoCommit::load(automerge_base()).unwrap().get_changes(&[]).into_iter().cloned().collect()
     }
 
     fn fork(&mut self, peer: u64) -> Self {
