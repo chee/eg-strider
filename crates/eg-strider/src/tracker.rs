@@ -311,7 +311,7 @@ impl Tracker {
 
         // Among concurrent inserts the place may be further along, and is found by climbing.
         let place = if concurrent { self.integrate(after_left, lv, origin_left, origin_right, &goes_before) } else { after_left };
-        self.insert_span(place, left.filter(|_| place == after_left), lv, len, origin_left, origin_right, Some(index).filter(|_| !concurrent))
+        self.insert_span(place, left.filter(|_| place == after_left), lv, len, origin_left, origin_right, (!concurrent).then_some(index))
     }
 
     /// Merges an insert whose neighbours are already known, so that no prepare version is

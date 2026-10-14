@@ -349,7 +349,7 @@ fn main() {
             let dt_append_ms = since(t);
             let branch = oplog.checkout_tip();
             let dt_ms = since(t);
-            same &= branch.content().to_string() == expected;
+            same &= branch.content() == expected;
             drop((oplog, branch));
 
             let t = Instant::now();

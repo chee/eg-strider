@@ -42,7 +42,7 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
                 let i = before.map_or(list.len(), |b| b.index(list.len()));
                 // Every other insert is by a caller that does not ask where it landed.
                 let before = list.get(i).map(|e| tree.cursor(e.0));
-                let id = if list.len() % 2 == 0 {
+                let id = if list.len().is_multiple_of(2) {
                     tree.add(before, w(widths))
                 } else {
                     let (id, at) = tree.insert(before, w(widths));
