@@ -198,10 +198,11 @@ fn yjs_decode(bytes: &[u8]) -> yrs::Update {
     yrs::Update::decode_v2(bytes).unwrap()
 }
 
-/// Applies an update to a new Yjs document and returns it with its text.
+/// Applies an update to a new Yjs document and returns it with its text. Garbage collection is
+/// off, so that it keeps the text of deleted characters as every other library does.
 fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
     use yrs::{GetString, Transact};
-    let document = yrs::Doc::new();
+    let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
     let text = document.get_or_insert_text("text");
     document.transact_mut().apply_update(update).unwrap();
     let string = text.get_string(&document.transact());
