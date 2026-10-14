@@ -46,14 +46,16 @@ def chart(results, kind, label, caption, ticks, baseline=None, share=(), part=No
     it: the bar is drawn lighter up to there. A system whose text came out unlike
     diamond-types' is starred."""
     by_trace = {r["trace"]: r[kind] for r in results}
+    # A library left out of the run has no figures at all, and no rows.
+    shown = [system for system in SYSTEMS if any(r[kind].get(system[1]) is not None for r in results)]
     parts = {r["trace"]: r[part[0]] for r in results} if part else {}
     same = {r["trace"]: r["same"] for r in results}
     traces = [t for t in ORDER if t in by_trace]
-    systems = ([(baseline[1], None, "#999999")] if baseline else []) + SYSTEMS
+    systems = ([(baseline[1], None, "#999999")] if baseline else []) + shown
     base = {r["trace"]: r[baseline[0]] for r in results} if baseline else {}
     value_of = lambda trace, key: base[trace] if key is None else by_trace[trace].get(key)
     origin = ticks[0][0]
-    values = [r[k].get(key) for r in results for k in (kind, *share) for _, key, _ in SYSTEMS] + list(base.values())
+    values = [r[k].get(key) for r in results for k in (kind, *share) for _, key, _ in shown] + list(base.values())
     decades = [math.log10(v / origin) for v in values if v]
     low, high = math.floor(min(decades)), math.ceil(max(decades))
     x = lambda v: LEFT + (math.log10(v / origin) - low) / (high - low) * (RIGHT - LEFT)
@@ -88,7 +90,7 @@ def chart(results, kind, label, caption, ticks, baseline=None, share=(), part=No
         middle = y + len(systems) * ROW / 2
         out.append(f'<text x="{LEFT - 62}" y="{middle + 4:.1f}" font-size="14" text-anchor="end">{trace}</text>')
         out.append(f'<line x1="{LEFT}" y1="{y - 2}" x2="{LEFT}" y2="{y + len(systems) * ROW}" stroke="black" stroke-width="1.5"/>')
-        least = min(v for v in (by_trace[trace].get(key) for _, key, _ in SYSTEMS) if v)
+        least = min(v for v in (by_trace[trace].get(key) for _, key, _ in shown) if v)
         for name, key, colour in systems:
             value = value_of(trace, key)
             out.append(f'<text x="{LEFT - 6}" y="{y + 8}" font-size="7.5" fill="#888" text-anchor="end">{name}</text>')

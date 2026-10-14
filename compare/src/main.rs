@@ -76,13 +76,18 @@ const LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const REPLAYED: &str = "traces/replayed";
 
 /// Loads a history in another library's format, with how many peers it took and how many edits
-/// had to be moved. Replayed on first use and kept in [`REPLAYED`].
+/// had to be moved. Replayed on first use and kept in [`REPLAYED`]. Nothing for a library in
+/// `left_out`.
 fn replayed<R: compare::replicas::Replica>(
     name: &str,
     kind: &str,
     history: &History<TextOperation, usize>,
     replay: bool,
+    left_out: &[&str],
 ) -> Result<(Vec<u8>, String), &'static str> {
+    if left_out.contains(&kind) {
+        return Err("left out");
+    }
     let file = |suffix: &str| format!("{REPLAYED}/{name}.{kind}{suffix}");
     if let (Ok(bytes), Ok(notes)) = (std::fs::read(file("")), std::fs::read_to_string(file("-notes"))) {
         return Ok((bytes, notes));
@@ -330,13 +335,15 @@ fn main() {
     let replay = args.iter().any(|a| a == "--replay");
     let json_path = args.iter().position(|a| a == "--json").map(|i| args[i + 1].clone());
     let reps: u32 = args.iter().position(|a| a == "--reps").map_or(20, |i| args[i + 1].parse().unwrap());
+    // Libraries to leave out, as yrs, loro or automerge.
+    let left_out: Vec<&str> = args.windows(2).filter(|pair| pair[0] == "--without").map(|pair| pair[1].as_str()).collect();
     let paths: Vec<&String> = args
         .iter()
         .enumerate()
-        .filter(|(i, a)| !a.starts_with("--") && (*i == 0 || !["--reps", "--json"].contains(&args[i - 1].as_str())))
+        .filter(|(i, a)| !a.starts_with("--") && (*i == 0 || !["--reps", "--json", "--without"].contains(&args[i - 1].as_str())))
         .map(|(_, a)| a)
         .collect();
-    assert!(!paths.is_empty(), "usage: compare <trace.json>... [--replay] [--reps N] [--json OUT]");
+    assert!(!paths.is_empty(), "usage: compare <trace.json>... [--replay] [--reps N] [--json OUT] [--without LIBRARY]...");
 
     println!("merging a history whose ops are in memory: appending them, then merging; and then one more edit at the end, merged on top");
     println!("{:6} {:>8} {:>32} {:>42} {:>12}  result", "trace", "events", "diamond-types", "eg-strider", "one more");
@@ -481,14 +488,14 @@ fn main() {
         );
 
         // The other libraries, on the same history replayed into each.
-        let yjs = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay)
+        let yjs = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay, &left_out)
             .map(|(update, notes)| (measure(reps, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))), notes));
-        let loro = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay).map(|(updates, notes)| {
+        let loro = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay, &left_out).map(|(updates, notes)| {
             let source = loro_import(&updates).0;
             let ops = || source.export_json_updates(&Default::default(), &source.oplog_vv());
             (measure(reps, &expected, ops, loro_apply, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
         });
-        let automerge = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay).map(|(saved, notes)| {
+        let automerge = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay, &left_out).map(|(saved, notes)| {
             let changes = automerge_changes(&saved);
             (measure(reps, &expected, || automerge_decode(&changes), automerge_apply, |document| document.save(), automerge_open), notes)
         });
@@ -505,8 +512,10 @@ fn main() {
         // replays against: the time to merge each, its size, and whether its text is the trace's.
         // A check, so one run of each will do.
         let beside = |suffix: &str| std::fs::read(path.replace(".json", suffix)).ok();
-        let paper_yjs = beside(".yjs").map(|update| measure(1, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))));
-        let paper_automerge = beside(".am").map(|saved| {
+        let paper_yjs = beside(".yjs")
+            .filter(|_| !left_out.contains(&"yrs"))
+            .map(|update| measure(1, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))));
+        let paper_automerge = beside(".am").filter(|_| !left_out.contains(&"automerge")).map(|saved| {
             let changes = automerge_changes(&saved);
             measure(1, &expected, || automerge_decode(&changes), automerge_apply, |document| document.save(), automerge_open)
         });
