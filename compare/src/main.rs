@@ -362,7 +362,7 @@ fn main() {
             // One more edit at the end, merged on top of what is there.
             let typist = log.get_or_create_agent("typist");
             let t = Instant::now();
-            log.add_insert(typist, expected_chars, "!").unwrap();
+            log.add_insert(typist, expected_chars, "!");
             let merged = log.checkout().len();
             let again_ms = since(t);
             same &= merged == expected.len() + 1;
@@ -407,7 +407,7 @@ fn main() {
             let (ms, mut log) = median_of(reps, reopen, |mut log| {
                 let typist = log.get_or_create_agent("typist");
                 match back {
-                    None => log.add_insert(typist, 0, "!").unwrap(),
+                    None => log.add_insert(typist, 0, "!"),
                     Some(back) => log.add_insert_at(typist, &[(log.len() - 1 - back.min(log.len() - 1)) as EventIndex], 0, "!").unwrap(),
                 };
                 log.checkout();

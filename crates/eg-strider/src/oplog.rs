@@ -36,7 +36,6 @@ pub enum Edit {
 }
 
 /// A run of consecutive events of one kind.
-#[derive(Clone, Copy)]
 struct Op {
     first_event: EventIndex,
     len: u32,
@@ -75,41 +74,6 @@ pub(crate) struct OpSlice {
     pub text: ByteRange,
 }
 
-/// Why an event was not added. The log holds what it did before.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Rejected {
-    /// The agent was not made by [`OpLog::get_or_create_agent`].
-    UnknownAgent,
-    /// A parent is not an event the log has.
-    UnknownParent,
-    /// Parents are not in ascending order, or one repeats.
-    ParentsOutOfOrder,
-    /// The text is not exactly what the inserts put in.
-    TextMismatch,
-    /// An edit reaches past the end of the document it was made on.
-    OutOfRange,
-    /// More events, sequence numbers or inserted text than 32 bits can count.
-    TooLarge,
-    /// Saved history that the event needs read back is damaged.
-    DamagedHistory,
-}
-
-impl std::fmt::Display for Rejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Rejected::UnknownAgent => "unknown agent",
-            Rejected::UnknownParent => "a parent is not a known event",
-            Rejected::ParentsOutOfOrder => "parents are not in ascending order",
-            Rejected::TextMismatch => "the text does not match the inserts",
-            Rejected::OutOfRange => "an edit reaches past the end of the document",
-            Rejected::TooLarge => "more than 32 bits can count",
-            Rejected::DamagedHistory => "the saved history is damaged",
-        })
-    }
-}
-
-impl std::error::Error for Rejected {}
-
 /// The operation log: every insert and delete this replica knows of, in the order it learned of
 /// them, with each event's parents, author and position. Consecutive events are run-length
 /// encoded into ops, and inserted text lives in one append-only buffer. A checkout derives the
@@ -117,6 +81,11 @@ impl std::error::Error for Rejected {}
 /// where history is concurrent; on top of that, regions whose concurrent edits do not touch are
 /// merged by shifting positions, what the CRDT works out is memoised at critical versions, and
 /// the text is built backwards without a rope.
+///
+/// Events must be valid as the Eg-walker paper defines it (Definition C.1): each is added once,
+/// its parents are events the log already has, and each position exists in the document at its
+/// parents. The paper's replicas are not Byzantine, so a run of ops also carries exactly the text
+/// its inserts put in. None of this is checked.
 #[derive(Default)]
 pub struct OpLog {
     pub(crate) graph: Graph,
@@ -137,18 +106,6 @@ pub struct OpLog {
     parents: Vec<EventIndex>,
     /// The characters the inserts put in, and the characters the deletes take out.
     totals: (u32, u32),
-    /// The document's length at the frontier, when known without merging.
-    frontier_chars: Option<u32>,
-}
-
-/// Returns the length of a document of `chars` characters after an edit, which must not reach
-/// past its end.
-fn after_edit(chars: u32, kind: OpKind, pos: u32, len: u32) -> Result<u32, Rejected> {
-    match kind {
-        OpKind::Ins if pos <= chars => chars.checked_add(len).ok_or(Rejected::TooLarge),
-        OpKind::Del if pos.checked_add(len).is_some_and(|end| end <= chars) => Ok(chars - len),
-        _ => Err(Rejected::OutOfRange),
-    }
 }
 
 /// Returns how many bytes of `text` come before the first that is not ASCII.
@@ -216,7 +173,6 @@ impl OpLog {
                 self.latest = Some(merged);
             }
         }
-        self.frontier_chars = Some(self.merged().chars);
         &self.merged().text
     }
 
@@ -243,25 +199,30 @@ impl OpLog {
         Ok(())
     }
 
-    /// Inserts `text` at `pos` in the document as of the current frontier.
-    pub fn add_insert(&mut self, agent: AgentId, pos: usize, text: &str) -> Result<Range<EventIndex>, Rejected> {
+    /// Inserts `text` at `pos` in the document as of the current frontier, which never needs
+    /// saved history read back.
+    pub fn add_insert(&mut self, agent: AgentId, pos: usize, text: &str) -> Range<EventIndex> {
         self.push(agent, None, None, OpKind::Ins, true, pos, text.chars().count(), text)
     }
 
     /// Deletes `range` from the document as of the current frontier.
-    pub fn add_delete(&mut self, agent: AgentId, range: Range<usize>) -> Result<Range<EventIndex>, Rejected> {
+    pub fn add_delete(&mut self, agent: AgentId, range: Range<usize>) -> Range<EventIndex> {
         self.push(agent, None, None, OpKind::Del, true, range.start, range.len(), "")
     }
 
-    /// Inserts `text` at `pos` in the document as of version `parents`.
-    pub fn add_insert_at(&mut self, agent: AgentId, parents: &[EventIndex], pos: usize, text: &str) -> Result<Range<EventIndex>, Rejected> {
-        self.push(agent, None, Some(parents), OpKind::Ins, true, pos, text.chars().count(), text)
+    /// Inserts `text` at `pos` in the document as of version `parents`, which must be ascending.
+    /// Fails only if saved history that this needs read back is damaged.
+    pub fn add_insert_at(&mut self, agent: AgentId, parents: &[EventIndex], pos: usize, text: &str) -> Result<Range<EventIndex>, Malformed> {
+        self.read_back(parents)?;
+        Ok(self.push(agent, None, Some(parents), OpKind::Ins, true, pos, text.chars().count(), text))
     }
 
-    /// Deletes `range` from the document as of version `parents`. `forward` is false for
-    /// backspace, which removes the last character first.
-    pub fn add_delete_at(&mut self, agent: AgentId, parents: &[EventIndex], range: Range<usize>, forward: bool) -> Result<Range<EventIndex>, Rejected> {
-        self.push(agent, None, Some(parents), OpKind::Del, forward, range.start, range.len(), "")
+    /// Deletes `range` from the document as of version `parents`, which must be ascending.
+    /// `forward` is false for backspace, which removes the last character first. Fails only if
+    /// saved history that this needs read back is damaged.
+    pub fn add_delete_at(&mut self, agent: AgentId, parents: &[EventIndex], range: Range<usize>, forward: bool) -> Result<Range<EventIndex>, Malformed> {
+        self.read_back(parents)?;
+        Ok(self.push(agent, None, Some(parents), OpKind::Del, forward, range.start, range.len(), ""))
     }
 
     /// As [`add_insert_at`](Self::add_insert_at), for an event from elsewhere with a fixed
@@ -273,8 +234,9 @@ impl OpLog {
         parents: &[EventIndex],
         pos: usize,
         text: &str,
-    ) -> Result<Range<EventIndex>, Rejected> {
-        self.push(agent, Some(sequence_number), Some(parents), OpKind::Ins, true, pos, text.chars().count(), text)
+    ) -> Result<Range<EventIndex>, Malformed> {
+        self.read_back(parents)?;
+        Ok(self.push(agent, Some(sequence_number), Some(parents), OpKind::Ins, true, pos, text.chars().count(), text))
     }
 
     /// As [`add_delete_at`](Self::add_delete_at), for an event from elsewhere with a fixed
@@ -286,12 +248,14 @@ impl OpLog {
         parents: &[EventIndex],
         range: Range<usize>,
         forward: bool,
-    ) -> Result<Range<EventIndex>, Rejected> {
-        self.push(agent, Some(sequence_number), Some(parents), OpKind::Del, forward, range.start, range.len(), "")
+    ) -> Result<Range<EventIndex>, Malformed> {
+        self.read_back(parents)?;
+        Ok(self.push(agent, Some(sequence_number), Some(parents), OpKind::Del, forward, range.start, range.len(), ""))
     }
 
-    /// Appends a run of ops by one agent from elsewhere: the first made at `parents`, each
-    /// other following the one before. `text` holds the inserts' text, in order.
+    /// Appends a run of ops by one agent from elsewhere: the first made at `parents`, which must
+    /// be ascending, each other following the one before. `text` holds the inserts' text, in
+    /// order. Fails only if saved history that this needs read back is damaged.
     pub fn add_remote_ops(
         &mut self,
         agent: AgentId,
@@ -299,44 +263,29 @@ impl OpLog {
         parents: &[EventIndex],
         ops: &[Edit],
         text: &str,
-    ) -> Result<Range<EventIndex>, Rejected> {
+    ) -> Result<Range<EventIndex>, Malformed> {
+        self.read_back(parents)?;
         let event = self.graph.len();
-        self.check_source(agent, Some(parents), text.len())?;
-        self.read_back(Some(parents))?;
-        // The ops are checked as they are stored, so that they are gone through once. A rejected
-        // run is taken back out before the graph or the agent's numbering know of it.
-        let before = (self.ops.len(), self.ops.last().copied(), self.content.len(), self.totals);
-        let stored = self.store_run(event, parents, ops, text);
-        let (total, chars) = match stored.and_then(|(total, chars)| self.check_size(sequence_number, total).map(|()| (total, chars))) {
-            Ok(stored) => stored,
-            Err(rejected) => {
-                self.take_back(before);
-                return Err(rejected);
-            }
-        };
+        let total = self.store_run(event, parents, ops, text);
         if total == 0 {
             return Ok(event..event);
         }
         let (_, events) = self.link(Some(parents), total);
-        self.frontier_chars = chars;
         self.assign(agent, Some(sequence_number), event, total);
         Ok(events)
     }
 
-    /// Stores a run's ops and text, checking each op on the way: the events must stay within 32
-    /// bits, each op within the document where its length is known, and the text must be
-    /// exactly what the inserts put in. Returns the number of events, and the document's new
-    /// length if known. A rejected run is left half stored, to be [taken back](Self::take_back).
-    fn store_run(&mut self, event: EventIndex, parents: &[EventIndex], ops: &[Edit], text: &str) -> Result<(u32, Option<u32>), Rejected> {
+    /// Stores a run's ops and text, and returns the number of events. The graph and the agent's
+    /// numbering are left to the caller.
+    fn store_run(&mut self, event: EventIndex, parents: &[EventIndex], ops: &[Edit], text: &str) -> u32 {
         let parts = |edit: &Edit| match *edit {
             Edit::Insert { pos, len } => (OpKind::Ins, true, pos, len),
             Edit::Delete { pos, len, backspace } => (OpKind::Del, !backspace, pos, len),
         };
-        let mut chars = self.chars_at(Some(parents));
         let mut follows = event > 0 && parents == [event - 1];
         let mut at = self.content.len() as u32;
         self.content.push_str(text);
-        let end = self.content.len() as u32;
+        let end = u32::try_from(self.content.len()).expect("more inserted text than a u32 counts");
         // Characters and bytes coincide in ASCII text. `plain` is where the text stops being
         // ASCII: found again only once an insert reaches it, since such characters are few.
         let ascii_until = |from: u32| from + ascii_prefix(&text.as_bytes()[(from - (end - text.len() as u32)) as usize..]) as u32;
@@ -345,15 +294,11 @@ impl OpLog {
         // left of it ends, and how much is left.
         let (mut next, mut open) = (event, None::<(u32, u32)>);
         for (kind, forward, pos, len) in ops.iter().map(parts).filter(|&(.., len)| len > 0) {
-            let after = next.checked_add(len).ok_or(Rejected::TooLarge)?;
-            if let Some(known) = chars {
-                chars = Some(after_edit(known, kind, pos, len)?);
-            }
             let bytes = match kind {
                 OpKind::Del => 0,
                 OpKind::Ins if len <= plain.saturating_sub(at) => len,
                 OpKind::Ins => {
-                    let bytes = self.prefix((at, end), len).ok_or(Rejected::TextMismatch)?;
+                    let bytes = self.prefix((at, end), len);
                     plain = ascii_until(at + bytes);
                     bytes
                 }
@@ -365,22 +310,10 @@ impl OpLog {
                 OpKind::Del if trims => open.map(|(end, left)| (end - len, left - len)),
                 OpKind::Del => None,
             };
-            (at, next, follows) = (at + bytes, after, true);
+            (at, next, follows) = (at + bytes, next.checked_add(len).expect("more events than a u32 counts"), true);
         }
-        if at != end {
-            return Err(Rejected::TextMismatch);
-        }
-        Ok((next - event, chars))
-    }
-
-    /// Takes back the ops and text that [`store_run`](Self::store_run) stored of a rejected run.
-    fn take_back(&mut self, (ops, last, content, totals): (usize, Option<Op>, usize, (u32, u32))) {
-        self.ops.truncate(ops);
-        if let (Some(last), Some(slot)) = (last, self.ops.last_mut()) {
-            *slot = last;
-        }
-        self.content.truncate(content);
-        self.totals = totals;
+        debug_assert_eq!(at, end, "the text is not what the inserts put in");
+        next - event
     }
 
     /// Appends a run of events of one kind, extending the last op when it simply carries on.
@@ -395,73 +328,32 @@ impl OpLog {
         pos: usize,
         len: usize,
         text: &str,
-    ) -> Result<Range<EventIndex>, Rejected> {
+    ) -> Range<EventIndex> {
         let event = self.graph.len();
         if len == 0 {
-            return Ok(event..event);
+            return event..event;
         }
-        let len = u32::try_from(len).map_err(|_| Rejected::TooLarge)?;
-        let pos = u32::try_from(pos).map_err(|_| Rejected::OutOfRange)?;
-        let next = self.check_source(agent, parents, text.len())?;
-        self.check_size(sequence_number.unwrap_or(next), len)?;
-        let chars = self.chars_at(parents).map(|chars| after_edit(chars, kind, pos, len)).transpose()?;
-        self.read_back(parents)?;
+        let len = u32::try_from(len).expect("more events than a u32 counts");
+        let pos = u32::try_from(pos).expect("a position past what a u32 counts");
         let (continues, events) = self.link(parents, len);
-        self.frontier_chars = chars;
         self.assign(agent, sequence_number, event, len);
         let at = self.content.len() as u32;
         self.content.push_str(text);
-        self.store(continues, Op { first_event: event, len, kind, forward, trims: false, pos, content: (at, self.content.len() as u32) });
-        Ok(events)
-    }
-
-    /// Checks where a run comes from before any of it is stored: that its agent and parents are
-    /// known, its parents ascending, and that its `text` bytes fit. Returns the agent's next
-    /// sequence number.
-    fn check_source(&self, agent: AgentId, parents: Option<&[EventIndex]>, text: usize) -> Result<SequenceNumber, Rejected> {
-        let next = *self.next_sequence_numbers.get(agent as usize).ok_or(Rejected::UnknownAgent)?;
-        if let Some(parents) = parents {
-            if !parents.is_sorted_by(|a, b| a < b) {
-                return Err(Rejected::ParentsOutOfOrder);
-            }
-            if parents.last().is_some_and(|&last| last >= self.graph.len()) {
-                return Err(Rejected::UnknownParent);
-            }
-        }
-        u32::try_from(self.content.len() + text).map_err(|_| Rejected::TooLarge)?;
-        Ok(next)
-    }
-
-    /// Checks that `len` more events, the first numbered `sequence_number` for its agent, can be
-    /// counted in 32 bits.
-    fn check_size(&self, sequence_number: SequenceNumber, len: u32) -> Result<(), Rejected> {
-        let fits = self.graph.len().checked_add(len).is_some() && sequence_number.checked_add(len).is_some();
-        if fits {
-            Ok(())
-        } else {
-            Err(Rejected::TooLarge)
-        }
-    }
-
-    /// Returns the document's length at version `parents`, or at the frontier without them, if
-    /// it is known without merging.
-    fn chars_at(&self, parents: Option<&[EventIndex]>) -> Option<u32> {
-        // The length is usually not known once history has been concurrent, so that is looked at
-        // first. Parents, checked to be ascending, are the frontier only if they equal it.
-        let chars = if self.graph.is_empty() { 0 } else { self.frontier_chars? };
-        parents.is_none_or(|parents| parents == self.graph.frontier()).then_some(chars)
+        let end = u32::try_from(self.content.len()).expect("more inserted text than a u32 counts");
+        self.store(continues, Op { first_event: event, len, kind, forward, trims: false, pos, content: (at, end) });
+        events
     }
 
     /// Reads back the saved history that an event made at `parents` needs, if it was made
     /// without all of it: with no parent held here, and not all of the old frontier for parents.
     /// A saved block starts at a critical version, so the event has all that comes before the
     /// block holding its latest parent.
-    fn read_back(&mut self, parents: Option<&[EventIndex]>) -> Result<(), Rejected> {
-        if let (Some(packed), Some(parents)) = (&self.packed, parents) {
+    fn read_back(&mut self, parents: &[EventIndex]) -> Result<(), Malformed> {
+        if let Some(packed) = &self.packed {
             let floor = self.graph.floor();
             if !parents.iter().any(|&parent| parent >= floor) && !packed.frontier.iter().all(|event| parents.contains(event)) {
                 let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent));
-                self.unpack_from(block).map_err(|_| Rejected::DamagedHistory)?;
+                self.unpack_from(block)?;
             }
         }
         Ok(())
@@ -544,14 +436,16 @@ impl OpLog {
         }
     }
 
-    /// Returns how many bytes the first `len` characters of the text at `content` take, or
-    /// `None` if it has fewer.
+    /// Returns how many bytes the first `len` characters of the text at `content` take.
     #[cold]
-    fn prefix(&self, content: ByteRange, len: u32) -> Option<u32> {
+    fn prefix(&self, content: ByteRange, len: u32) -> u32 {
         let text = self.text(content);
         match text.char_indices().nth(len as usize) {
-            Some((bytes, _)) => Some(bytes as u32),
-            None => (text.chars().count() == len as usize).then_some(text.len() as u32),
+            Some((bytes, _)) => bytes as u32,
+            None => {
+                debug_assert_eq!(text.chars().count(), len as usize, "the text is not what the inserts put in");
+                text.len() as u32
+            }
         }
     }
 
@@ -561,7 +455,7 @@ impl OpLog {
         if content.1 - content.0 == len {
             return (content.0, content.1 - cut);
         }
-        (content.0, content.0 + self.prefix(content, len - cut).expect("an insert's text holds its characters"))
+        (content.0, content.0 + self.prefix(content, len - cut))
     }
 
     /// Returns the agent that made `event`, and its sequence number.

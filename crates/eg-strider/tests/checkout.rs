@@ -6,7 +6,7 @@ use eg_strider::{Edit, EventIndex, OpLog};
 fn concurrent_edits_that_keep_apart_are_merged_by_shifting() {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-    let base = [log.add_insert(a, 0, "one two three four").unwrap().end - 1];
+    let base = [log.add_insert(a, 0, "one two three four").end - 1];
     let x = log.add_delete_at(a, &base, 0..3, true).unwrap(); // " two three four"
     let x = log.add_insert_at(a, &[x.end - 1], 0, "1").unwrap(); // "1 two three four"
     let y = log.add_insert_at(b, &base, 18, "!").unwrap(); // "one two three four!"
@@ -22,7 +22,7 @@ fn concurrent_edits_that_keep_apart_are_merged_by_shifting() {
 fn concurrent_edits_at_one_place_go_to_the_tracker() {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-    let base = [log.add_insert(a, 0, "<>").unwrap().end - 1];
+    let base = [log.add_insert(a, 0, "<>").end - 1];
     log.add_insert_at(a, &base, 1, "x").unwrap();
     log.add_insert_at(b, &base, 1, "y").unwrap();
     assert_eq!(log.checkout(), "<xy>");
@@ -34,10 +34,10 @@ fn concurrent_edits_at_one_place_go_to_the_tracker() {
 fn sequential_edits() {
     let mut log = OpLog::new();
     let a = log.get_or_create_agent("a");
-    log.add_insert(a, 0, "hello").unwrap();
-    log.add_insert(a, 5, " world").unwrap();
-    log.add_delete(a, 0..1).unwrap();
-    log.add_insert(a, 0, "H").unwrap();
+    log.add_insert(a, 0, "hello");
+    log.add_insert(a, 5, " world");
+    log.add_delete(a, 0..1);
+    log.add_insert(a, 0, "H");
     assert_eq!(log.checkout(), "Hello world");
 }
 
@@ -47,11 +47,11 @@ fn sequential_edits() {
 fn paper_figure_4() {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-    let base = log.add_insert(a, 0, "hi").unwrap().end - 1;
+    let base = log.add_insert(a, 0, "hi").end - 1;
     log.add_insert_at(a, &[base], 0, "H").unwrap();
     let left = log.add_delete_at(a, &[base + 1], 1..2, true).unwrap().end - 1;
     log.add_delete_at(b, &[base], 1..2, true).unwrap();
-    let right = log.add_insert(b, 1, "ey").unwrap().end - 1;
+    let right = log.add_insert(b, 1, "ey").end - 1;
     log.add_insert_at(a, &[left, right], 3, "!").unwrap();
     assert_eq!(log.checkout(), "Hey!");
 }
@@ -69,7 +69,7 @@ fn concurrent_inserts_at_one_position_do_not_interleave() {
 fn concurrent_deletes_of_the_same_text() {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-    let base = log.add_insert(a, 0, "abcdef").unwrap().end - 1;
+    let base = log.add_insert(a, 0, "abcdef").end - 1;
     let left = log.add_delete_at(a, &[base], 1..4, true).unwrap().end - 1;
     let right = log.add_delete_at(b, &[base], 2..5, false).unwrap().end - 1;
     log.add_insert_at(a, &[left, right], 1, "X").unwrap();
@@ -80,7 +80,7 @@ fn concurrent_deletes_of_the_same_text() {
 fn checking_out_again_and_after_growing_gives_the_same_document() {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-    let base = log.add_insert(a, 0, "0123456789").unwrap().end - 1;
+    let base = log.add_insert(a, 0, "0123456789").end - 1;
     let left = log.add_insert_at(a, &[base], 3, "aa").unwrap().end - 1;
     let right = log.add_delete_at(b, &[base], 2..6, false).unwrap().end - 1;
     let merged = log.add_insert_at(b, &[left, right], 2, "!").unwrap().end - 1;
@@ -108,7 +108,7 @@ fn checking_out_again_and_after_growing_gives_the_same_document() {
 fn an_event_made_partway_through_a_run_of_backspaces() {
     let mut log = OpLog::new();
     let (a, b, c) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"), log.get_or_create_agent("c"));
-    let base = log.add_insert(a, 0, "abcdef").unwrap().end - 1;
+    let base = log.add_insert(a, 0, "abcdef").end - 1;
     let backspaces = log.add_delete_at(a, &[base], 2..6, false).unwrap(); // "ab", removing f, e, d, c in turn
     log.add_insert_at(c, &[base], 4, "Y").unwrap(); // "abcdYef"
     assert_eq!(log.checkout(), "abY");
@@ -180,7 +180,7 @@ fn a_run_that_follows_earlier_typing_is_merged_with_it() {
     let (mut together, mut apart) = (OpLog::new(), OpLog::new());
     for log in [&mut together, &mut apart] {
         let a = log.get_or_create_agent("a");
-        log.add_insert(a, 0, "xyz").unwrap();
+        log.add_insert(a, 0, "xyz");
     }
     let (a, tip) = (together.get_or_create_agent("b"), together.frontier());
     together.add_remote_ops(a, 0, &tip, &ops, text).unwrap();
@@ -199,8 +199,8 @@ fn an_event_from_before_the_last_merge_is_merged_into_it() {
         let build = |merge_halfway: bool| {
             let mut log = OpLog::new();
             let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-            let start = log.add_insert(a, 0, "0123456789").unwrap().end - 1;
-            let half = |log: &mut OpLog, at: usize| if deleting { log.add_delete(a, 2..4).unwrap() } else { log.add_insert(a, at, "é🙂").unwrap() };
+            let start = log.add_insert(a, 0, "0123456789").end - 1;
+            let half = |log: &mut OpLog, at: usize| if deleting { log.add_delete(a, 2..4) } else { log.add_insert(a, at, "é🙂") };
             half(&mut log, 5);
             if merge_halfway {
                 log.checkout();

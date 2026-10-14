@@ -130,7 +130,6 @@ impl OpLog {
 
         log.graph = Graph::after(events, &frontier);
         log.base = Base { events, chars, text };
-        log.frontier_chars = Some(chars);
         log.packed = (events > 0).then_some(Packed { bytes, blocks, starts, frontier });
         Ok(log)
     }
@@ -152,7 +151,7 @@ impl OpLog {
 
         let mut packed = self.packed.take().expect("the saved history was just read");
         let later = std::mem::replace(self, read);
-        (self.next_sequence_numbers, self.memo, self.frontier_chars) = (later.next_sequence_numbers, later.memo, later.frontier_chars);
+        (self.next_sequence_numbers, self.memo) = (later.next_sequence_numbers, later.memo);
         (self.base, self.latest) = (later.base, later.latest);
         self.memo.outdate();
         let shift = self.content.len() as u32;

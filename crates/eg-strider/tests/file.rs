@@ -5,13 +5,13 @@ use eg_strider::{Edit, EventIndex, Malformed, OpLog};
 fn history() -> OpLog {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-    let base = log.add_insert(a, 0, "one two thrée four").unwrap().end - 1;
+    let base = log.add_insert(a, 0, "one two thrée four").end - 1;
     let left = log.add_delete_at(a, &[base], 2..7, false).unwrap();
     log.add_insert_at(b, &[left.start + 1], 4, "🙂").unwrap();
     let right = log.add_insert_at(b, &[base], 18, "!").unwrap().end - 1;
     let merged = log.add_insert_at(a, &[left.end - 1, right], 0, "> ").unwrap().end - 1;
     log.add_delete_at(b, &[merged], 0..1, true).unwrap();
-    log.add_insert(a, 0, "é").unwrap();
+    log.add_insert(a, 0, "é");
     // A run that arrives together, with a correction of what it has just typed.
     let (c, tip) = (log.get_or_create_agent("c"), log.frontier());
     let run = [Edit::Insert { pos: 1, len: 4 }, Edit::Delete { pos: 3, len: 2, backspace: true }, Edit::Insert { pos: 3, len: 1 }];
@@ -57,7 +57,7 @@ fn a_loaded_log_carries_on_as_the_original_does() {
         // Typing on at the end needs none of the saved history.
         for log in [&mut log, &mut loaded] {
             let a = log.get_or_create_agent("a");
-            log.add_insert(a, 1, "on ").unwrap();
+            log.add_insert(a, 1, "on ");
         }
         assert_eq!(loaded.checkout(), log.checkout());
         // An event made at an old version does.
@@ -77,7 +77,7 @@ fn an_event_at_an_old_version_reads_only_the_history_since() {
     let mut log = OpLog::new();
     let a = log.get_or_create_agent("a");
     for at in (0..EVENTS as usize).step_by(4) {
-        log.add_insert(a, at, "abcd").unwrap();
+        log.add_insert(a, at, "abcd");
     }
     let mut loaded = OpLog::load(log.save()).unwrap();
     assert_eq!(loaded.unread(), EVENTS as usize);
@@ -102,12 +102,37 @@ fn an_event_at_an_old_version_reads_only_the_history_since() {
     assert_eq!(OpLog::load(loaded.save()).unwrap().checkout(), log.checkout());
 }
 
+/// When saved history is damaged, reading it back for an edit made at an old version fails, and
+/// the log is as it was.
+#[test]
+fn damaged_saved_history_is_refused_when_read_back() {
+    let mut log = OpLog::new();
+    let a = log.get_or_create_agent("a");
+    for at in (0..100_000).step_by(4) {
+        log.add_insert(a, at, "abcd");
+    }
+    let mut saved = log.save();
+    // The file ends with its newest block of history, which any edit at an old version needs.
+    let end = saved.len();
+    saved[end - 32..].iter_mut().for_each(|byte| *byte ^= 0x5a);
+
+    let mut loaded = OpLog::load(saved.clone()).unwrap();
+    let (len, text) = (loaded.len(), loaded.checkout().to_string());
+    let b = loaded.get_or_create_agent("b");
+    assert_eq!(loaded.add_insert_at(b, &[10], 5, "old"), Err(Malformed));
+    assert_eq!((loaded.len(), loaded.checkout()), (len, text.as_str()));
+    // Typing on at the end needs none of it.
+    loaded.add_insert(b, 0, "ok ");
+    assert_eq!(loaded.checkout(), format!("ok {text}"));
+    assert!(OpLog::load(saved).unwrap().forget().is_err());
+}
+
 #[test]
 fn an_empty_log_is_saved_and_loaded() {
     let mut loaded = OpLog::load(OpLog::new().save()).unwrap();
     assert_eq!((loaded.len(), loaded.is_empty(), loaded.checkout()), (0, true, ""));
     let a = loaded.get_or_create_agent("a");
-    loaded.add_insert(a, 0, "hi").unwrap();
+    loaded.add_insert(a, 0, "hi");
     assert_eq!(loaded.checkout(), "hi");
 }
 
