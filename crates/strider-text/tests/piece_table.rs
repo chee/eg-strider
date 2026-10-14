@@ -29,7 +29,12 @@ fn check(steps: &[Step]) -> Result<(), TestCaseError> {
     // `text` there.
     let mut made: Vec<(usize, usize, &str)> = Vec::new();
     let mut cursor = 0;
-    for step in steps {
+    // The document halfway through, to take the later edits back to.
+    let mut halfway = String::new();
+    for (i, step) in steps.iter().enumerate() {
+        if i == steps.len() / 2 {
+            halfway = plain.iter().collect();
+        }
         let (pos, removed, text) = match step {
             Step::Insert { at, text } => (at.index(plain.len() + 1), 0, text.as_str()),
             Step::Type { text } => (cursor, 0, text.as_str()),
@@ -56,6 +61,17 @@ fn check(steps: &[Step]) -> Result<(), TestCaseError> {
         table.undo_remove(pos as u32, removed as u32);
         end -= text.len();
     }
+    prop_assert_eq!(table.into_string(), plain.iter().collect::<String>());
+
+    // Taking back only the second half, and the first half all at once from its text.
+    let mut table = PieceTable::new(plain.len() as u32, &source);
+    let mut end = source.len();
+    for &(pos, removed, text) in made[steps.len() / 2..].iter().rev() {
+        table.undo_insert(pos as u32, end - text.len()..end, text.chars().count() as u32);
+        table.undo_remove(pos as u32, removed as u32);
+        end -= text.len();
+    }
+    table.undo_rest(&halfway);
     prop_assert_eq!(table.into_string(), plain.iter().collect::<String>());
     Ok(())
 }

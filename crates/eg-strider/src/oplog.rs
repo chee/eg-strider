@@ -9,7 +9,7 @@ mod file;
 
 pub use file::Malformed;
 
-use crate::replay::{self, Memo};
+use crate::replay::{self, Base, Memo};
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::Graph;
@@ -84,6 +84,11 @@ pub struct OpLog {
     next_seq: Vec<u32>,
     agent_runs: Vec<AgentRun>,
     memo: Memo,
+    /// The document at a critical version, which the next merge starts from.
+    base: Base,
+    /// The document with every event merged and how many events that is, when the log ends
+    /// with events that are concurrent with one another and so cannot be a base.
+    latest: Option<(u32, String)>,
     /// Reused to hold the parents of the event being added.
     parents: Vec<u32>,
     /// How many characters the inserts put in, and how many the deletes take out.
@@ -134,12 +139,28 @@ impl OpLog {
         self.graph.frontier().iter().map(|&lv| lv as LV).collect()
     }
 
-    /// Merges every event in the log and returns the document.
-    pub fn checkout(&mut self) -> String {
-        let mut memo = std::mem::take(&mut self.memo);
-        let doc = replay::checkout(self, &mut memo);
-        self.memo = memo;
-        doc
+    /// Merges every event in the log and returns the document. Only the events since the
+    /// last merge are gone through, where the history allows it.
+    pub fn checkout(&mut self) -> &str {
+        let len = self.graph.len();
+        if self.base.events != len && self.latest.as_ref().is_none_or(|latest| latest.0 != len) {
+            let mut memo = std::mem::take(&mut self.memo);
+            let (text, chars) = replay::checkout(self, &mut memo, &self.base);
+            self.memo = memo;
+            // With one head, every event to come has all of these in its history unless it
+            // is made at an older version, which `link` looks out for.
+            if self.graph.frontier().len() == 1 {
+                (self.base, self.latest) = (Base { events: len, chars, text }, None);
+            } else {
+                self.latest = Some((len, text));
+            }
+        }
+        self.document()
+    }
+
+    /// Returns the document as of the last merge.
+    pub(crate) fn document(&self) -> &str {
+        self.latest.as_ref().map_or(&self.base.text, |latest| &latest.1)
     }
 
     /// Returns how many regions the last checkout could not merge by shifting alone.
@@ -149,7 +170,7 @@ impl OpLog {
 
     /// Drops everything earlier checkouts worked out. The next one starts from scratch.
     pub fn forget(&mut self) {
-        self.memo = Memo::default();
+        (self.memo, self.base, self.latest) = (Memo::default(), Base::default(), None);
     }
 
     /// Inserts `text` at `pos` in the document as of the current frontier.
@@ -269,6 +290,10 @@ impl OpLog {
         }
         let events = self.graph.push(&at, len);
         self.parents = at;
+        if self.graph.last_seen() < self.base.events {
+            // Made at a version from before the base, which is then no base for a merge.
+            (self.base, self.latest) = (Base::default(), None);
+        }
         (false, events)
     }
 
@@ -370,6 +395,11 @@ impl OpLog {
         let straddles = self.ops.get(ops.end as usize).is_some_and(|op| op.lv < events.end);
         let count = if events.is_empty() { 0 } else { (ops.end - ops.start) as usize + straddles as usize };
         self.ops[ops.start as usize..][..count].iter().map(move |op| self.slice(op, &events))
+    }
+
+    /// Finds the index of the op containing event `lv`.
+    pub(crate) fn op_containing(&self, lv: u32) -> u32 {
+        self.ops.partition_point(|op| op.lv + op.len <= lv) as u32
     }
 
     /// Returns all the inserted text, which an [`OpSlice`]'s range is a stretch of.

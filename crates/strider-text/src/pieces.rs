@@ -223,6 +223,16 @@ impl Pieces {
         }
     }
 
+    /// Iterates over the pieces in document order: each one's length, and where its first
+    /// character is in the final text if it survives.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, Option<u32>)> + '_ {
+        let pieces = self.order.iter().flat_map(|&id| {
+            let chunk = &self.chunks[id as usize];
+            &chunk.pieces[..chunk.len]
+        });
+        pieces.map(|piece| (piece.len, Some(piece.at).filter(|&at| at != DELETED)))
+    }
+
     /// Finds the chunk that position `pos` is in, or at either end of: its place in `order`, and
     /// the position where it starts.
     fn chunk_at(&mut self, pos: u32) -> (usize, u32) {

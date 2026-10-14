@@ -90,13 +90,13 @@ fn checking_out_again_and_after_growing_gives_the_same_document() {
     // A late branch from before the merge reopens the region and extends it.
     log.add_insert_at(a, &[left], 0, ">");
     log.add_insert_at(b, &[merged], 0, "#");
-    let grown = log.checkout();
+    let grown = log.checkout().to_string();
     log.forget();
     assert_eq!(grown, log.checkout());
 
     // An event concurrent with the whole history leaves no critical version but the first.
     log.add_insert_at(a, &[], 0, "~");
-    let regrown = log.checkout();
+    let regrown = log.checkout().to_string();
     log.forget();
     assert_eq!(regrown, log.checkout());
 }

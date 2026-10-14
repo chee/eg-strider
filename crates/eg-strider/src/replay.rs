@@ -79,6 +79,16 @@ struct Kept {
 
 const DESCENDING: u32 = 1 << 31;
 
+/// The document at a critical version: every event after its first `events` has all of
+/// those in its history, so a merge can start from here.
+#[derive(Default)]
+pub(crate) struct Base {
+    pub events: u32,
+    /// The length of `text` in characters.
+    pub chars: u32,
+    pub text: String,
+}
+
 /// What a log has worked out in earlier replays.
 #[derive(Default)]
 pub(crate) struct Memo {
@@ -139,8 +149,22 @@ impl Plan {
     /// there.
     #[inline]
     fn ops<'a>(&self, log: &'a OpLog, stretch: &Range<usize>) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
-        let blocks = log.graph.blocks();
-        log.ops(self.first_op[stretch.start]..self.first_op[stretch.end], blocks.start(stretch.start)..blocks.start(stretch.end))
+        self.ops_from(log, stretch, log.graph.blocks().start(stretch.start))
+    }
+
+    /// Iterates over the ops of a stretch of blocks from event `from` on, which is in it.
+    #[inline]
+    fn ops_from<'a>(&self, log: &'a OpLog, stretch: &Range<usize>, from: u32) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
+        log.ops(self.op_at(log, stretch, from)..self.first_op[stretch.end], from..log.graph.blocks().start(stretch.end))
+    }
+
+    /// Finds the op containing event `from` of a stretch of blocks.
+    fn op_at(&self, log: &OpLog, stretch: &Range<usize>, from: u32) -> u32 {
+        if from == log.graph.blocks().start(stretch.start) {
+            self.first_op[stretch.start]
+        } else {
+            log.op_containing(from)
+        }
     }
 
     /// Counts the regions that have been through the tracker.
@@ -156,8 +180,9 @@ impl Memo {
     }
 }
 
-/// Merges every event in the log into the document's text, reusing and updating `memo`.
-pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
+/// Merges the log's events after `base` into the document that `base` holds, reusing and
+/// updating `memo`. Returns the text and its length in characters.
+pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u32) {
     // The log only ever grows, so the same length means the same events.
     if memo.plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
         memo.plan = Some(Plan::new(log, memo.plan.take()));
@@ -169,17 +194,24 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     // that is needed of them for now is what they do to the document's length.
     let blocks = log.graph.blocks();
     let events = |stretch: &Range<usize>| blocks.start(stretch.start)..blocks.start(stretch.end);
-    let mut doc = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: 0 };
+    let mut doc = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: base.chars };
     let mut workspace = Workspace::default();
+    // The segments that have events after the base, and for each the first of those: the
+    // base may fall partway through a linear one, but never inside a region.
+    let after = |segment: &Segment| Some(events(segment.blocks())).filter(|events| events.end > base.events).map(|events| events.start.max(base.events));
     for (segment, kept) in plan.segments.iter().zip(&mut kept) {
+        let Some(from) = after(segment) else { continue };
         match segment {
             Segment::Linear(linear) => {
                 // A history with no concurrency is one stretch, and the log keeps its count.
-                let whole = plan.segments.len() == 1;
-                let (inserted, removed) = if whole { log.total_lengths() } else { log.lengths(plan.first_op[linear.start], events(linear)) };
+                let whole = plan.segments.len() == 1 && from == blocks.start(0);
+                let (inserted, removed) = if whole { log.total_lengths() } else { log.lengths(plan.op_at(log, linear, from), from..blocks.start(linear.end)) };
                 doc.len = doc.len + inserted - removed;
             }
-            Segment::Region(region) => merge_region(log, plan, region, kept, &mut workspace, &mut doc),
+            Segment::Region(region) => {
+                debug_assert_eq!(from, blocks.start(region.start), "a base inside a region");
+                merge_region(log, plan, region, kept, &mut workspace, &mut doc)
+            }
         }
     }
     // The text is built without the room that merging took.
@@ -195,9 +227,10 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
     let mut place = || places.next().expect("a place for every op of a region");
     let mut trims: Vec<OpSlice> = Vec::new();
     for segment in plan.segments.iter().rev() {
+        let Some(from) = after(segment) else { break };
         match segment {
             Segment::Linear(linear) => {
-                for op in plan.ops(log, linear).rev() {
+                for op in plan.ops_from(log, linear, from).rev() {
                     // A delete that takes back the end of the insert before it is met first.
                     // The two together are a shorter insert, so it only has to be counted.
                     if op.trims {
@@ -239,7 +272,9 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo) -> String {
             }
         }
     }
-    text.into_string()
+    // What is left is the document at the base, whose text is already known.
+    text.undo_rest(&base.text);
+    (text.into_string(), doc.len)
 }
 
 /// Merges one region, recording in `doc` where its ops go.

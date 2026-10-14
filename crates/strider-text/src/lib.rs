@@ -136,6 +136,39 @@ impl<'a> PieceTable<'a> {
         self.pieces.insert_deleted(pos, len);
     }
 
+    /// Takes back every edit that is left at once, given the text they made: the document as
+    /// it stands with the later edits taken back. Whatever of `text` survives goes straight to
+    /// its place in the final text.
+    pub fn undo_rest(&mut self, text: &str) {
+        let (slots, wide) = (&mut self.slots, &mut self.wide);
+        if text.len() == self.len as usize {
+            // All ASCII: characters and bytes coincide.
+            let mut from = 0;
+            for (len, at) in self.pieces.iter() {
+                if let Some(at) = at {
+                    slots[at as usize..(at + len) as usize].copy_from_slice(&text.as_bytes()[from..from + len as usize]);
+                }
+                from += len as usize;
+            }
+        } else {
+            let mut rest = text.chars();
+            for (len, at) in self.pieces.iter() {
+                let Some(at) = at else {
+                    rest.nth(len as usize - 1);
+                    continue;
+                };
+                for (at, ch) in (at as usize..).zip(rest.by_ref().take(len as usize)) {
+                    slots[at] = if ch.is_ascii() { ch as u8 } else { WIDE };
+                    if !ch.is_ascii() {
+                        wide.set(at, ch);
+                    }
+                }
+            }
+            assert!(rest.next().is_none(), "the text is not the document as it stands");
+        }
+        self.len = 0;
+    }
+
     /// Returns the final text. Every edit must have been taken back.
     pub fn into_string(mut self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");

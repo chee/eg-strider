@@ -30,7 +30,7 @@ impl OpLog {
     /// Writes out the log with the document it merges to, as a file that [`load`](Self::load)
     /// reads back without merging anything.
     pub fn save(&mut self) -> Vec<u8> {
-        let text = self.checkout();
+        let text = self.checkout().to_string();
         let mut columns = Vec::new();
         column(&mut columns, |out| {
             number(out, self.agent_names.len());

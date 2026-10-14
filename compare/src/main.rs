@@ -102,12 +102,12 @@ fn replayed<R: compare::replicas::Replica>(path: &str, kind: &str, dt: &ListOpLo
 }
 
 /// Appends a history to a new eg-strider log through its calls for remote edits, then merges
-/// it.
-fn strider_merge(history: &History) -> (OpLog, String) {
+/// it. The log holds the document.
+fn strider_merge(history: &History) -> OpLog {
     let mut log = OpLog::new();
     compare::extend(&mut log, history, usize::MAX);
-    let text = log.checkout();
-    (log, text)
+    log.checkout();
+    log
 }
 
 /// Appends a history to a new diamond-types oplog through its call for remote edits.
@@ -321,8 +321,8 @@ fn main() {
         .collect();
     assert!(!paths.is_empty(), "usage: compare <trace.dt>... [--reps N]");
 
-    println!("merging a history whose ops are in memory: appending them, then merging; and merging again with what the first merge kept");
-    println!("{:6} {:>8} {:>32} {:>42} {:>12}  result", "trace", "events", "diamond-types", "eg-strider", "again");
+    println!("merging a history whose ops are in memory: appending them, then merging; and then one more edit at the end, merged on top");
+    println!("{:6} {:>8} {:>32} {:>42} {:>12}  result", "trace", "events", "diamond-types", "eg-strider", "one more");
     let mut all_match = true;
     let (mut merges, mut opens, mut others, mut json) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for path in paths {
@@ -333,6 +333,7 @@ fn main() {
         let (dt_history, held_by_dt_history) = memory_of(|| History::of(&dt));
         let (history, held_by_history) = memory_of(|| dt_history.edits());
         let expected = dt.checkout_tip().content().to_string();
+        let expected_chars = expected.chars().count();
 
         // The two systems under comparison take turns, each straight after the other, which
         // is slower for both than running one of them over and over. The first runs of a short
@@ -353,12 +354,15 @@ fn main() {
             let mut log = OpLog::new();
             compare::extend(&mut log, &history, usize::MAX);
             let append_ms = since(t);
-            let text = log.checkout();
+            same &= log.checkout() == expected;
             let merge_ms = since(t);
+            // One more edit at the end, merged on top of what is there.
+            let typist = log.get_or_create_agent("typist");
             let t = Instant::now();
-            let again = log.checkout();
+            log.add_insert(typist, expected_chars, "!");
+            let merged = log.checkout().len();
             let again_ms = since(t);
-            same &= text == expected && again == expected;
+            same &= merged == expected.len() + 1;
 
             if started.elapsed() >= WARM_UP {
                 for (times, ms) in times.iter_mut().zip([dt_append_ms, dt_ms, append_ms, merge_ms, again_ms]) {
@@ -373,7 +377,7 @@ fn main() {
         let [dt_append_ms, dt_ms, append_ms, merge_ms, again_ms] = times.map(median);
 
         // Reopening, each from its own saved document.
-        let saved = strider_merge(&history).0.save();
+        let saved = strider_merge(&history).save();
         let dt_saved = dt_save(&bytes, &expected);
         let (open_ms, reopened) = median_of(reps, || (), |()| OpLog::load(&saved).unwrap());
         let (dt_open_ms, dt_reopened) = median_of(reps, || (), |()| dt_open(&dt_saved));

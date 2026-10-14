@@ -55,6 +55,12 @@ impl Graph {
         !self.is_empty() && parents == [self.len() - 1]
     }
 
+    /// Returns how many events from the start of history are known to be in the history of
+    /// the last block's first event: all of them, if it starts at a critical version.
+    pub fn last_seen(&self) -> u32 {
+        self.seen.last().copied().unwrap_or(0)
+    }
+
     /// Returns the graph's blocks.
     pub fn blocks(&self) -> &Blocks {
         &self.blocks
