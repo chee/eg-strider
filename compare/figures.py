@@ -118,7 +118,7 @@ def main(results_path, out_dir):
     sizes = [(2**20 * 10**k, text) for k, text in ((-2, "0.01 MiB"), (-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
     trace = ("text", "Raw text")
     charts = {
-        "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to merge a history whose ops are already in memory. {runs}", TIMES, share=["open_ms"]),
+        "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES, share=["open_ms"]),
         "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES, share=["merge_ms"]),
         "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, trace, ["merge_kept"], ("merge_ops", "ops")),
         "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, trace, ["merge_peak"]),
