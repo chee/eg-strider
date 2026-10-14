@@ -50,9 +50,9 @@ impl Graph {
         self.blocks.start(self.blocks.len())
     }
 
-    /// Tells whether the graph has no events.
+    /// Tells whether the graph has no events, held or before its floor.
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.len() == 0
     }
 
     /// Returns the events nothing descends from yet, ascending.
@@ -62,7 +62,7 @@ impl Graph {
 
     /// Tells whether an event with these parents just extends the last event.
     pub fn continues(&self, parents: &[EventIndex]) -> bool {
-        !self.is_empty() && parents == [self.len() - 1]
+        !self.blocks.is_empty() && parents == [self.len() - 1]
     }
 
     /// If some later event has not seen every event before `at`, starts a block at `at` and

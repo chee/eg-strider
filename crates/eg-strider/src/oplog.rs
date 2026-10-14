@@ -446,13 +446,10 @@ impl OpLog {
     /// Returns the document's length at version `parents`, or at the frontier without them, if
     /// it is known without merging.
     fn chars_at(&self, parents: Option<&[EventIndex]>) -> Option<u32> {
-        let frontier = self.graph.frontier();
-        let at_frontier = parents.is_none_or(|parents| parents.len() == frontier.len() && frontier.iter().all(|event| parents.contains(event)));
-        match self.graph.len() {
-            _ if !at_frontier => None,
-            0 => Some(0),
-            _ => self.frontier_chars,
-        }
+        // The length is usually not known once history has been concurrent, so that is looked at
+        // first. Parents, checked to be ascending, are the frontier only if they equal it.
+        let chars = if self.graph.is_empty() { 0 } else { self.frontier_chars? };
+        parents.is_none_or(|parents| parents == self.graph.frontier()).then_some(chars)
     }
 
     /// Reads back the saved history that an event made at `parents` needs, if it was made

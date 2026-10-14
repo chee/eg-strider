@@ -44,7 +44,7 @@ fn a_saved_log_loads_with_its_document() {
         let saved = log.save();
         let mut loaded = OpLog::load(saved.clone()).unwrap();
         assert_eq!(loaded.checkout(), log.checkout());
-        assert_eq!(loaded.len(), log.len());
+        assert_eq!((loaded.len(), loaded.is_empty()), (log.len(), false));
         assert_eq!(loaded.frontier(), log.frontier());
         assert_eq!(loaded.save(), saved);
     }
@@ -105,7 +105,7 @@ fn an_event_at_an_old_version_reads_only_the_history_since() {
 #[test]
 fn an_empty_log_is_saved_and_loaded() {
     let mut loaded = OpLog::load(OpLog::new().save()).unwrap();
-    assert_eq!((loaded.len(), loaded.checkout()), (0, ""));
+    assert_eq!((loaded.len(), loaded.is_empty(), loaded.checkout()), (0, true, ""));
     let a = loaded.get_or_create_agent("a");
     loaded.add_insert(a, 0, "hi").unwrap();
     assert_eq!(loaded.checkout(), "hi");
