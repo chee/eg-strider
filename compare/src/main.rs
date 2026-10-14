@@ -279,27 +279,72 @@ struct Measured {
     same: bool,
 }
 
-/// Measures a library on the two tasks. `ops` puts a history's ops in memory, untimed but
+/// One run of merging: the milliseconds taken, then for eg-strider and diamond-types those spent
+/// appending, then for eg-strider those one more edit at the end takes. And whether the text was
+/// diamond-types'.
+type MergeRun = ([f64; 3], bool);
+
+/// A library's two tasks, each run once per call, so that every library takes its turn.
+struct Turns<'a> {
+    merge: Box<dyn FnMut() -> MergeRun + 'a>,
+    open: Box<dyn FnMut() -> f64 + 'a>,
+}
+
+/// Checks a library on the two tasks and measures their memory, then sets them up to be timed
+/// in turns with the other libraries'. `ops` puts a history's ops in memory, untimed but
 /// counted. A document's text is read only to check it, outside the times and memory.
-fn measure<O, D>(
-    reps: u32,
+fn prepare<'a, O: 'a, D: 'a>(
     expected: &str,
-    ops: impl Fn() -> O,
-    merge: impl Fn(O) -> D,
+    ops: impl Fn() -> O + 'a,
+    merge: impl Fn(O) -> D + 'a,
     text: impl Fn(&D) -> String,
     save: impl Fn(&mut D) -> Vec<u8>,
-    open: impl Fn(&[u8]) -> D,
-) -> Measured {
+    open: impl Fn(&[u8]) -> D + 'a,
+) -> (Measured, Turns<'a>) {
     let mut document = merge(ops());
     let saved = save(&mut document);
     let same = text(&document) == expected && text(&open(&saved)) == expected;
     drop(document);
-    let merge_ms = median_of(reps, &ops, &merge).0;
-    let open_ms = median_of(reps, || (), |()| open(&saved)).0;
     let held_by_ops = memory_of(&ops).1.kept;
     let merging = memory_of(|| merge(ops())).1;
     let opening = memory_of(|| open(&saved)).1;
-    Measured { merge_ms, ops: held_by_ops, merging, open_ms, opening, saved: saved.len(), same }
+    let measured = Measured { merge_ms: f64::NAN, ops: held_by_ops, merging, open_ms: f64::NAN, opening, saved: saved.len(), same };
+    let turns = Turns {
+        merge: Box::new(move || {
+            let input = ops();
+            let t = Instant::now();
+            let document = merge(input);
+            let ms = since(t);
+            drop(document);
+            ([ms, f64::NAN, f64::NAN], true)
+        }),
+        open: Box::new(move || {
+            let t = Instant::now();
+            let document = open(&saved);
+            let ms = since(t);
+            drop(document);
+            ms
+        }),
+    };
+    (measured, turns)
+}
+
+/// Runs every library's task in turns, each run straight after another library's, until each
+/// has `reps` runs that count. The first runs of a short task are up to twice as slow as the
+/// rest, until the processor has sped up, so runs only count once some time has gone by.
+fn in_turns<T>(reps: u32, tasks: &mut [&mut dyn FnMut() -> T]) -> Vec<Vec<T>> {
+    let mut runs: Vec<Vec<T>> = tasks.iter().map(|_| Vec::with_capacity(reps as usize)).collect();
+    let started = Instant::now();
+    while runs.first().is_some_and(|runs| runs.len() < reps as usize) {
+        for (task, runs) in tasks.iter_mut().zip(&mut runs) {
+            let counts = started.elapsed() >= WARM_UP;
+            let run = task();
+            if counts {
+                runs.push(run);
+            }
+        }
+    }
+    runs
 }
 
 /// Returns the milliseconds since `start`.
@@ -394,64 +439,118 @@ fn main() {
         drop(end_content);
         let expected_chars = expected.chars().count();
 
-        // The two systems under comparison take turns, each straight after the other, which
-        // is slower for both than running one of them over and over. The first runs of a short
-        // task are up to twice as slow as the rest, until the processor has sped up, so runs
-        // only count once some time has gone by.
-        let mut times: [Vec<f64>; 5] = std::array::from_fn(|_| Vec::with_capacity(reps as usize));
-        let (mut same, started) = (true, Instant::now());
-        while times[0].len() < reps as usize {
-            let t = Instant::now();
-            let oplog = dt_append(&dt_history);
-            let dt_append_ms = since(t);
-            let branch = oplog.checkout_tip();
-            let dt_ms = since(t);
-            same &= branch.content() == expected;
-            drop((oplog, branch));
-
+        // Each library's two tasks, run in turns: each run straight after another library's, as
+        // a merge in an application runs after other code. eg-strider also times its appending
+        // and one more edit at the end, merged on top of what is there.
+        let saved = strider_merge(&history).save();
+        let dt_saved = dt_save(&dt_append(&dt_history), &expected);
+        let mut strider_merge_once = || {
             let t = Instant::now();
             let mut log = OpLog::new();
             compare::extend(&mut log, &history, usize::MAX);
             let append_ms = since(t);
             let merged = log.checkout();
             let merge_ms = since(t);
-            same &= merged == expected;
-            // One more edit at the end, merged on top of what is there.
+            let mut same = merged == expected;
             let typist = log.get_or_create_agent("typist");
             let t = Instant::now();
             log.add_insert(typist, expected_chars, "!");
             let merged = log.checkout().len();
             let again_ms = since(t);
             same &= merged == expected.len() + 1;
+            ([merge_ms, append_ms, again_ms], same)
+        };
+        let mut dt_merge_once = || {
+            let t = Instant::now();
+            let oplog = dt_append(&dt_history);
+            let append_ms = since(t);
+            let branch = oplog.checkout_tip();
+            let ms = since(t);
+            let same = branch.content() == expected;
+            ([ms, append_ms, f64::NAN], same)
+        };
+        // eg-strider takes the file's bytes to keep, so each run is handed its own.
+        let mut strider_open_once = || {
+            let bytes = saved.clone();
+            let t = Instant::now();
+            let mut log = OpLog::load(bytes).unwrap();
+            log.checkout();
+            since(t)
+        };
+        let mut dt_open_once = || {
+            let t = Instant::now();
+            let document = dt_open(&dt_saved);
+            let ms = since(t);
+            drop(document);
+            ms
+        };
+        let mut reopened = OpLog::load(saved.clone()).unwrap();
+        let mut same = reopened.checkout() == expected && dt_open(&dt_saved).1.to_string() == expected;
+        drop(reopened);
 
-            if started.elapsed() >= WARM_UP {
-                for (times, ms) in times.iter_mut().zip([dt_append_ms, dt_ms, append_ms, merge_ms, again_ms]) {
-                    times.push(ms);
-                }
+        // The other libraries, on the same history replayed into each: checked and weighed
+        // first, then timed with the rest.
+        let yjs_sent = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay, &left_out);
+        let loro_sent = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay, &left_out);
+        let automerge_sent = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay, &left_out);
+        let yjs = yjs_sent.as_ref().map(|(sent, notes)| {
+            let prepared = prepare(&expected, || yjs_decode_batches(sent), yjs_merge, yjs_text, yjs_save, |saved| yjs_apply(yjs_decode(saved)));
+            (prepared, notes)
+        });
+        let loro = loro_sent.as_ref().map(|(sent, notes)| {
+            let ops = loro_decode_batches(sent);
+            let prepared =
+                prepare(&expected, move || ops.clone(), loro_apply, loro_text, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import);
+            (prepared, notes)
+        });
+        let automerge = automerge_sent.as_ref().map(|(sent, notes)| {
+            let prepared = prepare(
+                &expected,
+                || automerge_decode(sent),
+                automerge_apply,
+                automerge_text,
+                |document: &mut automerge::AutoCommit| document.save(),
+                automerge_open,
+            );
+            (prepared, notes)
+        });
+        let (mut yjs, mut loro, mut automerge) = (yjs.ok(), loro.ok(), automerge.ok());
+        let others_present: Vec<bool> = [yjs.is_some(), loro.is_some(), automerge.is_some()].to_vec();
+
+        let merged = {
+            let mut tasks: Vec<&mut dyn FnMut() -> MergeRun> = vec![&mut strider_merge_once, &mut dt_merge_once];
+            for other in [&mut yjs, &mut loro, &mut automerge].into_iter().flatten() {
+                tasks.push(&mut *other.0 .1.merge);
             }
-        }
-        let spread = [&times[1], &times[3]].map(|times| {
+            in_turns(reps, &mut tasks)
+        };
+        let opened = {
+            let mut tasks: Vec<&mut dyn FnMut() -> f64> = vec![&mut strider_open_once, &mut dt_open_once];
+            for other in [&mut yjs, &mut loro, &mut automerge].into_iter().flatten() {
+                tasks.push(&mut *other.0 .1.open);
+            }
+            in_turns(reps, &mut tasks)
+        };
+        same &= merged[..2].iter().flatten().all(|(_, same)| *same);
+        let part = |runs: &[MergeRun], i: usize| median(runs.iter().map(|(ms, _)| ms[i]).collect());
+        let spread = [&merged[1], &merged[0]].map(|runs| {
+            let times: Vec<f64> = runs.iter().map(|(ms, _)| ms[0]).collect();
             let mean = times.iter().sum::<f64>() / times.len() as f64;
             100.0 * (times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64).sqrt() / mean
         });
-        let [dt_append_ms, dt_ms, append_ms, merge_ms, again_ms] = times.map(median);
-
-        // Reopening, each from its own saved document.
-        let saved = strider_merge(&history).save();
-        let dt_saved = dt_save(&dt_append(&dt_history), &expected);
-        // eg-strider takes the file's bytes to keep, so each run is handed its own.
-        let (open_ms, mut reopened) = median_of(
-            reps,
-            || saved.clone(),
-            |bytes| {
-                let mut log = OpLog::load(bytes).unwrap();
-                log.checkout();
-                log
-            },
-        );
-        let (dt_open_ms, dt_reopened) = median_of(reps, || (), |()| dt_open(&dt_saved));
-        same &= reopened.checkout() == expected && dt_reopened.1.to_string() == expected;
-        drop((reopened, dt_reopened));
+        let (merge_ms, append_ms, again_ms) = (part(&merged[0], 0), part(&merged[0], 1), part(&merged[0], 2));
+        let (dt_ms, dt_append_ms) = (part(&merged[1], 0), part(&merged[1], 1));
+        let (open_ms, dt_open_ms) = (median(opened[0].clone()), median(opened[1].clone()));
+        // The other libraries' times, in the order they took their turns.
+        let mut other_times = merged[2..].iter().zip(&opened[2..]).map(|(merges, opens)| (part(merges, 0), median(opens.clone())));
+        let mut timed = |present: bool| present.then(|| other_times.next().expect("times for every library present"));
+        let other_timing = [timed(others_present[0]), timed(others_present[1]), timed(others_present[2])];
+        let finish = |other: Option<((Measured, Turns), &String)>, timing: Option<(f64, f64)>| {
+            other.zip(timing).map(|(((measured, _), notes), (merge_ms, open_ms))| (Measured { merge_ms, open_ms, ..measured }, notes.clone()))
+        };
+        let yjs = finish(yjs, other_timing[0]).ok_or_else(|| yjs_sent.as_ref().err().copied().unwrap_or("left out"));
+        let loro = finish(loro, other_timing[1]).ok_or_else(|| loro_sent.as_ref().err().copied().unwrap_or("left out"));
+        let automerge = finish(automerge, other_timing[2]).ok_or_else(|| automerge_sent.as_ref().err().copied().unwrap_or("left out"));
         // A reopened document has read none of its history, which an edit made at an older
         // version then needs some of. One edit is added and merged: at the end, and at the
         // version so many events back.
@@ -514,17 +613,6 @@ fn main() {
             if trace_text { "" } else { ", not the trace's text" }
         );
 
-        // The other libraries, on the same history replayed into each.
-        let yjs = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay, &left_out).map(|(sent, notes)| {
-            (measure(reps, &expected, || yjs_decode_batches(&sent), yjs_merge, yjs_text, yjs_save, |saved| yjs_apply(yjs_decode(saved))), notes)
-        });
-        let loro = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay, &left_out).map(|(sent, notes)| {
-            let ops = loro_decode_batches(&sent);
-            (measure(reps, &expected, || ops.clone(), loro_apply, loro_text, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
-        });
-        let automerge = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay, &left_out).map(|(sent, notes)| {
-            (measure(reps, &expected, || automerge_decode(&sent), automerge_apply, automerge_text, |document| document.save(), automerge_open), notes)
-        });
         others.push(format!(
             "{name:6} {}",
             [("yrs", &yjs), ("Loro", &loro), ("Automerge", &automerge)]
