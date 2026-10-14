@@ -1,41 +1,29 @@
-//! The event graph of a document's history: which events each event's author had seen.
-//! Merging is only needed where history is concurrent, so a replay first has to find where
-//! that is. This crate stores the graph run-length encoded, cuts it into blocks (the basic
-//! blocks of a control-flow graph: chains entered only at the top and left only at the
-//! bottom), and finds the critical versions that every path passes through. The stretch
-//! between two of them is either linear or a region: a single-entry single-exit part of the
-//! graph with concurrency inside.
-
 mod walk;
 
 pub use walk::{Move, Walker};
 
 use std::ops::Range;
 
-/// An event's number: where it comes in the order this replica's log learned of its events,
-/// parents before children. Replicas number events differently. The number of events before
-/// some point is the number of the event there.
+/// Replica local version number/index for an event.
 pub type EventId = u32;
 
-/// A block's place in the graph's list of blocks, which is the order of their first events.
-/// Every block holds at least one event, so there are never more blocks than events.
+/// Index of a block, in order of the blocks' first events.
 pub type BlockId = u32;
 
-// Numbers kept in a u32 index lists, as a usize.
-const _: () = assert!(usize::BITS >= u32::BITS, "a u32 must fit in a usize");
-
-/// An append-only event graph, kept cut into blocks and with its critical versions known.
+/// The event graph of a document's history: which events each event's author had seen. Merging
+/// is only needed where history is concurrent, so the graph is stored run-length encoded, cut
+/// into blocks, with the critical versions that every path passes through kept up to date.
 #[derive(Default)]
 pub struct Graph {
     blocks: Blocks,
-    /// The events that nothing yet descends from, in ascending order.
+    /// Events nothing descends from yet, ascending.
     heads: Vec<EventId>,
-    /// For each block, a number of events from the start of history that are all in its
-    /// history: exact when the block has seen everything before it, else a lower bound.
+    /// Per block, how many events from the start of history it has seen: exact if it has seen
+    /// all before it, else a lower bound.
     seen: Vec<EventId>,
-    /// The blocks that start at a critical version, in order.
+    /// Blocks that start at a critical version, ascending.
     critical: Vec<BlockId>,
-    /// Reused while adding events: the blocks their parents end.
+    /// Scratch: the blocks a new event's parents end.
     ends: Vec<BlockId>,
 }
 
@@ -45,14 +33,13 @@ impl Graph {
         Self::default()
     }
 
-    /// Creates a graph of the events that come after the first `events` of a history, which
-    /// it does not hold. `heads` are those of that earlier history, and every event to come
-    /// must have all of them in its own history.
+    /// Creates a graph of only the events after the first `events`. Every later event must have
+    /// seen `heads`, the heads of those first events.
     pub fn after(events: EventId, heads: &[EventId]) -> Self {
         Graph { blocks: Blocks { start: vec![events], ..Blocks::default() }, heads: heads.to_vec(), ..Self::default() }
     }
 
-    /// Returns the number of events before the first that the graph holds.
+    /// Returns the first event the graph holds.
     pub fn floor(&self) -> EventId {
         self.blocks.start[0]
     }
@@ -67,20 +54,19 @@ impl Graph {
         self.blocks.is_empty()
     }
 
-    /// Returns the events that nothing yet descends from, in ascending order.
+    /// Returns the events nothing descends from yet, ascending.
     pub fn frontier(&self) -> &[EventId] {
         // Kept in order: each new event is the highest so far, and goes on the end.
         &self.heads
     }
 
-    /// Tells whether a new event with these parents would simply follow the last event.
+    /// Tells whether an event with these parents just extends the last event.
     pub fn continues(&self, parents: &[EventId]) -> bool {
         !self.is_empty() && parents == [self.len() - 1]
     }
 
-    /// Tells whether some later event lacks one of the first `at` events in its history, and
-    /// if so makes a block start at event `at`: a merge that begins there has to tell the
-    /// events before it from those after.
+    /// If some later event has not seen every event before `at`, starts a block at `at` and
+    /// returns true.
     pub fn cut(&mut self, at: EventId) -> bool {
         if at <= self.floor() || at >= self.len() {
             return false;
@@ -104,8 +90,7 @@ impl Graph {
         &self.blocks
     }
 
-    /// Adds `len` events in a chain, the first with the given parents. Returns their
-    /// numbers.
+    /// Appends a chain of `len` events, the first with `parents`. Returns their ids.
     pub fn push(&mut self, parents: &[EventId], len: u32) -> Range<EventId> {
         // A block with no events would let there be more blocks than events.
         assert!(len > 0, "a run of no events");
@@ -171,8 +156,7 @@ impl Graph {
         start..end
     }
 
-    /// Returns how many events from the start of history are all in the history of a
-    /// block's last event.
+    /// Returns how many events from the start of history a block's last event has seen.
     fn seen_after(&self, block: BlockId) -> EventId {
         let i = block as usize;
         if self.seen[i] == self.blocks.start[i] {
@@ -182,7 +166,7 @@ impl Graph {
         }
     }
 
-    /// Splits a block so that a new one starts at event `at`.
+    /// Splits a block so that a new one starts at `at`.
     fn split(&mut self, block: BlockId, at: EventId) {
         let blocks = &mut self.blocks;
         let (first, second, i) = (block, block + 1, block as usize);
@@ -209,8 +193,7 @@ impl Graph {
         }
     }
 
-    /// Splits the history at its critical versions: the points where every later event has
-    /// every earlier event in its history.
+    /// Splits the history at its critical versions.
     pub fn segments(&self) -> Vec<Segment> {
         let blocks = self.blocks.len();
         let next = |i: usize| self.critical.get(i + 1).copied().unwrap_or(blocks);
@@ -234,13 +217,13 @@ impl Graph {
     }
 }
 
-/// A graph cut into *blocks*: maximal chains of events that no other event branches from
-/// part-way along. A version therefore contains a block entirely or not at all.
+/// The graph cut into blocks: maximal chains of events that nothing branches off partway, so a
+/// version holds a block whole or not at all.
 pub struct Blocks {
     /// Block `i` covers events `start[i]..start[i + 1]`.
     start: Vec<EventId>,
     parent_start: Vec<u32>,
-    /// Each block's parents: the blocks that its first event's parents end.
+    /// Each block's parent blocks: those its first event's parents end.
     parents: Vec<BlockId>,
 }
 
@@ -253,7 +236,7 @@ impl Default for Blocks {
 /// A stretch of history between two critical versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
-    /// Blocks that nothing is concurrent with. Their events mean exactly what they say.
+    /// Blocks nothing is concurrent with: their events apply as recorded.
     Linear(Range<BlockId>),
     /// Blocks with concurrency among them, which have to be merged.
     Region(Range<BlockId>),
@@ -269,7 +252,7 @@ impl Segment {
 }
 
 impl Blocks {
-    /// Returns the number of blocks, which is the number of the block after the last.
+    /// Returns the number of blocks.
     pub fn len(&self) -> BlockId {
         (self.parent_start.len() - 1) as BlockId
     }
@@ -279,8 +262,7 @@ impl Blocks {
         self.len() == 0
     }
 
-    /// Returns the first event of a block. `block` may be one past the last block, giving the total
-    /// number of events.
+    /// Returns a block's first event. One past the last block gives the number of events.
     pub fn start(&self, block: BlockId) -> EventId {
         self.start[block as usize]
     }

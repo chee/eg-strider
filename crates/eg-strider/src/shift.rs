@@ -1,21 +1,13 @@
-//! Merges a region without CRDT state when its concurrent edits do not touch. This is the
-//! simple case of operational transformation: an edit's position is moved by the net length
-//! of the concurrent edits before it. Edited stretches of the document are kept as
-//! clusters, separated by text every remaining block has seen. An edit landing in a cluster
-//! that holds edits it has not seen cannot be placed this way, and the region goes to the
-//! tracker. A block is stable once every later block has seen it (causal stability).
-
 use crate::oplog::{OpIndex, OpKind, OpLog};
 use crate::replay::Placed;
 use std::ops::Range;
 use strider_graph::{BlockId, Blocks};
 
-/// Regions with more blocks than this go straight to the tracker. The sets of blocks kept for
-/// each block grow with the square of this: 256 KB here.
+/// Regions with more blocks go straight to the tracker. The sets kept per block grow with its
+/// square: 256 KB here.
 const MAX_BLOCKS: usize = 1024;
 
-/// With more clusters than this at once, looking through the list for every edit costs
-/// more than the tracker would.
+/// Beyond this many clusters, scanning them for every edit costs more than the tracker would.
 const MAX_CLUSTERS: usize = 64;
 
 /// A block's place among its region's blocks, counting from 0.
@@ -24,13 +16,12 @@ type BlockInRegion = u32;
 /// A set of a region's blocks, one bit each, 64 to a word.
 type BlockSet = [u64];
 
-/// A stretch of the document that blocks of the region have edited. `start` and `len` are in
-/// the document as merged so far.
+/// A stretch of the document that the region's blocks have edited, measured in the document as
+/// merged so far.
 struct Cluster {
     start: i64,
     len: i64,
-    /// The blocks that edited here and are not stable, and by how much each changed the
-    /// cluster's length.
+    /// The blocks that edited here and are not stable, and how much each changed its length.
     members: Vec<(BlockInRegion, i64)>,
 }
 
@@ -49,7 +40,7 @@ struct Viewer<'a> {
     block: BlockInRegion,
     /// The region's blocks in its version, itself included.
     seen: &'a BlockSet,
-    /// The blocks that it and every block after it have seen.
+    /// The blocks that it and every later block have seen.
     stable: &'a BlockSet,
 }
 
@@ -74,9 +65,9 @@ impl Clusters {
         }
     }
 
-    /// Works out how much longer cluster `i` is than `viewer` knows, with whether any block it has not
-    /// seen edited there. Forgets stable blocks first; if none are left, the cluster is
-    /// dropped and `None` returned, and `i` is then the cluster that followed.
+    /// Returns how much longer cluster `i` is than `viewer` knows, and whether any block it has
+    /// not seen edited there. Stable blocks are forgotten first; a cluster left empty is
+    /// dropped and `None` returned, with `i` then naming the next cluster.
     fn unseen(&mut self, i: usize, viewer: &Viewer) -> Option<(i64, bool)> {
         let (mut longer, mut any, mut stale) = (0, false, false);
         for &(block, grew) in &self.list[i].members {
@@ -98,7 +89,7 @@ impl Clusters {
         Some((longer, any))
     }
 
-    /// Adds a cluster as cluster `i`, unless there are too many.
+    /// Adds a cluster at `i`, unless there are too many.
     fn open(&mut self, i: usize, start: i64, len: i64, viewer: &Viewer, grew: i64) -> Option<()> {
         if self.list.len() == MAX_CLUSTERS {
             return None;
@@ -109,8 +100,8 @@ impl Clusters {
         Some(())
     }
 
-    /// Finds where an insert of `len` characters at `pos`, in the document as `viewer` knows it,
-    /// goes in the document as merged so far.
+    /// Places an insert of `len` characters at `pos`, in the document as `viewer` knows it, in
+    /// the document as merged so far.
     fn insert(&mut self, viewer: &Viewer, pos: i64, len: i64) -> Option<i64> {
         let own = !has(viewer.stable, viewer.block);
         // `shift`: how much further along the merged document is than the viewer's.
@@ -150,8 +141,8 @@ impl Clusters {
         Some(at)
     }
 
-    /// Finds where a removal of the `len` characters at `pos`, in the document as `viewer` knows
-    /// it, goes in the document as merged so far.
+    /// Places a removal of the `len` characters at `pos`, in the document as `viewer` knows it,
+    /// in the document as merged so far.
     fn remove(&mut self, viewer: &Viewer, pos: i64, len: i64) -> Option<i64> {
         let own = !has(viewer.stable, viewer.block);
         // Clusters that end before the removed text, with a character in between.
@@ -210,19 +201,23 @@ impl Clusters {
     }
 }
 
-/// Working room for merging regions by shifting.
+/// Merges a region without CRDT state when its concurrent edits do not touch: the simple case
+/// of operational transformation, moving each edit by the net length of the concurrent edits
+/// before it. Edited stretches are kept as clusters, and an edit landing in a cluster that
+/// holds edits it has not seen sends the region to the tracker. A block is stable once every
+/// later block has seen it.
 #[derive(Default)]
 pub(crate) struct Shifter {
-    /// For each block of the region: the region's blocks in its version, itself included.
+    /// Per block of the region: the region's blocks in its version, itself included.
     seen: Vec<u64>,
-    /// For each block of the region: the blocks that it and every later block have seen.
+    /// Per block of the region: the blocks that it and every later block have seen.
     stable: Vec<u64>,
     clusters: Clusters,
 }
 
 impl Shifter {
-    /// Merges a region by shifting, recording in `document` where its ops go. Returns false, with
-    /// `document` as it was, if the region needs the tracker.
+    /// Merges a region by shifting, recording in `document` where its ops go. Returns false,
+    /// leaving `document` as it was, if the region needs the tracker.
     pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<BlockId>, document: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;

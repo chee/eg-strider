@@ -1,41 +1,18 @@
-//! An order-statistic B+ tree over the tracker's spans, counted in the prepare version and
-//! the effect version at once.
-//!
-//! An entry is a span of characters, with a width in each version: its length where it is
-//! present, 0 where it is not inserted yet or is deleted. `char_index_to_entry` is select: it finds
-//! the entry holding a character index of one view. `entry_to_char_index` is rank: it gives
-//! the index an entry starts at in one view. Merging an event
-//! is a select in the prepare version followed by a rank in the effect version.
-//!
-//! Differences from a textbook B+ tree:
-//!
-//! * No keys. Entries are ordered by position, and inner nodes hold subtree sums instead
-//!   of separator keys.
-//! * Two sums per child, one for each version.
-//! * Rank runs bottom-up. Nodes have parent pointers and the tree maps each entry's id to
-//!   its leaf, so it climbs from the entry, adding up the siblings to its left.
-//! * Insert-only. An entry is never deleted; its widths are set to 0. So there is no
-//!   merging or rebalancing.
-//! * Leaves and inner nodes are one struct, stored in two `Vec`s and linked by index, not
-//!   by pointer.
-//! * Select remembers the leaf it ended in. Events are merged in runs at one place, so the
-//!   next select usually ends there too and skips the way down.
-
 use std::cmp::Ordering;
 
-/// Names an entry. Ids are handed out in order of creation, starting from 0.
+/// Id of an entry, handed out from 0 in order of creation.
 pub type EntryId = u32;
 
-/// Which version of the document a width or a character index is counted in.
+/// Which version of the document a width or index counts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
-    /// The document as the author of the event being merged saw it.
+    /// The document as the merged event's author saw it.
     Prepare,
     /// The document as merged so far.
     Effect,
 }
 
-/// An entry's width in each view: its length where it is present, 0 where it is not.
+/// An entry's width in each view: its length where present, else 0.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Widths {
     pub prepare: u32,
@@ -51,7 +28,7 @@ impl Widths {
         }
     }
 
-    /// Adds widths, wrapping so that a difference taken with [`minus`](Self::minus) adds back.
+    /// Adds widths, wrapping, so that a difference from [`minus`](Self::minus) adds back.
     fn plus(self, other: Widths) -> Widths {
         Widths { prepare: self.prepare.wrapping_add(other.prepare), effect: self.effect.wrapping_add(other.effect) }
     }
@@ -64,24 +41,23 @@ impl Widths {
 
 const NONE: u32 = u32::MAX;
 
-/// Where an entry currently sits. A cursor stays valid until the next
-/// [`insert`](PrepareEffectTree::insert) or [`split_entry`](PrepareEffectTree::split_entry);
-/// get a fresh one with [`PrepareEffectTree::cursor`].
+/// Where an entry sits now. Valid until the next [`insert`](PrepareEffectTree::insert) or
+/// [`split_entry`](PrepareEffectTree::split_entry).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cursor {
     leaf: u32,
     slot: u32,
 }
 
-/// One child as a node holds it: which it is beside its widths, so that finding a child
-/// and measuring up to it read the same memory.
+/// A child beside its widths, so that finding a child and measuring up to it read the same
+/// memory.
 #[derive(Clone, Copy)]
 struct Slot {
-    /// An entry's id in a leaf; the node one level down in an inner node.
+    /// An entry's id in a leaf; a node one level down in an inner node.
     child: u32,
-    /// The child's width in the prepare view: an entry's own, or the total under a node.
+    /// The child's prepare width: an entry's own, or its subtree's total.
     prepare_width: u32,
-    /// The child's width in the effect view.
+    /// The child's effect width.
     effect_width: u32,
 }
 
@@ -104,9 +80,7 @@ impl Slot {
     }
 }
 
-/// Up to `N` children in sequence order: entries in a leaf, nodes in an inner node. A node
-/// knows its place under its parent, so an entry's character index is found by climbing
-/// from its leaf.
+/// Up to `N` children in order: entries in a leaf, nodes in an inner node.
 struct Node<const N: usize> {
     /// How many of `slots` are in use.
     len: u32,
@@ -122,18 +96,18 @@ impl<const N: usize> Node<N> {
         Node { len: 0, parent, at: 0, slots: [Slot::EMPTY; N] }
     }
 
-    /// Sums the widths of the children.
+    /// Sums the children's widths.
     fn total(&self) -> Widths {
         self.slots.iter().fold(Widths::default(), |total, slot| total.plus(slot.widths()))
     }
 
-    /// Returns where a child starts in one view: the total width of the children before it.
+    /// Returns where a child starts in one view.
     fn start(&self, view: View, child: usize) -> u32 {
         self.slots[..child].iter().map(|slot| slot.widths().of(view)).sum()
     }
 
-    /// Finds the child holding character `index` of one view, and how far into the child that
-    /// character is. Nothing, if the children come to `index` characters or fewer.
+    /// Finds the child holding character `index` of one view, and the offset into it. `None` if
+    /// past the end.
     fn find(&self, view: View, mut index: u32) -> Option<(usize, u32)> {
         let mut child = 0;
         while index >= self.slots[child].widths().of(view) {
@@ -146,7 +120,7 @@ impl<const N: usize> Node<N> {
         Some((child, index))
     }
 
-    /// Returns which of the children `child` is.
+    /// Returns which child `child` is.
     fn index_of(&self, child: u32) -> usize {
         if self.len <= 8 {
             // Nearly-empty nodes are the norm in small trees; a short scan beats the wide
@@ -163,7 +137,7 @@ impl<const N: usize> Node<N> {
         found
     }
 
-    /// Adds a child as child number `at`, moving later ones along. There must be room.
+    /// Inserts a child at `at`. There must be room.
     fn insert(&mut self, at: usize, child: u32, widths: Widths) {
         let len = self.len as usize;
         if at < len {
@@ -173,15 +147,15 @@ impl<const N: usize> Node<N> {
         self.len += 1;
     }
 
-    /// Splits child number `at` in two: a new child takes `widths` out of it, and sits just
-    /// before it if `before`, otherwise just after. There must be room.
+    /// Splits child `at`: a new child takes `widths` from it and goes just before it if
+    /// `before`, else just after. There must be room.
     fn split_child(&mut self, at: usize, child: u32, widths: Widths, before: bool) {
         let slot = &mut self.slots[at];
         slot.set_widths(slot.widths().minus(widths));
         self.insert(at + !before as usize, child, widths);
     }
 
-    /// Moves the upper half of a full node's children to a new node, which it returns.
+    /// Moves the upper half of a full node's children into a new node, which it returns.
     fn split_off(&mut self) -> Node<N> {
         let half = N / 2;
         let mut upper = Node::new(self.parent);
@@ -193,18 +167,24 @@ impl<const N: usize> Node<N> {
     }
 }
 
-/// `N` is how many entries a leaf holds and how many children an inner node has.
+/// Order-statistic B+ tree over the tracker's spans, measured in the prepare and effect
+/// versions at once, with up to `N` children per node. Merging an event is a select in the
+/// prepare version ([`char_index_to_entry`](Self::char_index_to_entry)), then a rank in the
+/// effect version ([`entry_to_char_index`](Self::entry_to_char_index)).
+///
+/// Unlike a textbook B+ tree, inner nodes hold a width sum per version instead of keys; entries
+/// are never removed, only set to width 0; nodes are linked to their parents by index, so rank
+/// climbs from an entry's leaf; and select starts from the leaf it last ended in.
 pub struct PrepareEffectTree<const N: usize = 32> {
     leaves: Vec<Node<N>>,
     nodes: Vec<Node<N>>,
     root: u32,
-    /// Levels of inner nodes; 1-indexed.
+    /// Levels of inner nodes, from 1.
     height: u32,
     /// The leaf each entry is in.
     home: Vec<u32>,
-    /// The leaf the last select ended in, the view it was in, and the character index the
-    /// leaf starts at in that view and in the effect view. Forgotten when widths change in
-    /// any other leaf, since that may move where this one starts.
+    /// Where the last select ended: its leaf and view, and where that leaf starts in that view
+    /// and in the effect view. Dropped when widths change in another leaf.
     last: Option<(View, u32, u32, u32)>,
 }
 
@@ -237,12 +217,12 @@ impl<const N: usize> PrepareEffectTree<N> {
         self.home.len()
     }
 
-    /// Returns false: a tree always holds at least one entry.
+    /// Always false: a tree holds at least one entry.
     pub fn is_empty(&self) -> bool {
         false
     }
 
-    /// Returns a cursor to the first entry.
+    /// Returns the first entry.
     pub fn first(&self) -> Cursor {
         let mut node_id = self.root;
         for _ in 1..self.height {
@@ -251,7 +231,7 @@ impl<const N: usize> PrepareEffectTree<N> {
         Cursor { leaf: self.nodes[node_id as usize].slots[0].child, slot: 0 }
     }
 
-    /// Returns a cursor to the entry after `at`, or `None` at the end.
+    /// Returns the entry after `at`, or `None` at the end.
     pub fn next(&self, at: Cursor) -> Option<Cursor> {
         if at.slot + 1 < self.leaves[at.leaf as usize].len {
             return Some(Cursor { leaf: at.leaf, slot: at.slot + 1 });
@@ -300,7 +280,7 @@ impl<const N: usize> PrepareEffectTree<N> {
         Cursor { leaf, slot: self.leaves[leaf as usize].index_of(id) as u32 }
     }
 
-    /// Compares two entries by their place in the sequence.
+    /// Compares two entries' places in the sequence.
     pub fn cmp(&self, a: Cursor, b: Cursor) -> Ordering {
         if a.leaf == b.leaf {
             return a.slot.cmp(&b.slot);
@@ -309,7 +289,7 @@ impl<const N: usize> PrepareEffectTree<N> {
         self.path(a.leaf)[..levels].cmp(&self.path(b.leaf)[..levels])
     }
 
-    /// Collects the child indexes from the root down to `leaf`.
+    /// Returns the child indexes from the root down to `leaf`.
     fn path(&self, leaf: u32) -> [u8; 16] {
         let mut path = [0; 16];
         let mut level = self.height as usize - 1;
@@ -325,16 +305,14 @@ impl<const N: usize> PrepareEffectTree<N> {
         path
     }
 
-    /// Finds the entry holding character `index` of one view, and how far into the entry that
-    /// character is.
+    /// Finds the entry holding character `index` of one view, and the offset into it.
     pub fn char_index_to_entry(&mut self, view: View, index: u32) -> (Cursor, u32) {
         let (at, offset, _) = self.locate(view, index);
         (at, offset)
     }
 
-    /// Finds the entry holding character `index` of one view, how far into the entry that
-    /// character is, and the index the entry starts at in the effect view, which is summed on
-    /// the way down.
+    /// As [`char_index_to_entry`](Self::char_index_to_entry), also returning where the entry
+    /// starts in the effect view.
     pub fn locate(&mut self, view: View, index: u32) -> (Cursor, u32, u32) {
         if let Some((seen, leaf, start, effect)) = self.last {
             let found = if seen == view && index >= start { self.leaves[leaf as usize].find(view, index - start) } else { None };
@@ -362,7 +340,7 @@ impl<const N: usize> PrepareEffectTree<N> {
         self.last = self.last.filter(|&(_, last, ..)| last == leaf);
     }
 
-    /// Returns the character index an entry starts at in one view.
+    /// Returns where an entry starts in one view.
     pub fn entry_to_char_index(&self, view: View, at: Cursor) -> u32 {
         let leaf = &self.leaves[at.leaf as usize];
         let mut index = leaf.start(view, at.slot as usize);
@@ -383,7 +361,7 @@ impl<const N: usize> PrepareEffectTree<N> {
         self.widen(at.leaf, delta);
     }
 
-    /// Adds `delta` to the widths recorded for `leaf` in each of its ancestors.
+    /// Adds `delta` to `leaf`'s widths in each of its ancestors.
     fn widen(&mut self, leaf: u32, delta: Widths) {
         let leaf = &self.leaves[leaf as usize];
         let (mut child, mut node_id) = (leaf.at as usize, leaf.parent);
@@ -398,14 +376,13 @@ impl<const N: usize> PrepareEffectTree<N> {
         }
     }
 
-    /// Changes an entry's widths and returns the index it starts at in the effect view, found
-    /// on the same pass up the tree.
+    /// Changes an entry's widths and returns where it starts in the effect view.
     pub fn update(&mut self, at: Cursor, widths: Widths) -> u32 {
         let delta = self.replace(at, widths);
         self.climb(at, delta)
     }
 
-    /// Stores new widths in an entry's slot and returns the change.
+    /// Sets an entry's widths and returns the change.
     fn replace(&mut self, at: Cursor, widths: Widths) -> Widths {
         self.changing(at.leaf);
         let slot = &mut self.leaves[at.leaf as usize].slots[at.slot as usize];
@@ -414,8 +391,8 @@ impl<const N: usize> PrepareEffectTree<N> {
         delta
     }
 
-    /// Adds `delta` to the widths recorded for an entry's leaf in each of its ancestors,
-    /// and returns the index the entry starts at in the effect view.
+    /// Adds `delta` to an entry's leaf in each of its ancestors, and returns where the entry
+    /// starts in the effect view.
     fn climb(&mut self, at: Cursor, delta: Widths) -> u32 {
         let leaf = &self.leaves[at.leaf as usize];
         let mut index = leaf.start(View::Effect, at.slot as usize);
@@ -432,23 +409,23 @@ impl<const N: usize> PrepareEffectTree<N> {
         }
     }
 
-    /// Adds an entry just before `before`, or at the end for `None`. Returns its id and the
-    /// index it starts at in the effect view.
+    /// Adds an entry before `before`, or at the end for `None`. Returns its id and where it
+    /// starts in the effect view.
     pub fn insert(&mut self, before: Option<Cursor>, widths: Widths) -> (EntryId, u32) {
         let (id, at) = self.place(before, widths);
         (id, self.climb(at, widths))
     }
 
-    /// Adds an entry as [`insert`](Self::insert) does, for a caller that already knows where
-    /// it starts. Returns its id.
+    /// Adds an entry as [`insert`](Self::insert) does, without working out where it starts.
+    /// Returns its id.
     pub fn add(&mut self, before: Option<Cursor>, widths: Widths) -> EntryId {
         let (id, at) = self.place(before, widths);
         self.widen(at.leaf, widths);
         id
     }
 
-    /// Puts a new entry in a leaf just before `before`, or at the end for `None`, leaving the
-    /// leaf's ancestors to be told of its widths. Returns its id and where it is.
+    /// Puts a new entry in a leaf before `before`, or at the end for `None`, without updating
+    /// ancestors. Returns its id and cursor.
     fn place(&mut self, before: Option<Cursor>, widths: Widths) -> (EntryId, Cursor) {
         let before = before.unwrap_or_else(|| {
             let leaf = self.last_leaf();
@@ -461,9 +438,8 @@ impl<const N: usize> PrepareEffectTree<N> {
         (id, at)
     }
 
-    /// Splits an entry in two: a new entry takes `widths` out of the entry at `at`, and
-    /// sits just before it if `before`, otherwise just after. Returns the new entry's id
-    /// and where the two now are, in sequence order.
+    /// Splits the entry at `at`: a new entry takes `widths` from it and goes just before it if
+    /// `before`, else just after. Returns the new id and both cursors, in order.
     pub fn split_entry(&mut self, at: Cursor, widths: Widths, before: bool) -> (EntryId, [Cursor; 2]) {
         let at = self.make_room(at);
         self.changing(at.leaf);
@@ -473,14 +449,13 @@ impl<const N: usize> PrepareEffectTree<N> {
         (id, [at, Cursor { leaf: at.leaf, slot: at.slot + 1 }])
     }
 
-    /// Hands out the id for a new entry that is about to go into `leaf`.
+    /// Hands out the id of a new entry going into `leaf`.
     fn new_entry(&mut self, leaf: u32) -> EntryId {
         self.home.push(leaf);
         self.home.len() as EntryId - 1
     }
 
-    /// Ensures the leaf at `at` has a free slot. Returns where the slot that was at `at`
-    /// is now.
+    /// Makes sure the leaf at `at` has a free slot. Returns where `at`'s slot is now.
     fn make_room(&mut self, at: Cursor) -> Cursor {
         if (self.leaves[at.leaf as usize].len as usize) < N {
             at
@@ -489,8 +464,8 @@ impl<const N: usize> PrepareEffectTree<N> {
         }
     }
 
-    /// Splits a full leaf, moving its upper half to a new leaf after it. Returns where the
-    /// slot that was at `at` is now.
+    /// Splits a full leaf, moving its upper half to a new leaf after it. Returns where `at`'s
+    /// slot is now.
     fn split_leaf(&mut self, at: Cursor) -> Cursor {
         let half = N / 2;
         let new = self.leaves.len() as u32;
@@ -511,8 +486,8 @@ impl<const N: usize> PrepareEffectTree<N> {
         }
     }
 
-    /// Adds `new` as the child after `after` in node `node_id`, taking `widths` of what was
-    /// recorded for `after` with it. `level` is 1 when the children are leaves.
+    /// Adds `new` after `after` in node `node_id`, moving `widths` from `after` to it. `level`
+    /// is 1 when the children are leaves.
     fn add_child(&mut self, mut node_id: u32, after: u32, new: u32, widths: Widths, level: u32) {
         if self.nodes[node_id as usize].len as usize == N {
             node_id = self.split_node(node_id, after, level);
@@ -527,8 +502,8 @@ impl<const N: usize> PrepareEffectTree<N> {
         self.adopt(level, new, node_id, at as u32 + 1);
     }
 
-    /// Splits a full node, moving its upper half to a new sibling. Returns whichever of the
-    /// two now holds `child`.
+    /// Splits a full node, moving its upper half to a new sibling. Returns which of the two
+    /// holds `child`.
     fn split_node(&mut self, node_id: u32, child: u32, level: u32) -> u32 {
         let half = N / 2;
         let new = self.nodes.len() as u32;
@@ -563,13 +538,13 @@ impl<const N: usize> PrepareEffectTree<N> {
         }
     }
 
-    /// Records that `child` is child number `at` of `parent`.
+    /// Records that `child` is child `at` of `parent`.
     fn adopt(&mut self, level: u32, child: u32, parent: u32, at: u32) {
         let node_id = if level == 1 { &mut self.leaves[child as usize] } else { &mut self.nodes[child as usize] };
         (node_id.parent, node_id.at) = (parent, at);
     }
 
-    /// Returns which child of its parent `child` is.
+    /// Returns `child`'s index among its parent's children.
     fn index_in_parent(&self, level: u32, child: u32) -> u32 {
         if level == 1 {
             self.leaves[child as usize].at

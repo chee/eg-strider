@@ -1,9 +1,3 @@
-//! Replays a history into another library (Loro, Automerge, Yjs) so that all of them are
-//! measured on the same thing. Each chunk of events has to be made by a document that holds
-//! exactly what its author had seen, so there is one replica per peer, sent just the
-//! updates it lacks before it makes its next edits. An agent with events concurrent to its
-//! own becomes several peers, and a new peer starts as a copy of an existing replica.
-
 use diamond_types::list::operation::ListOpKind;
 use diamond_types::list::ListOpLog;
 use std::time::{Duration, Instant};
@@ -33,8 +27,8 @@ pub trait Replica {
     /// Takes in what other replicas made.
     fn apply(&mut self, updates: &[&Self::Update]);
 
-    /// Makes the edits. Returns what they made, if anything, and how many could not be
-    /// made where they were recorded and were moved to the end or cut short.
+    /// Makes the edits. Returns what they made, if anything, and how many were moved to the end
+    /// or cut short.
     fn edit(&mut self, edits: &[Edit]) -> (Option<Self::Update>, usize);
 
     /// Saves everything the replica holds, in the library's own format.
@@ -47,7 +41,7 @@ pub struct Replayed {
     pub moved: usize,
 }
 
-/// Events made one after another that no other event branches from part-way.
+/// Consecutive events that nothing branches off partway.
 struct Block {
     start: usize,
     len: usize,
@@ -56,7 +50,7 @@ struct Block {
     edits: Vec<Edit>,
 }
 
-/// Cuts a log into blocks: its chunks, split wherever an event is some other event's parent.
+/// Cuts a log into blocks: its chunks, split after every event that is another's parent.
 fn blocks(dt: &ListOpLog) -> Vec<Block> {
     let chunks = dt.as_chunked_operation_vec();
     let mut cuts: Vec<usize> = chunks.iter().flat_map(|chunk| chunk.parents.as_ref().iter().map(|&p| p + 1)).collect();
@@ -94,20 +88,19 @@ fn blocks(dt: &ListOpLog) -> Vec<Block> {
     blocks
 }
 
-/// Which peer makes an block, and what its author had seen.
+/// Which peer makes a block, and what its author had seen.
 struct Plan {
     peer: usize,
     /// The peer's events before this block.
     counter: usize,
-    /// For each peer known at the time, how many of its events the author had seen.
+    /// Per peer known then, how many of its events the author had seen.
     seen: Vec<usize>,
 }
 
-/// Replays a diamond-types log into replicas of another library, one for each peer, each
-/// sent exactly what the author of its next edits had seen. `None` if `limit` runs out.
-///
-/// An agent whose events are concurrent with one another becomes several peers, since
-/// these libraries need each peer's events to be made one after another.
+/// Replays a diamond-types log into replicas of another library (Loro, Automerge, Yjs), so that
+/// all are measured on the same history. Each peer has a replica, sent exactly what the author
+/// of its next edits had seen. An agent with concurrent events becomes several peers, and a new
+/// peer starts as a copy of an existing replica. `None` if `limit` runs out.
 pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
     let began = Instant::now();
     let blocks = blocks(dt);
@@ -265,7 +258,7 @@ impl Replica for Automerge {
 pub struct Yjs {
     document: yrs::Doc,
     text: yrs::TextRef,
-    /// The text, kept only when it is not all ASCII: yrs counts positions in bytes.
+    /// The text, kept only when it is not all ASCII, since yrs counts positions in bytes.
     chars: Option<Vec<char>>,
 }
 

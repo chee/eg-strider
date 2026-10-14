@@ -1,5 +1,3 @@
-//! Checks the graph's running analysis against working it all out afresh.
-
 use proptest::prelude::*;
 use proptest::sample::Index;
 use std::ops::Range;
@@ -158,8 +156,9 @@ impl Cut {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(600))]
 
-    /// Events are added in chains of 1 to 4, each after one or two earlier events, often the
-    /// last, so that histories have long linear stretches, forks part-way along and merges.
+    /// Checks the graph's running analysis against a fresh one. Events come in chains of 1 to
+    /// 4, each after one or two earlier events, often the last, so that histories have long
+    /// linear stretches, forks partway along and merges.
     #[test]
     fn running_analysis_matches_a_fresh_one(steps in proptest::collection::vec((any::<[Index; 2]>(), 0u8..10, 1u32..5), 1..120)) {
         let mut graph = Graph::new();

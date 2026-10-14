@@ -1,23 +1,3 @@
-//! A saved document, laid out so that opening it reads little more than its text:
-//!
-//! - a header: the agents and how far each has counted, how many events the history has, its
-//!   heads, the length of the text, and how many events and bytes each block of history has;
-//! - the text of the document with every event merged;
-//! - the history in blocks of events, each starting at a critical version, so that a block
-//!   and those after it can be read without the ones before.
-//!
-//! Loading reads the header and the text, and keeps the history as it is until an event
-//! arrives that was made at an older version. Then it reads the blocks from the one holding
-//! that version on. A block holds its events in columns, one for each field, so that a
-//! field's values sit together and pack well:
-//!
-//! - a number is a LEB128 varint, and a column is its length in bytes and then its values;
-//! - a column whose values mostly repeat is stored as runs: a value, then how many times;
-//! - an op's position is stored as how far it is from where the op before left off, and a
-//!   parent as how far back it is;
-//! - the columns of a block, the text it inserts and the document's text are each compressed
-//!   with Zstandard.
-
 use super::{AgentRun, Op, OpKind, OpLog, OpSlice};
 use crate::replay::Base;
 use std::borrow::Cow;
@@ -26,16 +6,15 @@ use strider_graph::{BlockId, EventId, Graph, Segment};
 
 const MAGIC: &[u8] = b"eg-strider\x05";
 
-/// About how many events go in the last block of saved history. Each block before it is twice
-/// the size of the one after: recent history, which is what an event made at an older version
-/// most often needs, can be read without much else, and the rest packs well in a few large
-/// blocks. Tiny in debug builds, so that tests on short histories save several.
+/// About how many events the last block of history holds. Each earlier block is twice the size
+/// of the one after, so that recent history reads alone and the rest packs well. Tiny in debug
+/// builds, so that tests save several.
 const BLOCK: u32 = if cfg!(debug_assertions) { 8 } else { 1 << 15 };
 
-/// A block of saved history's place among the saved blocks.
+/// Index of a block of saved history.
 pub(crate) type SavedBlockIndex = usize;
 
-/// A file that is not a saved document, or is a damaged one.
+/// A file that is not a saved document, or is damaged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Malformed;
 
@@ -47,15 +26,15 @@ impl std::fmt::Display for Malformed {
 
 impl std::error::Error for Malformed {}
 
-/// History that is still as it was saved: the events before the first that the log holds.
+/// History still as saved: the events before the first that the log holds.
 pub(crate) struct Packed {
     /// The file the log was loaded from.
     bytes: Vec<u8>,
-    /// Where each block of that history is in `bytes`.
+    /// Where each block is in `bytes`.
     blocks: Vec<Range<usize>>,
-    /// The first event of each block, then the number of events in them all.
+    /// Each block's first event, then the total number of events.
     starts: Vec<EventId>,
-    /// The events of that history that none of its others descends from.
+    /// That history's heads.
     pub heads: Vec<EventId>,
 }
 
@@ -67,8 +46,11 @@ impl Packed {
 }
 
 impl OpLog {
-    /// Writes out the log with the document it merges to, as a file that [`load`](Self::load)
-    /// opens without merging anything.
+    /// Writes the log as a file that [`load`](Self::load) opens without merging: a header, the
+    /// merged text, then the history in blocks that each start at a critical version, so that a
+    /// block and those after it read alone. A block stores each field as a column of LEB128
+    /// varints, run-length encoded where values repeat, with positions relative to the op
+    /// before and parents as distances back. Columns and text are compressed with Zstandard.
     pub fn save(&mut self) -> Vec<u8> {
         self.checkout();
         let (floor, len) = (self.graph.floor(), self.graph.len());
@@ -107,9 +89,8 @@ impl OpLog {
         out
     }
 
-    /// Opens a file that [`save`](Self::save) wrote: the log, ready for more events, with its
-    /// document. The history is checked only when it is read, which is when an event arrives
-    /// that was made at an older version; if that part of the file is damaged, reading it
+    /// Opens a file that [`save`](Self::save) wrote, ready for more events. The history is
+    /// checked only when an event made at an older version has it read; reading a damaged part
     /// panics.
     pub fn load(bytes: Vec<u8>) -> Result<OpLog, Malformed> {
         let mut file = Reader(bytes.strip_prefix(MAGIC).ok_or(Malformed)?);
@@ -152,8 +133,8 @@ impl OpLog {
         Ok(log)
     }
 
-    /// Reads the history that is still as it was saved from block `from` on, so that the log
-    /// holds every event since that block's first.
+    /// Reads the saved history from block `from` on, so that the log holds every event from
+    /// that block's first.
     pub(crate) fn unpack_from(&mut self, from: SavedBlockIndex) {
         let Some(mut packed) = self.packed.take() else { return };
         let later = std::mem::take(self);
@@ -189,8 +170,8 @@ impl OpLog {
         self.packed = (from > 0).then_some(packed);
     }
 
-    /// Returns the events that the chain of block `block` starts from: its parents, which for
-    /// a chain with no block before it are the heads of the history still as it was saved.
+    /// Returns the parents of block `block`'s first event: for a chain with no block before it,
+    /// the saved history's heads.
     fn parents_of(&self, block: BlockId) -> Vec<EventId> {
         let blocks = self.graph.blocks();
         let parents: Vec<EventId> = blocks.parents(block).iter().map(|&parent| blocks.start(parent + 1) - 1).collect();
@@ -200,9 +181,9 @@ impl OpLog {
         }
     }
 
-    /// Chooses where to cut the events `from..to`, which the log holds, into blocks: at
-    /// critical versions, about [`BLOCK`] events before the end and twice as far apart each
-    /// time. Returns `from` and then the end of each block.
+    /// Chooses where to cut the held events `from..to` into blocks: at critical versions, about
+    /// [`BLOCK`] events before the end and twice as far apart each time. Returns `from`, then
+    /// each block's end.
     fn cuts(&self, from: EventId, to: EventId) -> Vec<EventId> {
         let blocks = self.graph.blocks();
         let (mut cuts, mut size) = (vec![to], BLOCK);
@@ -231,7 +212,7 @@ impl OpLog {
         cuts
     }
 
-    /// Packs the events `events`, which the log holds, as a block.
+    /// Packs the held events `events` as a block.
     fn pack(&self, events: Range<EventId>) -> Vec<u8> {
         let mut columns = Vec::new();
 
@@ -315,8 +296,8 @@ impl OpLog {
         out
     }
 
-    /// Reads a block that [`pack`](Self::pack) wrote, whose events come straight after those
-    /// the log holds, and adds them. Returns the parents of the first.
+    /// Reads a block that [`pack`](Self::pack) wrote, whose events follow those held, and adds
+    /// them. Returns the first event's parents.
     fn unpack(&mut self, block: &[u8]) -> Result<Vec<EventId>, Malformed> {
         let mut file = Reader(block);
         let columns = file.packed()?;
@@ -399,8 +380,8 @@ impl OpLog {
     }
 }
 
-/// Returns where an op leaves off: after what it inserted, or where it deleted from. The
-/// next op is most often right there or a little before.
+/// Returns where an op leaves off: after what it inserted, or where it deleted. The next op is
+/// usually there or just before.
 fn after(kind: OpKind, pos: u32, len: u32) -> u32 {
     match kind {
         OpKind::Ins => pos.saturating_add(len),
@@ -417,7 +398,7 @@ fn number(out: &mut Vec<u8>, mut n: usize) {
     out.push(n as u8);
 }
 
-/// Appends a column: the length in bytes of what `write` writes, then that.
+/// Appends a column: its length in bytes, then what `write` writes.
 fn column(out: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>)) {
     let mut values = Vec::new();
     write(&mut values);
@@ -425,7 +406,7 @@ fn column(out: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>)) {
     out.extend_from_slice(&values);
 }
 
-/// Appends values as runs: each value, then how many times it comes in a row.
+/// Appends values as runs: each value, then how many times it repeats.
 fn runs(out: &mut Vec<u8>, values: impl Iterator<Item = u64>) {
     let mut run: Option<(u64, usize)> = None;
     for value in values {
@@ -445,7 +426,7 @@ fn runs(out: &mut Vec<u8>, values: impl Iterator<Item = u64>) {
     }
 }
 
-/// Folds a signed number into an unsigned one that is small when the number is near zero.
+/// Folds a signed number into an unsigned one that is small when near zero.
 fn zigzag(n: i64) -> u64 {
     (n << 1 ^ n >> 63) as u64
 }
@@ -469,7 +450,7 @@ fn unpacked(packed: &[u8], len: usize) -> Result<Vec<u8>, Malformed> {
     zstd::bulk::decompress(packed, len).ok().filter(|part| part.len() == len).ok_or(Malformed)
 }
 
-/// What is left to read of a file or of one of its columns.
+/// What is left to read of a file or a column.
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
@@ -497,26 +478,26 @@ impl<'a> Reader<'a> {
         u32::try_from(self.varint()?).map_err(|_| Malformed)
     }
 
-    /// Reads how many things of at least a byte each follow.
+    /// Reads a count of things at least a byte each.
     fn count(&mut self) -> Result<usize, Malformed> {
         let items = self.number()? as usize;
         (items <= self.0.len()).then_some(items).ok_or(Malformed)
     }
 
-    /// Takes the next `len` bytes, which [`count`](Self::count) has found to be there.
+    /// Takes the next `len` bytes, which [`count`](Self::count) has checked are there.
     fn take(&mut self, len: usize) -> &'a [u8] {
         let (bytes, rest) = self.0.split_at(len);
         self.0 = rest;
         bytes
     }
 
-    /// Reads a column that [`column`] wrote.
+    /// Reads a column that [`column`](fn@column) wrote.
     fn column(&mut self) -> Result<Reader<'a>, Malformed> {
         let len = self.count()?;
         Ok(Reader(self.take(len)))
     }
 
-    /// Reads a part that was compressed: its length, its compressed length, and the bytes.
+    /// Reads a compressed part: its length, its compressed length, then the bytes.
     fn packed(&mut self) -> Result<Vec<u8>, Malformed> {
         let (len, packed) = (self.number()? as usize, self.count()?);
         unpacked(self.take(packed), len)

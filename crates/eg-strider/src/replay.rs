@@ -1,15 +1,3 @@
-//! Replays an operation log into the document's text. The history is cut at its critical
-//! versions. A stretch with no concurrency is applied as recorded. A region is first tried by
-//! offset arithmetic ([`shift`](crate::shift)) and otherwise walked with the tracker; what
-//! the tracker resolves is memoised at the region's critical version, since it never changes,
-//! so later replays place those events directly. Merging only works out where each op of a
-//! region goes; the edits are then taken back from last to first to assemble the text.
-//!
-//! A replay starts from a document that already holds the first so many events. Those may
-//! end inside a region, when a later event was made without some of them. The region is then
-//! merged from its start, with the events the document holds gone through first and only
-//! for what they mean to the others.
-
 use crate::oplog::{ByteRange, OpIndex, OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
 use crate::tracker::{ItemId, Targets, Tracker};
@@ -17,29 +5,28 @@ use std::ops::Range;
 use strider_graph::{BlockId, EventId, Move, Segment, Walker};
 use strider_text::PieceTable;
 
-/// Where merging put each op of the regions. The rest of each edit is the op itself, in the
-/// log.
+/// Where merging put each op of the regions. The rest of each edit is the op itself.
 #[derive(Default)]
 pub(crate) struct Placed {
-    /// The stretches of blocks, in the order they were merged. The ops of a stretch are taken
-    /// together, so one that runs on from a block into the next is a single op.
+    /// Stretches of blocks, in merge order. An op that runs from one block into the next is one
+    /// op.
     order: Vec<Range<BlockId>>,
-    /// For each op of those stretches in turn. An insert: the index it went in at. A delete:
-    /// the index and length of each run of characters it removed, then how many runs.
+    /// Per op of those stretches. An insert: the index it went in at. A delete: the index and
+    /// length of each run it removed, then the number of runs.
     at: Vec<u32>,
-    /// How many runs the delete being recorded has removed so far.
+    /// Runs the current delete has removed so far.
     runs: u32,
     /// Length of the document so far.
     len: u32,
-    /// The first block with events that the document does not hold yet. Where the ops of
-    /// earlier blocks go is not recorded.
+    /// The first block whose events the document does not hold. Ops of earlier blocks are not
+    /// recorded.
     new: BlockId,
-    /// Whether the stretch being merged is of those earlier blocks.
+    /// Whether the current stretch is of those earlier blocks.
     held: bool,
 }
 
 impl Placed {
-    /// Starts on the ops of a stretch of blocks, all of which the document holds or none.
+    /// Starts on a stretch of blocks, which the document holds all of or none of.
     pub(crate) fn begin(&mut self, stretch: Range<BlockId>) {
         self.held = stretch.end <= self.new;
         debug_assert!(self.held || stretch.start >= self.new, "a stretch with events on both sides of the base");
@@ -56,7 +43,7 @@ impl Placed {
         }
     }
 
-    /// Records that the delete being merged removed the `len` characters at `pos`.
+    /// Records that the current delete removed the `len` characters at `pos`.
     pub(crate) fn remove(&mut self, pos: u32, len: u32) {
         if !self.held {
             self.len -= len;
@@ -65,14 +52,14 @@ impl Placed {
         }
     }
 
-    /// Ends a delete, once everything it removed is recorded.
+    /// Ends a delete once all it removed is recorded.
     pub(crate) fn end_delete(&mut self) {
         if !self.held {
             self.at.push(std::mem::take(&mut self.runs));
         }
     }
 
-    /// Notes where things stand, to come back to with [`undo_to`](Self::undo_to).
+    /// Marks where things stand, for [`undo_to`](Self::undo_to).
     pub(crate) fn mark(&self) -> (usize, usize, u32) {
         (self.order.len(), self.at.len(), self.len)
     }
@@ -85,15 +72,14 @@ impl Placed {
     }
 }
 
-/// What the critical version at the start of a region keeps about it, once the region has been
-/// through the tracker.
+/// What a region's critical version keeps once the region has been through the tracker.
 #[derive(Default)]
 struct Kept {
-    /// How many of the region's events, counting from its start, `resolved` covers.
+    /// How many of the region's events, from its start, `resolved` covers.
     events: u32,
-    /// Tracker items, op by op in log order. An insert: the left origin of its first
-    /// character, then the right origin all share. A delete: for each stretch of
-    /// consecutive targets, the first, then how many, with [`DESCENDING`] if they count down.
+    /// Tracker items, op by op in log order. An insert: its first character's left origin, then
+    /// the right origin all its characters share. A delete: per stretch of consecutive targets,
+    /// the first and the count, with [`DESCENDING`] if they count down.
     resolved: Vec<ItemId>,
 }
 
@@ -108,16 +94,15 @@ pub(crate) struct Base {
     pub text: String,
 }
 
-/// What a log has worked out in earlier replays.
+/// What earlier replays of a log worked out.
 #[derive(Default)]
 pub(crate) struct Memo {
     plan: Option<Plan>,
-    /// How many stretches and places the regions came to last time: room to set aside for
-    /// them next time.
+    /// How many stretches and places the regions took last time, to reserve next time.
     room: (usize, usize),
 }
 
-/// Working room for merging regions, reused from one region to the next.
+/// Scratch space for merging regions, reused across regions.
 #[derive(Default)]
 struct Workspace {
     tracker: Tracker,
@@ -125,22 +110,22 @@ struct Workspace {
     shifter: Shifter,
 }
 
-/// The shape of the history, valid while the log has the same number of events.
+/// The history's shape, valid while the log has the same number of events.
 struct Plan {
     events: usize,
     /// The first event of each segment.
     starts: Vec<EventId>,
     segments: Vec<Segment>,
-    /// For each block, the index of the op containing its first event; then the number of ops.
+    /// Per block, the op holding its first event; then the number of ops.
     first_op: Vec<OpIndex>,
-    /// For each segment, what the critical version it starts at keeps. Nothing, unless the
-    /// segment is a region that has been through the tracker.
+    /// Per segment, what its starting critical version keeps: nothing unless it is a region
+    /// that went through the tracker.
     kept: Vec<Kept>,
 }
 
 impl Plan {
-    /// Analyses the log. Regions that start from a critical version of the `previous` plan
-    /// take over what it kept for them.
+    /// Analyses the log, taking over what the `previous` plan kept for regions that start at
+    /// the same event.
     fn new(log: &OpLog, mut previous: Option<Plan>) -> Self {
         let blocks = log.graph.blocks();
         let segments = log.graph.segments();
@@ -156,7 +141,7 @@ impl Plan {
         Plan { events: log.len(), starts, segments, first_op, kept }
     }
 
-    /// Takes what is kept for the region that starts at event `start`, if there is one.
+    /// Takes what is kept for the region starting at `start`, if anything.
     fn take_kept(&mut self, start: EventId) -> Kept {
         match self.starts.binary_search(&start) {
             Ok(at) => std::mem::take(&mut self.kept[at]),
@@ -164,20 +149,19 @@ impl Plan {
         }
     }
 
-    /// Iterates over the ops of a stretch of blocks. An op that runs past either end is cut
-    /// there.
+    /// Iterates over a stretch's ops, cutting any that run past either end.
     #[inline]
     fn ops<'a>(&self, log: &'a OpLog, stretch: &Range<BlockId>) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
         self.ops_from(log, stretch, log.graph.blocks().start(stretch.start))
     }
 
-    /// Iterates over the ops of a stretch of blocks from event `from` on, which is in it.
+    /// Iterates over a stretch's ops from event `from`, which is in it.
     #[inline]
     fn ops_from<'a>(&self, log: &'a OpLog, stretch: &Range<BlockId>, from: EventId) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
         log.ops(self.op_at(log, stretch, from)..self.first_op[stretch.end as usize], from..log.graph.blocks().start(stretch.end))
     }
 
-    /// Finds the op containing event `from` of a stretch of blocks.
+    /// Returns the op holding event `from` of a stretch.
     fn op_at(&self, log: &OpLog, stretch: &Range<BlockId>, from: EventId) -> OpIndex {
         if from == log.graph.blocks().start(stretch.start) {
             self.first_op[stretch.start as usize]
@@ -198,8 +182,7 @@ impl Memo {
         self.plan.as_ref().map_or(0, Plan::tracked_regions)
     }
 
-    /// Notes that the log's blocks are no longer those the last checkout saw, though its
-    /// events are.
+    /// Notes that the log's blocks changed though its events did not.
     pub(crate) fn outdate(&mut self) {
         if let Some(plan) = &mut self.plan {
             plan.events = usize::MAX;
@@ -207,9 +190,14 @@ impl Memo {
     }
 }
 
-/// Merges the log's events after `base` into the document that `base` holds, reusing and
-/// updating `memo`. Returns the text and its length in characters. Where `base` ends inside
-/// a region, a block and an op must start there.
+/// Merges the log's events after `base` into the document `base` holds, reusing and updating
+/// `memo`. Returns the text and its length in characters.
+///
+/// Linear stretches apply as recorded. A region is merged by shifting if it can be, else with
+/// the tracker, whose results are memoised at the region's critical version. Merging only works
+/// out where each op goes; the text is then built by taking the edits back, last to first. If
+/// `base` ends inside a region, a block and an op must start there: the region's events that
+/// `base` holds are walked first and not recorded.
 pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u32) {
     // The log only ever grows, so the same length means the same events.
     if memo.plan.as_ref().is_none_or(|plan| plan.events != log.len()) {

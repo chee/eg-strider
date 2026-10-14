@@ -1,6 +1,3 @@
-//! Glue between eg-strider and diamond-types, for testing one against the other, and
-//! between diamond-types and Loro, for measuring all three on the same histories.
-
 pub mod replicas;
 
 use diamond_types::list::operation::{ListOpKind, TextOperation};
@@ -8,22 +5,21 @@ use diamond_types::list::ListOpLog;
 use eg_strider::{Edit, EventId, OpLog, SequenceNumber};
 use std::ops::Range;
 
-/// A history with its ops in memory, as one peer would hand it to another. Parents and ops
-/// are each kept in one list for the whole history, so that it is not much larger than its
-/// ops. Each library is handed the ops in the form its own calls take: diamond-types its
-/// [`TextOperation`]s with parents as `usize`, and eg-strider its [`Edit`]s beside the text
-/// they insert, with parents as [`EventId`]s.
+/// A history with its ops in memory, as one peer would hand it to another, for testing
+/// eg-strider against diamond-types and measuring every library on the same histories. Each
+/// library gets the ops in the form its calls take: diamond-types its [`TextOperation`]s with
+/// `usize` parents, and eg-strider its [`Edit`]s beside their text, with [`EventId`] parents.
 pub struct History<Op = Edit, Parent = EventId> {
     pub agents: Vec<String>,
     pub chunks: Vec<Chunk>,
     parents: Vec<Parent>,
     ops: Vec<Op>,
-    /// The text of every [`Edit`] that inserts, one after another.
+    /// The text of every inserting [`Edit`], in order.
     text: String,
 }
 
-/// A run of events by one agent, the first with the chunk's parents and each of the others
-/// following the one before.
+/// A run of events by one agent: the first with the chunk's parents, each other following the
+/// one before.
 #[derive(Clone)]
 pub struct Chunk {
     pub events: Range<usize>,
@@ -32,7 +28,7 @@ pub struct Chunk {
     pub sequence_number: usize,
     parents: Range<u32>,
     ops: Range<u32>,
-    /// Where the text that the chunk's inserts put in is in the history's.
+    /// Where the chunk's inserted text is in the history's.
     text: Range<u32>,
 }
 
@@ -78,7 +74,7 @@ impl History<TextOperation, usize> {
         History { agents, chunks, parents, ops, text: String::new() }
     }
 
-    /// Returns the same history with its ops as eg-strider is handed them.
+    /// Returns the history with its ops in eg-strider's form.
     pub fn edits(&self) -> History {
         fn inserted(op: &TextOperation) -> &str {
             if op.kind == ListOpKind::Ins {
@@ -110,10 +106,9 @@ impl History<TextOperation, usize> {
         History { agents: self.agents.clone(), chunks, parents, ops, text }
     }
 
-    /// Returns the bytes of all the text the history inserts and deletes: what a protocol
-    /// with no overhead at all would have to carry. A trace does not say what its deletes
-    /// removed, so a deleted character is taken to be as long as an inserted one is on
-    /// average.
+    /// Returns the bytes of all the text the history inserts and deletes: what a protocol with
+    /// no overhead would carry. Traces do not record what was deleted, so a deleted character
+    /// counts as long as an inserted one on average.
     pub fn text_bytes(&self) -> usize {
         let (mut bytes, mut inserted, mut deleted) = (0, 0, 0);
         for op in &self.ops {
@@ -127,16 +122,15 @@ impl History<TextOperation, usize> {
     }
 }
 
-/// Copies a diamond-types oplog into an eg-strider one, event for event, so that both
-/// number events identically.
+/// Copies a diamond-types oplog into an eg-strider one, numbering events identically.
 pub fn convert(dt: &ListOpLog) -> OpLog {
     let mut log = OpLog::new();
     extend(&mut log, &History::of(dt).edits(), usize::MAX);
     log
 }
 
-/// Appends to `log` the events of `history` that it does not have yet, stopping at the last
-/// whole chunk that ends at or before event `limit`.
+/// Appends the events of `history` that `log` lacks, up to the last whole chunk ending at or
+/// before `limit`.
 pub fn extend(log: &mut OpLog, history: &History, limit: usize) {
     let agents: Vec<_> = history.agents.iter().map(|name| log.get_or_create_agent(name)).collect();
     let have = log.len();

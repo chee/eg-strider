@@ -1,26 +1,19 @@
-//! Plans the order in which a region's blocks are merged. The tracker can merge a block
-//! only when its working version equals the block's parents, and moving that version costs
-//! time in proportion to the events moved. The plan is a topological sort (Kahn's
-//! algorithm) that takes, among the blocks that are ready, the one nearest the current
-//! version. A version is held as a version vector: the region's blocks are split into
-//! chains, and a version is how far along each chain it reaches.
-
 use crate::{BlockId, Blocks};
 use std::ops::Range;
 
-/// One step of a walk. Ranges are of blocks.
+/// One step of a walk over blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Move {
     /// Take these blocks out of the working version.
     Retreat(Range<BlockId>),
     /// Put these blocks back into the working version.
     Advance(Range<BlockId>),
-    /// The working version is now this block's parents: merge the block, which also adds it to
-    /// the working version.
+    /// Merge this block, whose parents are now the working version. It then joins the working
+    /// version.
     Apply(BlockId),
 }
 
-/// A list of lists stored flat: row `i` is `items[start[i]..start[i + 1]]`.
+/// Lists of lists stored flat: row `i` is `items[start[i]..start[i + 1]]`.
 #[derive(Default)]
 struct Rows {
     start: Vec<u32>,
@@ -40,7 +33,7 @@ impl Rows {
         self.start.push(self.items.len() as u32);
     }
 
-    /// Returns how many closed rows there are.
+    /// Returns the number of closed rows.
     fn len(&self) -> usize {
         self.start.len() - 1
     }
@@ -49,8 +42,8 @@ impl Rows {
         &self.items[self.start[i] as usize..self.start[i + 1] as usize]
     }
 
-    /// Rebuilds the list as `rows` rows from `(row, item)` pairs, keeping the order of the
-    /// items within each row.
+    /// Rebuilds the list as `rows` rows from `(row, item)` pairs, keeping each row's items in
+    /// order.
     fn group(&mut self, rows: usize, pairs: impl Iterator<Item = (u32, u32)> + Clone) {
         self.start.clear();
         self.start.resize(rows + 1, 0);
@@ -72,7 +65,7 @@ impl Rows {
     }
 }
 
-/// The edges between a region's blocks, which are numbered from 0 within it.
+/// Edges between a region's blocks, numbered from 0 within it.
 #[derive(Default)]
 struct RegionGraph {
     parents: Rows,
@@ -93,25 +86,25 @@ impl RegionGraph {
     }
 }
 
-/// A region's blocks split into chains, in which every block has the one before it in its
-/// history. A history then holds a prefix of each chain, and is stored as those lengths.
+/// A region's blocks split into chains, each block having the one before it in its history. A
+/// history is then a prefix of each chain.
 #[derive(Default)]
 struct Chains {
-    /// The chain each block is on, and how many blocks come before it there.
+    /// Each block's chain, and its place along it.
     chain: Vec<u32>,
     place: Vec<u32>,
     /// Each chain's blocks, in order.
     members: Rows,
-    /// For each chain, the number of events in its first `j` blocks, for every `j`.
+    /// Per chain, the events in its first `j` blocks, for every `j`.
     events_before: Rows,
-    /// Each block's history: how many blocks along each chain are in it. Chains that began
-    /// after the block are left off.
+    /// Each block's history: how many blocks along each chain it holds. Chains begun after the
+    /// block are left off.
     seen: Rows,
 }
 
 impl Chains {
-    /// Splits the blocks into chains and works out each block's history. A block joins a
-    /// chain it has seen the whole of, if there is one.
+    /// Splits the blocks into chains and works out each block's history. A block joins a chain
+    /// it has seen all of, if any.
     fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<BlockId>) {
         let Chains { chain, place, members, events_before, seen } = self;
         chain.clear();
@@ -165,8 +158,8 @@ impl Chains {
         self.members.row(chain).get(places.start as usize..places.end as usize).unwrap_or(&[])
     }
 
-    /// Counts the events between the version `current` and a block's history, giving up once
-    /// past `limit`.
+    /// Counts the events between version `current` and a block's history, stopping once past
+    /// `limit`.
     fn distance(&self, current: &[u32], block: usize, limit: u64) -> u64 {
         let mut events = 0;
         for (chain, &now) in current.iter().enumerate() {
@@ -197,29 +190,29 @@ impl Chains {
     }
 }
 
-/// When no block continues straight on from the last one, how many of the most recently
-/// readied blocks to consider as the next stop.
+/// How many of the most recently readied blocks to consider when none follows the last one
+/// directly.
 const CANDIDATES: usize = 64;
 
-/// The state of the topological sort: which blocks can be visited next.
+/// Topological sort state: which blocks can be visited next.
 #[derive(Default)]
 struct Schedule {
-    /// Which 127ths of the region's events lie at or after each block: a cheap stand-in for
-    /// the size of its set of descendants that does not count shared descendants twice.
+    /// Which 127ths of the region's events lie at or after each block: a cheap measure of its
+    /// descendants that counts shared ones once.
     cover: Vec<u128>,
-    /// How many of each block's parents have not been visited yet. A block that is not among
-    /// those to visit first waits on them all as if on one more parent.
+    /// Per block, how many parents are not yet visited. A block outside `first` also waits on
+    /// all of `first`, as one more parent.
     waiting: Vec<u32>,
-    /// The blocks waiting on nothing, in the order they became so.
+    /// Blocks waiting on nothing, in the order they became so.
     ready: Vec<u32>,
-    /// The blocks to visit before any other, and how many of them are still to visit.
+    /// Blocks to visit before any other, and how many of them are left.
     first: Range<usize>,
     held: usize,
 }
 
 impl Schedule {
-    /// Starts with the first `known` blocks counted as visited, and the rest of the first
-    /// `first` to visit before any other.
+    /// Starts with the first `known` blocks visited, and the rest of the first `first` to visit
+    /// before any other.
     fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<BlockId>, known: usize, first: usize) {
         let count = region.len();
         let (from, to) = (blocks.start(region.start), blocks.start(region.end));
@@ -251,8 +244,8 @@ impl Schedule {
         }
     }
 
-    /// Takes the ready block nearest the version `current`: a child of the `last` block
-    /// visited when one is ready, since that moves the version nowhere.
+    /// Takes the ready block nearest version `current`, preferring a child of the `last` block
+    /// visited, which moves the version nowhere.
     fn take_nearest(&mut self, graph: &RegionGraph, chains: &Chains, current: &[u32], last: Option<u32>) -> Option<usize> {
         let mut best = (u64::MAX, u32::MAX, None);
         let oldest = self.ready.len().saturating_sub(CANDIDATES);
@@ -275,7 +268,7 @@ impl Schedule {
         Some(self.ready.remove(best.2?) as usize)
     }
 
-    /// Marks a block visited, readying any blocks that were only waiting on it.
+    /// Marks a block visited, readying the blocks only waiting on it.
     fn visited(&mut self, graph: &RegionGraph, block: usize) {
         let last_held = self.first.contains(&block) && {
             self.held -= 1;
@@ -291,7 +284,10 @@ impl Schedule {
     }
 }
 
-/// Plans walks. Holds scratch space that is reused from one region to the next.
+/// Plans the order a region's blocks are merged in. Moving the tracker's working version costs
+/// time per event moved, so a topological sort takes, among the ready blocks, the one nearest
+/// the current version, held as how far along each chain of blocks it reaches. Scratch space is
+/// reused across regions.
 #[derive(Default)]
 pub struct Walker {
     graph: RegionGraph,
@@ -307,9 +303,9 @@ impl Walker {
         Self::default()
     }
 
-    /// Walks the blocks in `region`, which must lie between two critical versions, calling
-    /// `visit` with each step. The first `known` blocks are already in the working version,
-    /// and the rest of the first `first` are visited before any other.
+    /// Walks `region`, which lies between two critical versions, calling `visit` with each
+    /// step. The first `known` blocks start in the working version, and the rest of the first
+    /// `first` are visited before any other.
     pub fn walk(&mut self, blocks: &Blocks, region: &Range<BlockId>, known: usize, first: usize, mut visit: impl FnMut(Move)) {
         let Walker { graph, chains, schedule, current } = self;
         graph.build(blocks, region);
@@ -336,7 +332,7 @@ impl Walker {
     }
 }
 
-/// Calls `f` with the first and last of each stretch of blocks numbered one after another.
+/// Calls `f` with the first and last block of each run of consecutive blocks.
 fn each_stretch(blocks: &[u32], mut f: impl FnMut(u32, u32)) {
     let mut from = 0;
     for to in 1..=blocks.len() {

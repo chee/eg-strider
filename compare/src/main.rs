@@ -1,9 +1,3 @@
-//! Measures eg-strider beside diamond-types, yrs, Loro and Automerge on two tasks for each
-//! trace, and checks that eg-strider ends with the text diamond-types does:
-//!
-//! - merging a history whose ops are already in memory, through each library's own calls;
-//! - reopening a saved document from its bytes, until it is ready for more edits.
-
 use compare::replicas::TEXT;
 use compare::History;
 use diamond_types::list::operation::TextOperation;
@@ -54,10 +48,10 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
-/// What running something did to the memory in use, in bytes.
+/// What running something did to memory use, in bytes.
 #[derive(Clone, Copy)]
 struct Memory {
-    /// The most in use at any moment, beyond what was in use at the start.
+    /// The most in use at once, beyond what was in use at the start.
     peak: usize,
     /// How much more is in use afterwards, while the result is held.
     kept: usize,
@@ -71,14 +65,14 @@ fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
     (result, Memory { peak: MOST.load(Relaxed) - before, kept: IN_USE.load(Relaxed).saturating_sub(before) })
 }
 
-/// How long each trace's merges are run for before any is timed.
+/// How long each trace's merges run before any is timed.
 const WARM_UP: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// How long replaying a history into another library may take before it is given up on.
+/// How long replaying a history into another library may take before it is given up.
 const LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Loads the history in another library's format, with how many peers it took and how many
-/// edits had to be moved. Replayed into the library on first use and kept beside the trace.
+/// Loads a history in another library's format, with how many peers it took and how many edits
+/// had to be moved. Replayed on first use and kept beside the trace.
 fn replayed<R: compare::replicas::Replica>(path: &str, kind: &str, dt: &ListOpLog, replay: bool) -> Result<(Vec<u8>, String), &'static str> {
     let file = |suffix: &str| format!("{path}.{kind}{suffix}");
     if let (Ok(bytes), Ok(notes)) = (std::fs::read(file("")), std::fs::read_to_string(file("-notes"))) {
@@ -101,8 +95,7 @@ fn replayed<R: compare::replicas::Replica>(path: &str, kind: &str, dt: &ListOpLo
     Ok((replayed.saved, notes))
 }
 
-/// Appends a history to a new eg-strider log through its calls for remote edits, then merges
-/// it. The log holds the document.
+/// Appends a history to a new eg-strider log through its remote-edit calls, then merges it.
 fn strider_merge(history: &History) -> OpLog {
     let mut log = OpLog::new();
     compare::extend(&mut log, history, usize::MAX);
@@ -127,15 +120,15 @@ fn dt_merge(history: &History<TextOperation, usize>) -> (ListOpLog, ListBranch) 
     (oplog, branch)
 }
 
-/// Puts together a saved diamond-types document: the length of its history's file, the file,
-/// and the document's text, which the paper keeps beside the history so as not to merge again.
-/// The text is compressed as eg-strider's is.
+/// Puts together a saved diamond-types document: its history file's length, the file, and the
+/// document's text, compressed as eg-strider's is. The paper keeps the text beside the history
+/// so as not to merge again.
 fn dt_save(file: &[u8], text: &str) -> Vec<u8> {
     let lens = [file.len() as u64, text.len() as u64].map(u64::to_le_bytes).concat();
     [&lens[..], file, &zstd::bulk::compress(text.as_bytes(), 3).unwrap()].concat()
 }
 
-/// Reads a saved diamond-types document back: its history, and its text as a rope.
+/// Reads a saved diamond-types document: its history, and its text as a rope.
 fn dt_open(saved: &[u8]) -> (ListOpLog, JumpRope) {
     let (lens, rest) = saved.split_first_chunk::<16>().unwrap();
     let [file_len, text_len] = [0, 8].map(|at| u64::from_le_bytes(lens[at..at + 8].try_into().unwrap()) as usize);
@@ -144,8 +137,8 @@ fn dt_open(saved: &[u8]) -> (ListOpLog, JumpRope) {
     (ListOpLog::load_from(file).unwrap(), JumpRope::from(text.as_str()))
 }
 
-/// Rewrites a saved Automerge document as its changes, each after its length: the history
-/// as one peer would send it to another.
+/// Rewrites a saved Automerge document as its changes, each after its length, as one peer would
+/// send them.
 fn automerge_changes(saved: &[u8]) -> Vec<u8> {
     let mut document = automerge::AutoCommit::load(saved).unwrap();
     let mut out = Vec::new();
@@ -157,7 +150,7 @@ fn automerge_changes(saved: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Reads Automerge changes into memory, without applying them to a document.
+/// Reads Automerge changes into memory without applying them.
 fn automerge_decode(mut bytes: &[u8]) -> Vec<automerge::Change> {
     let mut changes = Vec::new();
     while let Some((len, rest)) = bytes.split_first_chunk::<4>() {
@@ -188,8 +181,7 @@ fn automerge_open(saved: &[u8]) -> (automerge::AutoCommit, String) {
     automerge_text(automerge::AutoCommit::load(saved).unwrap())
 }
 
-/// Reads a Yjs update into memory (through yrs, its Rust port), without applying it to a
-/// document.
+/// Reads a Yjs update into memory, through yrs, without applying it.
 fn yjs_decode(bytes: &[u8]) -> yrs::Update {
     use yrs::updates::decoder::Decode;
     yrs::Update::decode_v2(bytes).unwrap()
@@ -205,7 +197,7 @@ fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
     (document, string)
 }
 
-/// Saves a Yjs document: its whole state as one update, the only form it has.
+/// Saves a Yjs document as one update of its whole state, the only form it has.
 fn yjs_save(document: &mut yrs::Doc) -> Vec<u8> {
     use yrs::{ReadTxn, Transact};
     document.transact().encode_state_as_update_v2(&yrs::StateVector::default())
@@ -219,9 +211,8 @@ fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
     (document, string)
 }
 
-/// Applies ops to a new Loro document. Loro takes remote edits either as bytes or as the
-/// ops themselves, in the form it also exchanges as JSON, which is the one that starts from
-/// ops in memory.
+/// Applies ops to a new Loro document. Loro takes remote edits as bytes or as ops in its JSON
+/// form; the latter starts from ops in memory.
 fn loro_apply(ops: loro::JsonSchema) -> (LoroDoc, String) {
     let document = LoroDoc::new();
     document.import_json_updates(ops).unwrap();
@@ -233,23 +224,21 @@ fn loro_apply(ops: loro::JsonSchema) -> (LoroDoc, String) {
 #[derive(Clone, Copy)]
 struct Measured {
     merge_ms: f64,
-    /// The memory that the history's ops take, in the form the system is handed them.
+    /// Memory the history's ops take, in the form the system gets them.
     ops: usize,
-    /// While merging: the most memory in use, the ops included, and what the merged document
-    /// holds.
+    /// While merging: peak memory, ops included, and what the merged document holds.
     merging: Memory,
     open_ms: f64,
-    /// While reopening: the most memory in use, and what the reopened document holds.
+    /// While reopening: peak memory, and what the reopened document holds.
     opening: Memory,
-    /// The size of the saved document.
+    /// Size of the saved document.
     saved: usize,
-    /// Whether both tasks ended with the text diamond-types has.
+    /// Whether both tasks ended with diamond-types' text.
     same: bool,
 }
 
-/// Measures a library on the two tasks. `ops` puts a history's ops in memory, which is not
-/// timed but is counted as memory. The text each task hands back is a copy made to check it,
-/// and is not counted as held.
+/// Measures a library on the two tasks. `ops` puts a history's ops in memory, untimed but
+/// counted. The text each task returns is a copy for checking, and is not counted as held.
 fn measure<O, D>(
     reps: u32,
     expected: &str,
@@ -276,15 +265,15 @@ fn since(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1e3
 }
 
-/// Returns the median of some times: the middle one, or the mean of the middle two.
+/// Returns the median: the middle time, or the mean of the middle two.
 fn median(mut times: Vec<f64>) -> f64 {
     times.sort_by(f64::total_cmp);
     let (below, above) = (times.len().saturating_sub(1) / 2, times.len() / 2);
     times.get(below).map_or(f64::NAN, |low| (low + times[above]) / 2.0)
 }
 
-/// Returns the median time in milliseconds of `reps` runs of `f`, each on what `setup` makes
-/// for it outside the timing, and the last result.
+/// Returns the median milliseconds of `reps` runs of `f`, each on what an untimed `setup`
+/// makes, and the last result.
 fn median_of<S, T>(reps: u32, mut setup: impl FnMut() -> S, mut f: impl FnMut(S) -> T) -> (f64, T) {
     let mut times = Vec::with_capacity(reps as usize);
     loop {
@@ -303,21 +292,25 @@ fn mb(bytes: usize) -> String {
     format!("{:.2} MB", bytes as f64 / (1 << 20) as f64)
 }
 
-/// The systems, in the order their figures are listed everywhere.
+/// The systems, in the order their figures are listed.
 const SYSTEMS: [&str; 5] = ["strider", "dt", "yjs", "loro", "automerge"];
 
-/// Writes one figure for each system as a JSON object, with `null` for one that has none.
+/// Writes one figure per system as a JSON object, with `null` where there is none.
 fn object<T: Display>(of: [Option<T>; 5]) -> String {
     let fields: Vec<String> =
         SYSTEMS.iter().zip(of).map(|(name, value)| format!("\"{name}\":{}", value.map_or("null".to_string(), |v| v.to_string()))).collect();
     format!("{{{}}}", fields.join(","))
 }
 
-/// Lays one figure for each system out in columns, with a dash for one that has none.
+/// Lays one figure per system out in columns, with a dash where there is none.
 fn columns(of: [Option<String>; 5]) -> String {
     of.map(|value| format!("{:>13}", value.unwrap_or("-".to_string()))).join(" ")
 }
 
+/// Measures eg-strider beside diamond-types, yrs, Loro and Automerge on each trace, and checks
+/// that eg-strider ends with diamond-types' text. The two tasks are merging a history whose ops
+/// are in memory, through each library's own calls, and reopening a saved document from its
+/// bytes until it is ready for more edits.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let replay = args.iter().any(|a| a == "--replay");

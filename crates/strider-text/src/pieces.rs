@@ -1,9 +1,3 @@
-//! The pieces of a [`PieceTable`](crate::PieceTable). A piece is a stretch of the document
-//! that either sits at a known offset of the final text or is deleted: some later edit
-//! removes it. Pieces are kept in an unrolled list: chunks of up to 32 under a flat list of
-//! chunk lengths. Edits cluster, so the chunk used last, and the piece found last in it, are
-//! tried first.
-
 /// In place of a final position: these characters do not survive.
 const DELETED: u32 = u32::MAX;
 
@@ -28,8 +22,8 @@ impl Piece {
         Piece { len: self.len - skip, at: if self.at == DELETED { DELETED } else { self.at + skip } }
     }
 
-    /// Tells whether `next`, which follows this piece in the document, shares its fate: both
-    /// deleted, or both surviving next to each other.
+    /// Tells whether `next`, which follows this piece, shares its fate: both deleted, or both
+    /// surviving side by side.
     fn continues_into(self, next: Piece) -> bool {
         if self.at == DELETED || next.at == DELETED {
             self.at == next.at
@@ -43,8 +37,8 @@ impl Piece {
 #[derive(Clone, Copy)]
 struct Chunk {
     len: usize,
-    /// The piece found last, and how many characters come before it in the chunk: the next
-    /// lookup usually lands on or just after it.
+    /// The piece found last, and the characters before it in the chunk. The next lookup usually
+    /// lands at or after it.
     last: (usize, u32),
     pieces: [Piece; CHUNK],
 }
@@ -52,7 +46,7 @@ struct Chunk {
 impl Chunk {
     const EMPTY: Chunk = Chunk { len: 0, last: (0, 0), pieces: [Piece { len: 0, at: 0 }; CHUNK] };
 
-    /// Returns how many pieces the chunk holds.
+    /// Returns the number of pieces.
     fn len(&self) -> usize {
         self.len
     }
@@ -62,8 +56,7 @@ impl Chunk {
         self.pieces[i]
     }
 
-    /// Notes that piece `i` is changing: a remembered piece after it no longer starts where
-    /// it did.
+    /// Notes that piece `i` is changing, which moves any remembered piece after it.
     fn touch(&mut self, i: usize) {
         if i < self.last.0 {
             self.last = (0, 0);
@@ -76,8 +69,8 @@ impl Chunk {
         self.pieces[i] = piece;
     }
 
-    /// Finds the piece holding the character `offset` characters into the chunk, and how far into
-    /// that piece it is. One past the last piece for the end of the chunk.
+    /// Finds the piece holding character `offset` of the chunk, and the offset into it. One
+    /// past the last piece at the chunk's end.
     fn find(&mut self, offset: u32) -> (usize, u32) {
         let (mut i, mut start) = if offset < self.last.1 { (0, 0) } else { self.last };
         while i < self.len && offset >= start + self.pieces[i].len {
@@ -88,7 +81,7 @@ impl Chunk {
         (i, offset - start)
     }
 
-    /// Adds a piece as piece `i`. There must be room.
+    /// Inserts a piece at `i`. There must be room.
     fn insert(&mut self, i: usize, piece: Piece) {
         self.touch(i);
         self.pieces.copy_within(i..self.len, i + 1);
@@ -104,7 +97,9 @@ impl Chunk {
     }
 }
 
-/// The pieces of a document, in order.
+/// The pieces of a [`PieceTable`](crate::PieceTable), in order: stretches of the document that
+/// either sit at a known place in the final text or are deleted later. They are kept in an
+/// unrolled list of chunks, and the chunk and piece used last are tried first.
 pub(crate) struct Pieces {
     chunks: Vec<Chunk>,
     /// Chunks no longer in use.
@@ -112,12 +107,12 @@ pub(crate) struct Pieces {
     /// The chunks in document order, and how many characters each holds.
     order: Vec<u32>,
     totals: Vec<u32>,
-    /// The chunk used last: its place in `order`, and the position where it starts.
+    /// The chunk used last: its place in `order`, and its start.
     near: (usize, u32),
 }
 
 impl Pieces {
-    /// Creates a document of `len` characters, all of which survive: the final text itself.
+    /// Creates a document of `len` characters that all survive: the final text.
     pub fn new(len: u32) -> Self {
         let mut first = Chunk::EMPTY;
         if len > 0 {
@@ -161,9 +156,9 @@ impl Pieces {
         }
     }
 
-    /// Takes the `len` characters at `pos` out of the document. For each stretch of them
-    /// that survives, calls `survivor` with its position in the final text, how far into
-    /// the removed characters it starts, and its length.
+    /// Takes the `len` characters at `pos` out of the document, calling `survivor` for each
+    /// surviving stretch with its final position, its offset into the removed characters, and
+    /// its length.
     pub fn remove(&mut self, pos: u32, len: u32, mut survivor: impl FnMut(u32, u32, u32)) {
         let mut done = 0;
         while done < len {
@@ -223,8 +218,8 @@ impl Pieces {
         }
     }
 
-    /// Iterates over the pieces in document order: each one's length, and where its first
-    /// character is in the final text if it survives.
+    /// Iterates over the pieces in order: each one's length, and its final position if it
+    /// survives.
     pub fn iter(&self) -> impl Iterator<Item = (u32, Option<u32>)> + '_ {
         let pieces = self.order.iter().flat_map(|&id| {
             let chunk = &self.chunks[id as usize];
@@ -233,8 +228,8 @@ impl Pieces {
         pieces.map(|piece| (piece.len, Some(piece.at).filter(|&at| at != DELETED)))
     }
 
-    /// Finds the chunk that position `pos` is in, or at either end of: its place in `order`, and
-    /// the position where it starts.
+    /// Finds the chunk that `pos` is in or at either end of: its place in `order`, and its
+    /// start.
     fn chunk_at(&mut self, pos: u32) -> (usize, u32) {
         let (mut place, mut start) = self.near;
         while pos < start {

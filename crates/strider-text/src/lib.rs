@@ -1,39 +1,31 @@
-//! Builds a document's final text from the edits made to it. A replay only wants the text
-//! at the end and knows every edit beforehand, so instead of applying the edits to a rope
-//! it takes them back from last to first. What it keeps is a piece table over the final
-//! text: each piece of the document at that moment either maps to a place in the final text
-//! or was deleted later. Taking back an insert copies whichever of its characters survive
-//! straight to their final place, so the text is complete once every edit is taken back.
-
 mod pieces;
 
 use pieces::Pieces;
 use std::ops::Range;
 
-/// A piece table over a document's final text. It starts as the final document and is
-/// taken back to empty, one edit at a time, last edit first; the text is then read off with
-/// [`into_string`](Self::into_string). Positions and lengths count characters.
+/// Builds a document's final text by taking its edits back, last to first, over a piece table
+/// of the final text. Taking back an insert copies its surviving characters straight to their
+/// final place, so no rope is needed. Positions and lengths count characters.
 pub struct PieceTable<'a> {
-    /// Where the text of every insert is.
+    /// The text of every insert.
     source: &'a str,
     pieces: Pieces,
-    /// Length of the document with the edits taken back so far undone.
+    /// Length of the document as taken back so far.
     len: u32,
-    /// The final text as it is assembled: one byte per character, since the characters are
-    /// placed out of order, then [`SHORT`] bytes to spare. A character that is not ASCII has
-    /// [`WIDE`] here and is in `wide`.
+    /// The final text as it is placed: a byte per character, then [`SHORT`] spare bytes. A
+    /// character that is not ASCII is [`WIDE`] here and kept in `wide`.
     slots: Vec<u8>,
     wide: Wide,
 }
 
-/// In place of a character that does not fit in a byte.
+/// Stands in for a character that does not fit in a byte.
 const WIDE: u8 = 0x80;
 
-/// The longest stretch of text that is copied as two 16-byte words.
+/// The longest copy done as two 16-byte words.
 const SHORT: usize = 32;
 
-/// Copies `n` bytes of `from`, starting at `skip`, to `to[at..]`. `to` must run on for
-/// [`SHORT`] bytes past where a short copy starts.
+/// Copies `n` bytes of `from`, from `skip`, to `to[at..]`, which must have [`SHORT`] bytes to
+/// spare.
 fn copy(to: &mut [u8], at: usize, from: &[u8], skip: usize, n: usize) {
     if n > SHORT || skip + SHORT > from.len() {
         to[at..at + n].copy_from_slice(&from[skip..skip + n]);
@@ -51,15 +43,14 @@ fn copy(to: &mut [u8], at: usize, from: &[u8], skip: usize, n: usize) {
     }
 }
 
-/// How many positions of the final text share a page of [`Wide`]. Tiny in debug builds, so
-/// that tests on short texts use several pages.
+/// Positions per page of [`Wide`]. Tiny in debug builds, so that tests use several pages.
 const PAGE: usize = if cfg!(debug_assertions) { 4 } else { 256 };
 
-/// The characters of the final text that are not ASCII, by position. Text is mostly ASCII
-/// with the odd character that is not, so room is only made for pages that have some.
+/// The final text's characters that are not ASCII, by position, with room only for pages that
+/// have some.
 #[derive(Default)]
 struct Wide {
-    /// For each page of positions, where its characters start in `chars`, if it has any.
+    /// Per page, where its characters start in `chars`, if it has any.
     pages: Vec<Option<u32>>,
     chars: Vec<char>,
 }
@@ -86,13 +77,13 @@ impl Wide {
 }
 
 impl<'a> PieceTable<'a> {
-    /// Starts from the final document, which is `len` characters long. `source` holds the
-    /// text of every insert that will be taken back.
+    /// Starts from the final document, `len` characters long. `source` holds the text of every
+    /// insert.
     pub fn new(len: u32, source: &'a str) -> Self {
         PieceTable { source, pieces: Pieces::new(len), len, slots: vec![0; len as usize + SHORT], wide: Wide::default() }
     }
 
-    /// Takes back an insert that put the `len` characters at `text` in the source at `pos`.
+    /// Takes back an insert of the `len` characters at `text` in the source, at `pos`.
     pub fn undo_insert(&mut self, pos: u32, text: Range<usize>, len: u32) {
         assert!(pos.checked_add(len).is_some_and(|end| end <= self.len), "insert was not within the document");
         let (source, start) = (self.source.as_bytes(), text.start);
@@ -126,7 +117,7 @@ impl<'a> PieceTable<'a> {
         }
     }
 
-    /// Takes back a removal of `len` characters from `pos`.
+    /// Takes back a removal of `len` characters at `pos`.
     pub fn undo_remove(&mut self, pos: u32, len: u32) {
         assert!(pos <= self.len, "removal was not within the document");
         if len == 0 {
@@ -136,9 +127,8 @@ impl<'a> PieceTable<'a> {
         self.pieces.insert_deleted(pos, len);
     }
 
-    /// Takes back every edit that is left at once, given the text they made: the document as
-    /// it stands with the later edits taken back. Whatever of `text` survives goes straight to
-    /// its place in the final text.
+    /// Takes back all remaining edits at once, given the text they made. What survives of
+    /// `text` goes straight to its final place.
     pub fn undo_rest(&mut self, text: &str) {
         let (slots, wide) = (&mut self.slots, &mut self.wide);
         if text.len() == self.len as usize {
@@ -169,7 +159,7 @@ impl<'a> PieceTable<'a> {
         self.len = 0;
     }
 
-    /// Returns the final text. Every edit must have been taken back.
+    /// Returns the final text. Every edit must be taken back.
     pub fn into_string(mut self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");
         self.slots.truncate(self.slots.len() - SHORT);

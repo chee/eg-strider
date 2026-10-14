@@ -1,7 +1,3 @@
-//! Differential property tests: any concurrent history must produce the same document in
-//! eg-strider as in diamond-types, on a first checkout, on a repeat, and when the log is
-//! checked out again and again as it grows.
-
 use diamond_types::list::operation::TextOperation;
 use diamond_types::list::ListOpLog;
 use diamond_types::LV;
@@ -9,8 +5,8 @@ use eg_strider::OpLog;
 use proptest::prelude::*;
 use proptest::sample::Index;
 
-/// What one of several replicas, each with its own copy of the document, does next.
-/// Positions are picked relative to the length of that replica's document at the time.
+/// What one of several replicas, each with its own copy of the document, does next. Positions
+/// are relative to that replica's document length at the time.
 #[derive(Clone, Debug)]
 enum Step {
     Insert {
@@ -31,7 +27,7 @@ enum Step {
     },
 }
 
-/// Histories of up to `steps` steps. `sync` is how many steps in a hundred are merges: low
+/// Histories of up to `steps` steps. `sync` is how many steps in a hundred are merges; low
 /// values give long-lived branches.
 fn history(steps: usize, sync: u32) -> impl Strategy<Value = Vec<Step>> {
     let step = prop_oneof![
@@ -43,8 +39,8 @@ fn history(steps: usize, sync: u32) -> impl Strategy<Value = Vec<Step>> {
     proptest::collection::vec(step, 1..=steps)
 }
 
-/// With `apart`, the replicas start from a shared text and each edits around its own part
-/// of it, so that much of what they do at once does not collide.
+/// With `apart`, the replicas start from a shared text and each edits around its own part of
+/// it, so that much of what they do at once does not collide.
 fn build(replicas: usize, steps: &[Step], apart: bool) -> ListOpLog {
     let mut dt = ListOpLog::new();
     // Some replicas share an agent name, so that ties between an agent and itself occur.
@@ -90,6 +86,9 @@ fn build(replicas: usize, steps: &[Step], apart: bool) -> ListOpLog {
     dt
 }
 
+/// Checks that a history gives the same document in eg-strider as in diamond-types: on a first
+/// checkout, on a repeat, after saving and loading, and when the log is checked out again and
+/// again as it grows.
 fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseError> {
     let dt = build(replicas, steps, apart);
     let expected = dt.checkout_tip().content().to_string();
