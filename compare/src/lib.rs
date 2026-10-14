@@ -81,7 +81,11 @@ impl History<TextOperation, usize> {
     /// Returns the same history with its ops as eg-strider is handed them.
     pub fn edits(&self) -> History {
         fn inserted(op: &TextOperation) -> &str {
-            if op.kind == ListOpKind::Ins { op.content.as_ref().expect("insert without content") } else { "" }
+            if op.kind == ListOpKind::Ins {
+                op.content.as_ref().expect("insert without content")
+            } else {
+                ""
+            }
         }
         let mut text = String::with_capacity(self.ops.iter().map(|op| inserted(op).len()).sum());
         let mut ops = Vec::with_capacity(self.ops.len());

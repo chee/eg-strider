@@ -267,7 +267,8 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
                         continue;
                     }
                     let cut = trims.iter().map(|trim| trim.len).sum::<u32>();
-                    let folds = cut > 0 && op.kind == OpKind::Ins && cut <= op.len && trims.last().is_some_and(|first| first.first_event == op.first_event + op.len);
+                    let folds =
+                        cut > 0 && op.kind == OpKind::Ins && cut <= op.len && trims.last().is_some_and(|first| first.first_event == op.first_event + op.len);
                     if cut > 0 && !folds {
                         // Not enough of the insert is here: this stretch begins partway
                         // through it.

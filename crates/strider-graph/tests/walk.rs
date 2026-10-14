@@ -1,6 +1,6 @@
-use strider_graph::{BlockId, Graph, Move, Segment, Walker};
 use proptest::prelude::*;
 use proptest::sample::Index;
+use strider_graph::{BlockId, Graph, Move, Segment, Walker};
 
 /// What one of several replicas does next.
 #[derive(Clone, Debug)]
@@ -62,8 +62,7 @@ fn histories(graph: &Graph) -> Vec<Vec<bool>> {
 /// Drops from a version the events that others in it already descend from.
 fn reduce(graph: &Graph, version: &[u32]) -> Vec<u32> {
     let histories = histories(graph);
-    let mut reduced: Vec<u32> =
-        version.iter().copied().filter(|&e| !version.iter().any(|&other| histories[other as usize][e as usize])).collect();
+    let mut reduced: Vec<u32> = version.iter().copied().filter(|&e| !version.iter().any(|&other| histories[other as usize][e as usize])).collect();
     reduced.sort_unstable();
     reduced.dedup();
     reduced

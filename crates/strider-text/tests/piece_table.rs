@@ -1,15 +1,25 @@
-use strider_text::PieceTable;
 use proptest::prelude::*;
 use proptest::sample::Index;
+use strider_text::PieceTable;
 
 /// An edit to make, with positions picked relative to the document's length at the time.
 #[derive(Clone, Debug)]
 enum Step {
-    Insert { at: Index, text: String },
-    Remove { at: Index, len: usize },
+    Insert {
+        at: Index,
+        text: String,
+    },
+    Remove {
+        at: Index,
+        len: usize,
+    },
     /// Carries on from where the last edit left offset, as typing and deleting do.
-    Type { text: String },
-    Backspace { len: usize },
+    Type {
+        text: String,
+    },
+    Backspace {
+        len: usize,
+    },
 }
 
 fn steps(text: &'static str, max: usize) -> impl Strategy<Value = Vec<Step>> {

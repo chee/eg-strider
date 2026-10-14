@@ -251,7 +251,12 @@ impl OpLog {
         });
         let mut next = vec![0; self.agent_names.len()];
         column(&mut columns, |out| {
-            runs(out, agent_runs().map(|(agent, sequence_number, len)| zigzag(i64::from(sequence_number) - i64::from(std::mem::replace(&mut next[agent as usize], sequence_number + len)))))
+            runs(
+                out,
+                agent_runs().map(|(agent, sequence_number, len)| {
+                    zigzag(i64::from(sequence_number) - i64::from(std::mem::replace(&mut next[agent as usize], sequence_number + len)))
+                }),
+            )
         });
         column(&mut columns, |out| agent_runs().for_each(|(.., len)| number(out, len as usize)));
 

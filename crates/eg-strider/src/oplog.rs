@@ -223,7 +223,14 @@ impl OpLog {
     }
 
     /// Does as [`add_delete_at`](Self::add_delete_at), with a fixed sequence number.
-    pub fn add_remote_delete(&mut self, agent: AgentId, sequence_number: SequenceNumber, parents: &[EventId], range: Range<usize>, forward: bool) -> Range<EventId> {
+    pub fn add_remote_delete(
+        &mut self,
+        agent: AgentId,
+        sequence_number: SequenceNumber,
+        parents: &[EventId],
+        range: Range<usize>,
+        forward: bool,
+    ) -> Range<EventId> {
         self.push(agent, Some(sequence_number), Some(parents), OpKind::Del, forward, range.start, range.len(), "")
     }
 
@@ -279,7 +286,17 @@ impl OpLog {
 
     /// Appends a run of events of one kind, extending the last op when it simply carries on.
     #[allow(clippy::too_many_arguments)]
-    fn push(&mut self, agent: AgentId, sequence_number: Option<SequenceNumber>, parents: Option<&[EventId]>, kind: OpKind, forward: bool, pos: usize, len: usize, text: &str) -> Range<EventId> {
+    fn push(
+        &mut self,
+        agent: AgentId,
+        sequence_number: Option<SequenceNumber>,
+        parents: Option<&[EventId]>,
+        kind: OpKind,
+        forward: bool,
+        pos: usize,
+        len: usize,
+        text: &str,
+    ) -> Range<EventId> {
         let event = self.graph.len();
         if len == 0 {
             return event..event;
@@ -346,8 +363,13 @@ impl OpLog {
             OpKind::Del => self.totals.1 += op.len,
         }
         match self.ops.last_mut() {
-            Some(o) if follows && o.kind == op.kind && o.forward && op.forward && !o.trims
-                && ((op.kind == OpKind::Ins && o.pos + o.len == op.pos) || (op.kind == OpKind::Del && o.pos == op.pos)) =>
+            Some(o)
+                if follows
+                    && o.kind == op.kind
+                    && o.forward
+                    && op.forward
+                    && !o.trims
+                    && ((op.kind == OpKind::Ins && o.pos + o.len == op.pos) || (op.kind == OpKind::Del && o.pos == op.pos)) =>
             {
                 o.len += op.len;
                 o.content.1 = op.content.1;

@@ -13,10 +13,22 @@ use proptest::sample::Index;
 /// Positions are picked relative to the length of that replica's document at the time.
 #[derive(Clone, Debug)]
 enum Step {
-    Insert { who: Index, at: Index, text: String },
-    Delete { who: Index, at: Index, len: usize, backspace: bool },
+    Insert {
+        who: Index,
+        at: Index,
+        text: String,
+    },
+    Delete {
+        who: Index,
+        at: Index,
+        len: usize,
+        backspace: bool,
+    },
     /// Merge everything another replica has.
-    Sync { who: Index, from: Index },
+    Sync {
+        who: Index,
+        from: Index,
+    },
 }
 
 /// Histories of up to `steps` steps. `sync` is how many steps in a hundred are merges: low

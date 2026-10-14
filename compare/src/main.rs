@@ -250,7 +250,14 @@ struct Measured {
 /// Measures a library on the two tasks. `ops` puts a history's ops in memory, which is not
 /// timed but is counted as memory. The text each task hands back is a copy made to check it,
 /// and is not counted as held.
-fn measure<O, D>(reps: u32, expected: &str, ops: impl Fn() -> O, merge: impl Fn(O) -> (D, String), save: impl Fn(&mut D) -> Vec<u8>, open: impl Fn(&[u8]) -> (D, String)) -> Measured {
+fn measure<O, D>(
+    reps: u32,
+    expected: &str,
+    ops: impl Fn() -> O,
+    merge: impl Fn(O) -> (D, String),
+    save: impl Fn(&mut D) -> Vec<u8>,
+    open: impl Fn(&[u8]) -> (D, String),
+) -> Measured {
     let (mut document, text) = merge(ops());
     let saved = save(&mut document);
     let same = text == expected && open(&saved).1 == expected;
@@ -301,7 +308,8 @@ const SYSTEMS: [&str; 5] = ["strider", "dt", "yjs", "loro", "automerge"];
 
 /// Writes one figure for each system as a JSON object, with `null` for one that has none.
 fn object<T: Display>(of: [Option<T>; 5]) -> String {
-    let fields: Vec<String> = SYSTEMS.iter().zip(of).map(|(name, value)| format!("\"{name}\":{}", value.map_or("null".to_string(), |v| v.to_string()))).collect();
+    let fields: Vec<String> =
+        SYSTEMS.iter().zip(of).map(|(name, value)| format!("\"{name}\":{}", value.map_or("null".to_string(), |v| v.to_string()))).collect();
     format!("{{{}}}", fields.join(","))
 }
 
@@ -382,11 +390,15 @@ fn main() {
         let saved = strider_merge(&history).save();
         let dt_saved = dt_save(&bytes, &expected);
         // eg-strider takes the file's bytes to keep, so each run is handed its own.
-        let (open_ms, mut reopened) = median_of(reps, || saved.clone(), |bytes| {
-            let mut log = OpLog::load(bytes).unwrap();
-            log.checkout();
-            log
-        });
+        let (open_ms, mut reopened) = median_of(
+            reps,
+            || saved.clone(),
+            |bytes| {
+                let mut log = OpLog::load(bytes).unwrap();
+                log.checkout();
+                log
+            },
+        );
         let (dt_open_ms, dt_reopened) = median_of(reps, || (), |()| dt_open(&dt_saved));
         same &= reopened.checkout() == expected && dt_reopened.1.to_string() == expected;
         drop((reopened, dt_reopened));
@@ -505,7 +517,9 @@ fn main() {
     }
 
     let heads = || columns(["eg-strider", "diamond-types", "yrs", "Loro", "Automerge"].map(|name| Some(name.to_string())));
-    println!("\nmerging a history whose ops are in memory: the time, the most memory in use, how much of that the ops are, and what the document holds once done");
+    println!(
+        "\nmerging a history whose ops are in memory: the time, the most memory in use, how much of that the ops are, and what the document holds once done"
+    );
     println!("{:6} {}   {}   {}   {}", "trace", heads(), heads(), heads(), heads());
     for line in merges {
         println!("{line}");

@@ -64,7 +64,11 @@ pub(crate) struct Targets {
 impl Targets {
     /// Returns the item that the first event deletes.
     pub fn first(&self) -> ItemId {
-        if self.descending { self.item + self.len - 1 } else { self.item }
+        if self.descending {
+            self.item + self.len - 1
+        } else {
+            self.item
+        }
     }
 
     /// Returns the part of the stretch from event `event`, of at most `len` events.
@@ -78,10 +82,7 @@ impl Targets {
 impl Span {
     /// Returns the length as seen in the prepare version and in the effect version.
     fn widths(&self) -> Widths {
-        Widths {
-            prepare: if self.state == INSERTED { self.len } else { 0 },
-            effect: if self.ever_deleted { 0 } else { self.len },
-        }
+        Widths { prepare: if self.state == INSERTED { self.len } else { 0 }, effect: if self.ever_deleted { 0 } else { self.len } }
     }
 }
 
@@ -129,14 +130,7 @@ impl Tracker {
     /// Resets to a single placeholder for the document as it stands, `len` characters long,
     /// ready for a region of `events` events.
     pub fn begin_region(&mut self, events: usize, len: u32) {
-        let placeholder = Span {
-            item: UNDERWATER,
-            len: UNDERWATER_LEN,
-            origin_left: NONE,
-            origin_right: NONE,
-            state: INSERTED,
-            ever_deleted: false,
-        };
+        let placeholder = Span { item: UNDERWATER, len: UNDERWATER_LEN, origin_left: NONE, origin_right: NONE, state: INSERTED, ever_deleted: false };
         self.tree.reset(placeholder.widths());
         self.spans.clear();
         self.spans.push(placeholder);
@@ -395,7 +389,16 @@ impl Tracker {
     /// `left` is the entry holding the left origin, given only when `place` is still the
     /// place just after that origin.
     #[allow(clippy::too_many_arguments)]
-    fn insert_span(&mut self, place: Place, left: Option<Cursor>, event: EventId, len: u32, origin_left: ItemId, origin_right: ItemId, index: Option<u32>) -> u32 {
+    fn insert_span(
+        &mut self,
+        place: Place,
+        left: Option<Cursor>,
+        event: EventId,
+        len: u32,
+        origin_left: ItemId,
+        origin_right: ItemId,
+        index: Option<u32>,
+    ) -> u32 {
         // Typing on from the character before: extend its span instead of adding one.
         if let Some(at) = left {
             let id = self.tree.id(at);
@@ -481,7 +484,11 @@ impl Tracker {
         let Targets { first_event: event, len, item, descending } = targets;
         match self.deleted.last_mut() {
             // A backspace reaches the next span with the events before those it has used.
-            Some(last) if last.descending == descending && last.item + last.len == item && (if descending { event + len == last.first_event } else { last.first_event + last.len == event }) => {
+            Some(last)
+                if last.descending == descending
+                    && last.item + last.len == item
+                    && (if descending { event + len == last.first_event } else { last.first_event + last.len == event }) =>
+            {
                 last.len += len;
                 last.first_event = last.first_event.min(event);
             }

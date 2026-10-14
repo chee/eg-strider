@@ -11,12 +11,28 @@ use proptest::sample::Index;
 /// An operation on a tree, with its target chosen by position among the entries.
 #[derive(Clone, Debug)]
 enum Edit {
-    Insert { before: Option<Index>, widths: [u32; 2] },
-    SplitEntry { at: Index, share: [Index; 2], before: bool },
-    SetWidths { at: Index, widths: [u32; 2] },
-    Update { at: Index, widths: [u32; 2] },
+    Insert {
+        before: Option<Index>,
+        widths: [u32; 2],
+    },
+    SplitEntry {
+        at: Index,
+        share: [Index; 2],
+        before: bool,
+    },
+    SetWidths {
+        at: Index,
+        widths: [u32; 2],
+    },
+    Update {
+        at: Index,
+        widths: [u32; 2],
+    },
     /// Looks up a character index, which the tree remembers the whereabouts of.
-    Find { prepare: bool, place: Index },
+    Find {
+        prepare: bool,
+        place: Index,
+    },
 }
 
 fn edit() -> impl Strategy<Value = Edit> {
