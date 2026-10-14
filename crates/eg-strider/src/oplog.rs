@@ -14,9 +14,9 @@ use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::{EventId, Graph};
 
-/// A local version: the number of an event in one replica's log. Numbers are not shared
-/// between replicas; any numbering that puts parents before children is valid.
-pub type LocalVersion = usize;
+/// How many events an agent made before an event of its own. With the agent, it names the
+/// event the same way on every replica.
+pub type SequenceNumber = u32;
 pub type AgentId = u32;
 
 /// An op's place in the log's list of ops.
@@ -64,7 +64,7 @@ struct AgentRun {
     lv: EventId,
     len: u32,
     agent: AgentId,
-    seq: u32,
+    seq: SequenceNumber,
 }
 
 /// Part of one op, as handed to the replayer.
@@ -88,7 +88,7 @@ pub struct OpLog {
     ops: Vec<Op>,
     content: String,
     agent_names: Vec<String>,
-    next_seq: Vec<u32>,
+    next_seq: Vec<SequenceNumber>,
     agent_runs: Vec<AgentRun>,
     memo: Memo,
     /// The document as of some number of the first events, which the next merge starts from.
@@ -146,8 +146,8 @@ impl OpLog {
     }
 
     /// Returns the events with no children: the version a new local edit would build on.
-    pub fn frontier(&self) -> Vec<LocalVersion> {
-        self.graph.frontier().iter().map(|&lv| lv as LocalVersion).collect()
+    pub fn frontier(&self) -> Vec<EventId> {
+        self.graph.frontier().to_vec()
     }
 
     /// Merges every event in the log and returns the document. Only the events since the
@@ -196,41 +196,41 @@ impl OpLog {
     }
 
     /// Inserts `text` at `pos` in the document as of the current frontier.
-    pub fn add_insert(&mut self, agent: AgentId, pos: usize, text: &str) -> Range<LocalVersion> {
+    pub fn add_insert(&mut self, agent: AgentId, pos: usize, text: &str) -> Range<EventId> {
         self.push(agent, None, None, OpKind::Ins, true, pos, text.chars().count(), text)
     }
 
     /// Deletes `range` from the document as of the current frontier.
-    pub fn add_delete(&mut self, agent: AgentId, range: Range<usize>) -> Range<LocalVersion> {
+    pub fn add_delete(&mut self, agent: AgentId, range: Range<usize>) -> Range<EventId> {
         self.push(agent, None, None, OpKind::Del, true, range.start, range.len(), "")
     }
 
     /// Inserts `text` at `pos` in the document as of version `parents`.
-    pub fn add_insert_at(&mut self, agent: AgentId, parents: &[LocalVersion], pos: usize, text: &str) -> Range<LocalVersion> {
+    pub fn add_insert_at(&mut self, agent: AgentId, parents: &[EventId], pos: usize, text: &str) -> Range<EventId> {
         self.push(agent, None, Some(parents), OpKind::Ins, true, pos, text.chars().count(), text)
     }
 
     /// Deletes `range` from the document as of version `parents`. `fwd` is false when the
     /// characters were removed last-first, as backspace does.
-    pub fn add_delete_at(&mut self, agent: AgentId, parents: &[LocalVersion], range: Range<usize>, fwd: bool) -> Range<LocalVersion> {
+    pub fn add_delete_at(&mut self, agent: AgentId, parents: &[EventId], range: Range<usize>, fwd: bool) -> Range<EventId> {
         self.push(agent, None, Some(parents), OpKind::Del, fwd, range.start, range.len(), "")
     }
 
     /// Does as [`add_insert_at`](Self::add_insert_at), for an event received from elsewhere
     /// whose sequence number for `agent` is already fixed.
-    pub fn add_remote_insert(&mut self, agent: AgentId, seq: usize, parents: &[LocalVersion], pos: usize, text: &str) -> Range<LocalVersion> {
-        self.push(agent, Some(seq as u32), Some(parents), OpKind::Ins, true, pos, text.chars().count(), text)
+    pub fn add_remote_insert(&mut self, agent: AgentId, seq: SequenceNumber, parents: &[EventId], pos: usize, text: &str) -> Range<EventId> {
+        self.push(agent, Some(seq), Some(parents), OpKind::Ins, true, pos, text.chars().count(), text)
     }
 
     /// Does as [`add_delete_at`](Self::add_delete_at), with a fixed sequence number.
-    pub fn add_remote_delete(&mut self, agent: AgentId, seq: usize, parents: &[LocalVersion], range: Range<usize>, fwd: bool) -> Range<LocalVersion> {
-        self.push(agent, Some(seq as u32), Some(parents), OpKind::Del, fwd, range.start, range.len(), "")
+    pub fn add_remote_delete(&mut self, agent: AgentId, seq: SequenceNumber, parents: &[EventId], range: Range<usize>, fwd: bool) -> Range<EventId> {
+        self.push(agent, Some(seq), Some(parents), OpKind::Del, fwd, range.start, range.len(), "")
     }
 
     /// Appends a run of ops by one agent, received from elsewhere: the first is made at
     /// version `parents` and each of the others follows the one before. `text` holds what the
     /// inserts put in, one after another.
-    pub fn add_remote_ops(&mut self, agent: AgentId, seq: usize, parents: &[LocalVersion], ops: &[Edit], text: &str) -> Range<LocalVersion> {
+    pub fn add_remote_ops(&mut self, agent: AgentId, seq: SequenceNumber, parents: &[EventId], ops: &[Edit], text: &str) -> Range<EventId> {
         let parts = |edit: &Edit| match *edit {
             Edit::Insert { pos, len } => (OpKind::Ins, true, pos, len),
             Edit::Delete { pos, len, backspace } => (OpKind::Del, !backspace, pos, len),
@@ -238,10 +238,10 @@ impl OpLog {
         let lv = self.graph.len();
         let total = ops.iter().try_fold(0u32, |total, edit| total.checked_add(parts(edit).3)).expect("run too long");
         if total == 0 {
-            return lv as LocalVersion..lv as LocalVersion;
+            return lv..lv;
         }
         let (mut follows, events) = self.link(Some(parents), total);
-        self.assign(agent, Some(seq as u32), lv, total);
+        self.assign(agent, Some(seq), lv, total);
 
         let mut at = self.content.len() as u32;
         self.content.push_str(text);
@@ -274,15 +274,15 @@ impl OpLog {
             (at, next, follows) = (at + bytes, next + len, true);
         }
         assert_eq!(at, end, "text does not match the inserts");
-        events.start as LocalVersion..events.end as LocalVersion
+        events
     }
 
     /// Appends a run of events of one kind, extending the last op when it simply carries on.
     #[allow(clippy::too_many_arguments)]
-    fn push(&mut self, agent: AgentId, seq: Option<u32>, parents: Option<&[LocalVersion]>, kind: OpKind, fwd: bool, pos: usize, len: usize, text: &str) -> Range<LocalVersion> {
+    fn push(&mut self, agent: AgentId, seq: Option<SequenceNumber>, parents: Option<&[EventId]>, kind: OpKind, fwd: bool, pos: usize, len: usize, text: &str) -> Range<EventId> {
         let lv = self.graph.len();
         if len == 0 {
-            return lv as LocalVersion..lv as LocalVersion;
+            return lv..lv;
         }
         let len = u32::try_from(len).expect("run too long");
         let pos = u32::try_from(pos).expect("position too large");
@@ -291,34 +291,34 @@ impl OpLog {
         let at = self.content.len() as u32;
         self.content.push_str(text);
         self.store(continues, Op { lv, len, kind, fwd, trims: false, pos, content: (at, self.content.len() as u32) });
-        events.start as LocalVersion..events.end as LocalVersion
+        events
     }
 
     /// Adds `len` events in a chain to the graph, the first at version `parents` or, without
     /// any, at the current frontier. Returns whether they simply follow the last event, and
     /// their numbers.
-    fn link(&mut self, parents: Option<&[LocalVersion]>, len: u32) -> (bool, Range<EventId>) {
+    fn link(&mut self, parents: Option<&[EventId]>, len: u32) -> (bool, Range<EventId>) {
         // History that is still as it was saved has to be read for an event that was made
         // without all of it: one with no parent held here, and not every old head for parents.
         // A block of it starts at a critical version, so an event has all that comes before
         // the block holding its latest parent.
         if let (Some(packed), Some(parents)) = (&self.packed, parents) {
-            let floor = self.graph.floor() as LocalVersion;
-            if !parents.iter().any(|&parent| parent >= floor) && !packed.heads.iter().all(|&head| parents.contains(&(head as LocalVersion))) {
-                let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent as EventId));
+            let floor = self.graph.floor();
+            if !parents.iter().any(|&parent| parent >= floor) && !packed.heads.iter().all(|head| parents.contains(head)) {
+                let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent));
                 self.unpack_from(block);
             }
         }
         let lv = self.graph.len();
         // Most events follow the last one, whose number is then all the graph needs.
-        let continues = lv > 0 && parents.map_or(self.graph.frontier() == [lv - 1], |parents| parents == [(lv - 1) as LocalVersion]);
+        let continues = lv > 0 && parents.map_or(self.graph.frontier() == [lv - 1], |parents| parents == [lv - 1]);
         if continues {
             return (true, self.graph.push(&[lv - 1], len));
         }
         let mut at = std::mem::take(&mut self.parents);
         at.clear();
         match parents {
-            Some(parents) => at.extend(parents.iter().map(|&p| EventId::try_from(p).expect("parent is not a known event"))),
+            Some(parents) => at.extend_from_slice(parents),
             None => at.extend_from_slice(self.graph.frontier()),
         }
         let events = self.graph.push(&at, len);
@@ -328,7 +328,7 @@ impl OpLog {
 
     /// Records that `agent` made the `len` events from `lv`, numbering them from `seq` or,
     /// without one, from where its last left off.
-    fn assign(&mut self, agent: AgentId, seq: Option<u32>, lv: EventId, len: u32) {
+    fn assign(&mut self, agent: AgentId, seq: Option<SequenceNumber>, lv: EventId, len: u32) {
         let seq = seq.unwrap_or(self.next_seq[agent as usize]);
         let next = &mut self.next_seq[agent as usize];
         *next = (*next).max(seq + len);
@@ -401,7 +401,7 @@ impl OpLog {
     }
 
     /// Finds which agent made event `lv`, and its sequence number there.
-    fn agent_at(&self, lv: EventId) -> (AgentId, u32) {
+    fn agent_at(&self, lv: EventId) -> (AgentId, SequenceNumber) {
         let run = &self.agent_runs[self.agent_runs.partition_point(|r| r.lv <= lv) - 1];
         (run.agent, run.seq + (lv - run.lv))
     }

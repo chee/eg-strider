@@ -5,17 +5,18 @@ pub mod replicas;
 
 use diamond_types::list::operation::{ListOpKind, TextOperation};
 use diamond_types::list::ListOpLog;
-use eg_strider::{Edit, OpLog};
+use eg_strider::{Edit, EventId, OpLog, SequenceNumber};
 use std::ops::Range;
 
 /// A history with its ops in memory, as one peer would hand it to another. Parents and ops
 /// are each kept in one list for the whole history, so that it is not much larger than its
 /// ops. Each library is handed the ops in the form its own calls take: diamond-types its
-/// [`TextOperation`]s, and eg-strider its [`Edit`]s beside the text they insert.
-pub struct History<Op = Edit> {
+/// [`TextOperation`]s with parents as `usize`, and eg-strider its [`Edit`]s beside the text
+/// they insert, with parents as [`EventId`]s.
+pub struct History<Op = Edit, Parent = EventId> {
     pub agents: Vec<String>,
     pub chunks: Vec<Chunk>,
-    parents: Vec<usize>,
+    parents: Vec<Parent>,
     ops: Vec<Op>,
     /// The text of every [`Edit`] that inserts, one after another.
     text: String,
@@ -35,9 +36,9 @@ pub struct Chunk {
     text: Range<u32>,
 }
 
-impl<Op> History<Op> {
+impl<Op, Parent> History<Op, Parent> {
     /// Returns a chunk's parents.
-    pub fn parents(&self, chunk: &Chunk) -> &[usize] {
+    pub fn parents(&self, chunk: &Chunk) -> &[Parent] {
         &self.parents[chunk.parents.start as usize..chunk.parents.end as usize]
     }
 
@@ -47,7 +48,7 @@ impl<Op> History<Op> {
     }
 }
 
-impl History<TextOperation> {
+impl History<TextOperation, usize> {
     /// Lists the ops of a diamond-types oplog, event for event.
     pub fn of(dt: &ListOpLog) -> Self {
         let entries = dt.as_chunked_operation_vec();
@@ -101,7 +102,8 @@ impl History<TextOperation> {
                 Chunk { text: start..text.len() as u32, ..chunk.clone() }
             })
             .collect();
-        History { agents: self.agents.clone(), chunks, parents: self.parents.clone(), ops, text }
+        let parents = self.parents.iter().map(|&parent| parent as EventId).collect();
+        History { agents: self.agents.clone(), chunks, parents, ops, text }
     }
 
     /// Returns the bytes of all the text the history inserts and deletes: what a protocol
@@ -137,6 +139,6 @@ pub fn extend(log: &mut OpLog, history: &History, limit: usize) {
     for chunk in history.chunks.iter().skip_while(|chunk| chunk.events.end <= have).take_while(|chunk| chunk.events.end <= limit) {
         assert_eq!(log.len(), chunk.events.start);
         let text = &history.text[chunk.text.start as usize..chunk.text.end as usize];
-        log.add_remote_ops(agents[chunk.agent], chunk.seq, history.parents(chunk), history.ops(chunk), text);
+        log.add_remote_ops(agents[chunk.agent], chunk.seq as SequenceNumber, history.parents(chunk), history.ops(chunk), text);
     }
 }

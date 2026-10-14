@@ -12,8 +12,9 @@ pub use walk::{Move, Walker};
 
 use std::ops::Range;
 
-/// An event's number: where it comes in the order the log learned of its events, parents
-/// before children. The number of events before some point is the number of the event there.
+/// An event's number: where it comes in the order this replica's log learned of its events,
+/// parents before children. Replicas number events differently. The number of events before
+/// some point is the number of the event there.
 pub type EventId = u32;
 
 /// An append-only event graph, kept cut into blocks and with its critical versions known.

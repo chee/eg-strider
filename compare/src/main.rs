@@ -8,7 +8,7 @@ use compare::replicas::TEXT;
 use compare::History;
 use diamond_types::list::operation::TextOperation;
 use diamond_types::list::{ListBranch, ListOpLog};
-use eg_strider::OpLog;
+use eg_strider::{EventId, OpLog};
 use jumprope::JumpRope;
 use loro::{ExportMode, LoroDoc};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -111,7 +111,7 @@ fn strider_merge(history: &History) -> OpLog {
 }
 
 /// Appends a history to a new diamond-types oplog through its call for remote edits.
-fn dt_append(history: &History<TextOperation>) -> ListOpLog {
+fn dt_append(history: &History<TextOperation, usize>) -> ListOpLog {
     let mut oplog = ListOpLog::new();
     let agents: Vec<_> = history.agents.iter().map(|name| oplog.get_or_create_agent_id(name)).collect();
     for chunk in &history.chunks {
@@ -121,7 +121,7 @@ fn dt_append(history: &History<TextOperation>) -> ListOpLog {
 }
 
 /// Appends a history to a new diamond-types oplog, then merges it.
-fn dt_merge(history: &History<TextOperation>) -> (ListOpLog, ListBranch) {
+fn dt_merge(history: &History<TextOperation, usize>) -> (ListOpLog, ListBranch) {
     let oplog = dt_append(history);
     let branch = oplog.checkout_tip();
     (oplog, branch)
@@ -403,7 +403,7 @@ fn main() {
                 let typist = log.get_or_create_agent("typist");
                 match back {
                     None => log.add_insert(typist, 0, "!"),
-                    Some(back) => log.add_insert_at(typist, &[log.len() - 1 - back.min(log.len() - 1)], 0, "!"),
+                    Some(back) => log.add_insert_at(typist, &[(log.len() - 1 - back.min(log.len() - 1)) as EventId], 0, "!"),
                 };
                 log.checkout();
                 log
