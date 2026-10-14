@@ -40,8 +40,15 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
         match *edit {
             Edit::Insert { before, widths } => {
                 let i = before.map_or(list.len(), |b| b.index(list.len()));
-                let (id, at) = tree.insert(list.get(i).map(|e| tree.cursor(e.0)), w(widths));
-                prop_assert_eq!(at, effect_idx(&list[..i]));
+                // Every other insert is by a caller that does not ask where it landed.
+                let before = list.get(i).map(|e| tree.cursor(e.0));
+                let id = if list.len() % 2 == 0 {
+                    tree.add(before, w(widths))
+                } else {
+                    let (id, at) = tree.insert(before, w(widths));
+                    prop_assert_eq!(at, effect_idx(&list[..i]));
+                    id
+                };
                 list.insert(i, (id, widths));
             }
             Edit::SplitEntry { at, share, before } => {
@@ -68,14 +75,16 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
                 let total: u32 = list.iter().map(|e| e.1[k]).sum();
                 if total > 0 {
                     let mut idx = idx.index(total as usize) as u32;
-                    let (at, off) = tree.char_idx_to_entry(view, idx);
-                    // The first entry that `idx` falls within.
+                    let (at, off, effect) = tree.locate(view, idx);
+                    // The first entry that `idx` falls within, and the effect widths before it.
+                    let mut before = 0;
                     let entry = list.iter().find(|e| {
                         let within = idx < e.1[k];
                         idx -= if within { 0 } else { e.1[k] };
+                        before += if within { 0 } else { e.1[1] };
                         within
                     });
-                    prop_assert_eq!((tree.id(at), off), (entry.expect("within the total").0, idx));
+                    prop_assert_eq!((tree.id(at), off, effect), (entry.expect("within the total").0, idx, before));
                 }
             }
         }

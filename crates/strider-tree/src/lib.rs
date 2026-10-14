@@ -203,9 +203,9 @@ pub struct PrepareEffectTree<const N: usize = 32> {
     /// The leaf each entry is in.
     home: Vec<u32>,
     /// The leaf the last select ended in, the view it was in, and the character index the
-    /// leaf starts at in that view. Forgotten when widths change in any other leaf, since
-    /// that may move where this one starts.
-    last: Option<(View, u32, u32)>,
+    /// leaf starts at in that view and in the effect view. Forgotten when widths change in
+    /// any other leaf, since that may move where this one starts.
+    last: Option<(View, u32, u32, u32)>,
 }
 
 impl<const N: usize> PrepareEffectTree<N> {
@@ -328,27 +328,38 @@ impl<const N: usize> PrepareEffectTree<N> {
     /// Finds the entry holding character `idx` of one view, and how far into the entry that
     /// character is.
     pub fn char_idx_to_entry(&mut self, view: View, idx: u32) -> (Cursor, u32) {
-        if let Some((seen, leaf, start)) = self.last {
+        let (at, off, _) = self.locate(view, idx);
+        (at, off)
+    }
+
+    /// Finds the entry holding character `idx` of one view, how far into the entry that
+    /// character is, and the index the entry starts at in the effect view, which is summed on
+    /// the way down.
+    pub fn locate(&mut self, view: View, idx: u32) -> (Cursor, u32, u32) {
+        if let Some((seen, leaf, start, effect)) = self.last {
             let found = if seen == view && idx >= start { self.leaves[leaf as usize].find(view, idx - start) } else { None };
             if let Some((slot, off)) = found {
-                return (Cursor { leaf, slot: slot as u32 }, off);
+                return (Cursor { leaf, slot: slot as u32 }, off, effect + self.leaves[leaf as usize].start(View::Effect, slot));
             }
         }
-        let (mut node, mut rest) = (self.root, idx);
+        let (mut node, mut rest, mut effect) = (self.root, idx, 0);
         for _ in 0..self.height {
             let nd = &self.nodes[node as usize];
             let child;
             (child, rest) = nd.find(view, rest).expect("index is past the end");
+            effect += nd.start(View::Effect, child);
             node = nd.slots[child].child;
         }
-        let (slot, off) = self.leaves[node as usize].find(view, rest).expect("index is past the end");
-        self.last = Some((view, node, idx - rest));
-        (Cursor { leaf: node, slot: slot as u32 }, off)
+        let leaf = &self.leaves[node as usize];
+        let (slot, off) = leaf.find(view, rest).expect("index is past the end");
+        let within = leaf.start(View::Effect, slot);
+        self.last = Some((view, node, idx - rest, effect));
+        (Cursor { leaf: node, slot: slot as u32 }, off, effect + within)
     }
 
     /// Notes that widths are changing in `leaf`.
     fn changing(&mut self, leaf: u32) {
-        self.last = self.last.filter(|&(_, last, _)| last == leaf);
+        self.last = self.last.filter(|&(_, last, ..)| last == leaf);
     }
 
     /// Returns the character index an entry starts at in one view.
@@ -369,7 +380,12 @@ impl<const N: usize> PrepareEffectTree<N> {
     /// Changes an entry's widths.
     pub fn set_widths(&mut self, at: Cursor, widths: Widths) {
         let delta = self.replace(at, widths);
-        let leaf = &self.leaves[at.leaf as usize];
+        self.widen(at.leaf, delta);
+    }
+
+    /// Adds `delta` to the widths recorded for `leaf` in each of its ancestors.
+    fn widen(&mut self, leaf: u32, delta: Widths) {
+        let leaf = &self.leaves[leaf as usize];
         let (mut child, mut node) = (leaf.at as usize, leaf.parent);
         loop {
             let nd = &mut self.nodes[node as usize];
@@ -419,6 +435,21 @@ impl<const N: usize> PrepareEffectTree<N> {
     /// Adds an entry just before `before`, or at the end for `None`. Returns its id and the
     /// index it starts at in the effect view.
     pub fn insert(&mut self, before: Option<Cursor>, widths: Widths) -> (Id, u32) {
+        let (id, at) = self.place(before, widths);
+        (id, self.climb(at, widths))
+    }
+
+    /// Adds an entry as [`insert`](Self::insert) does, for a caller that already knows where
+    /// it starts. Returns its id.
+    pub fn add(&mut self, before: Option<Cursor>, widths: Widths) -> Id {
+        let (id, at) = self.place(before, widths);
+        self.widen(at.leaf, widths);
+        id
+    }
+
+    /// Puts a new entry in a leaf just before `before`, or at the end for `None`, leaving the
+    /// leaf's ancestors to be told of its widths. Returns its id and where it is.
+    fn place(&mut self, before: Option<Cursor>, widths: Widths) -> (Id, Cursor) {
         let before = before.unwrap_or_else(|| {
             let leaf = self.last_leaf();
             Cursor { leaf, slot: self.leaves[leaf as usize].len }
@@ -427,7 +458,7 @@ impl<const N: usize> PrepareEffectTree<N> {
         self.changing(at.leaf);
         let id = self.new_entry(at.leaf);
         self.leaves[at.leaf as usize].insert(at.slot as usize, id, widths);
-        (id, self.climb(at, widths))
+        (id, at)
     }
 
     /// Splits an entry in two: a new entry takes `widths` out of the entry at `at`, and

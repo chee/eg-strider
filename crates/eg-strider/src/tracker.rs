@@ -275,11 +275,14 @@ impl Tracker {
     /// Merges an insert of `len` characters at prepare-version index `pos`, made by region
     /// events `lv..lv + len`. Returns the index to insert at in the effect version.
     pub fn insert(&mut self, lv: u32, len: u32, pos: u32, goes_before: impl Fn(u32, u32) -> bool) -> u32 {
-        let (origin_left, left, after_left) = if pos == 0 {
-            (NONE, None, Place::In(self.tree.first(), 0))
+        // `index`: where the place just after the left origin is in the effect version, which
+        // finding the origin gives. The origin's own character is there unless it was deleted.
+        let (origin_left, left, after_left, index) = if pos == 0 {
+            (NONE, None, Place::In(self.tree.first(), 0), 0)
         } else {
-            let (at, off) = self.tree.char_idx_to_entry(View::Prepare, pos - 1);
-            (self.span(at).item + off, Some(at), self.place_in(at, off + 1))
+            let (at, off, start) = self.tree.locate(View::Prepare, pos - 1);
+            let span = self.span(at);
+            (span.item + off, Some(at), self.place_in(at, off + 1), start + if span.ever_deleted { 0 } else { off + 1 })
         };
 
         // The first thing to our right that already existed, deleted or not. Anything
@@ -301,8 +304,9 @@ impl Tracker {
             },
         };
 
+        // Among concurrent inserts the place may be further along, and is found by climbing.
         let place = if concurrent { self.integrate(after_left, lv, origin_left, origin_right, &goes_before) } else { after_left };
-        self.insert_span(place, left.filter(|_| place == after_left), lv, len, origin_left, origin_right)
+        self.insert_span(place, left.filter(|_| place == after_left), lv, len, origin_left, origin_right, Some(index).filter(|_| !concurrent))
     }
 
     /// Merges an insert whose neighbours are already known, so that no prepare version is
@@ -316,7 +320,7 @@ impl Tracker {
         };
         // Everything between the two origins was inserted concurrently with this event.
         let place = if next != origin_right { self.integrate(after_left, lv, origin_left, origin_right, &goes_before) } else { after_left };
-        self.insert_span(place, left.filter(|_| place == after_left), lv, len, origin_left, origin_right)
+        self.insert_span(place, left.filter(|_| place == after_left), lv, len, origin_left, origin_right, None)
     }
 
     /// Finds where a new insert goes among the concurrent inserts that start at `start`,
@@ -382,9 +386,11 @@ impl Tracker {
     }
 
     /// Adds the characters of events `lv..lv + len` at `place`, and returns their index in
-    /// the effect version. `left` is the entry holding the left origin, given only when
-    /// `place` is still the place just after that origin.
-    fn insert_span(&mut self, place: Place, left: Option<Cursor>, lv: u32, len: u32, origin_left: u32, origin_right: u32) -> u32 {
+    /// the effect version: `index` if that is given, and else found by climbing the tree.
+    /// `left` is the entry holding the left origin, given only when `place` is still the
+    /// place just after that origin.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_span(&mut self, place: Place, left: Option<Cursor>, lv: u32, len: u32, origin_left: u32, origin_right: u32, index: Option<u32>) -> u32 {
         // Typing on from the character before: extend its span instead of adding one.
         if let Some(at) = left {
             let id = self.tree.id(at);
@@ -394,7 +400,13 @@ impl Tracker {
                 prev.len += len;
                 let (widths, old_len) = (prev.widths(), prev.len - len);
                 self.by_event[lv as usize..(lv + len) as usize].fill(id);
-                return self.tree.update(at, widths) + old_len;
+                return match index {
+                    Some(index) => {
+                        self.tree.set_widths(at, widths);
+                        index
+                    }
+                    None => self.tree.update(at, widths) + old_len,
+                };
             }
         }
 
@@ -404,11 +416,14 @@ impl Tracker {
             Place::In(at, off) => Some(self.split(at, off)[1]),
         };
         let span = Span { item: lv, len, origin_left, origin_right, state: INSERTED, ever_deleted: false };
-        let (id, rank) = self.tree.insert(before, span.widths());
+        let (id, index) = match index {
+            Some(index) => (self.tree.add(before, span.widths()), index),
+            None => self.tree.insert(before, span.widths()),
+        };
         debug_assert_eq!(id as usize, self.spans.len());
         self.spans.push(span);
         self.by_event[lv as usize..(lv + len) as usize].fill(id);
-        rank
+        index
     }
 
     /// Returns the left and right origins of the character inserted by region event `lv`.
@@ -423,7 +438,11 @@ impl Tracker {
     /// `pos..pos + len`, removed first-to-last (`fwd`) or last-to-first. Calls `removed` with
     /// the effect-version index and length of each run of characters that was still there.
     pub fn delete(&mut self, lv: u32, pos: u32, len: u32, fwd: bool, mut removed: impl FnMut(u32, u32)) {
-        let (mut at, mut off) = self.tree.char_idx_to_entry(View::Prepare, pos);
+        let (mut at, mut off, start) = self.tree.locate(View::Prepare, pos);
+        // Where the characters to delete next are in the effect version, if they are still
+        // there. Finding the first of them gave it; from there it only moves past what is in
+        // the effect version and not in the prepare version.
+        let mut index = start + if self.span(at).ever_deleted { 0 } else { off };
         let mut done = 0;
         loop {
             // The span holds characters `done..done + n` of the range.
@@ -434,7 +453,7 @@ impl Tracker {
             // the ones before those already accounted for.
             let first = if fwd { lv + done } else { lv + len - done - n };
             self.note_deleted(Targets { lv: first, len: n, item: self.span(at).item, descending: !fwd });
-            if let Some(index) = self.mark_deleted(at) {
+            if self.mark_deleted(at, Some(index)).is_some() {
                 removed(index, n);
             }
             done += n;
@@ -444,6 +463,7 @@ impl Tracker {
             // The range runs on into the next span that is in the prepare version.
             at = self.tree.next(at).expect("a delete stays inside the document");
             while self.span(at).state != INSERTED {
+                index += self.span(at).widths().effect;
                 at = self.tree.next(at).expect("a delete stays inside the document");
             }
             off = 0;
@@ -474,7 +494,7 @@ impl Tracker {
             let (span, off) = self.locate(item);
             let n = (stop - item).min(self.spans[span as usize].len - off);
             let at = self.isolate(self.tree.cursor(span), off, n);
-            if let Some(index) = self.mark_deleted(at) {
+            if let Some(index) = self.mark_deleted(at, None) {
                 removed(index, n);
             }
             item += n;
@@ -482,21 +502,20 @@ impl Tracker {
     }
 
     /// Counts one more delete against the span at `at`. Returns its index in the effect
-    /// version if this is the first.
-    fn mark_deleted(&mut self, at: Cursor) -> Option<u32> {
+    /// version if this is the first: `index` if that is given, and else found by climbing
+    /// the tree.
+    fn mark_deleted(&mut self, at: Cursor, index: Option<u32>) -> Option<u32> {
         let span = &mut self.spans[self.tree.id(at) as usize];
         let (first, before) = (!span.ever_deleted, span.widths());
         span.state += 1;
         span.ever_deleted = true;
         let widths = span.widths();
-        if first {
-            Some(self.tree.update(at, widths))
-        } else {
-            if widths != before {
-                self.tree.set_widths(at, widths);
-            }
-            None
+        match index {
+            None if first => return Some(self.tree.update(at, widths)),
+            _ if widths != before => self.tree.set_widths(at, widths),
+            _ => {}
         }
+        index.filter(|_| first)
     }
 
     /// Returns what the delete events from `lv` deleted, up to event `end` or to where their
