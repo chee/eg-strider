@@ -22,7 +22,7 @@ use super::{AgentRun, Op, OpKind, OpLog, OpSlice};
 use crate::replay::Base;
 use std::borrow::Cow;
 use std::ops::Range;
-use strider_graph::{Graph, Segment};
+use strider_graph::{Event, Graph, Segment};
 
 const MAGIC: &[u8] = b"eg-strider\x05";
 
@@ -51,14 +51,14 @@ pub(crate) struct Packed {
     /// Where each block of that history is in `bytes`.
     blocks: Vec<Range<usize>>,
     /// The first event of each block, then the number of events in them all.
-    starts: Vec<u32>,
+    starts: Vec<Event>,
     /// The events of that history that none of its others descends from.
-    pub heads: Vec<u32>,
+    pub heads: Vec<Event>,
 }
 
 impl Packed {
     /// Finds the block holding an event.
-    pub fn block_holding(&self, event: u32) -> usize {
+    pub fn block_holding(&self, event: Event) -> usize {
         self.starts.partition_point(|&start| start <= event) - 1
     }
 }
@@ -120,7 +120,7 @@ impl OpLog {
         let heads = (0..file.count()?).map(|_| events.checked_sub(file.number()?).ok_or(Malformed)).collect::<Result<Vec<_>, _>>()?;
         let in_order = heads.windows(2).all(|pair| pair[0] < pair[1]) && heads.last().map_or(events == 0, |&head| head + 1 == events);
         let (text_len, text_packed) = (file.number()? as usize, file.number()? as usize);
-        let (mut starts, mut lens, mut end) = (vec![0u32], Vec::new(), 0u32);
+        let (mut starts, mut lens, mut end) = (vec![0], Vec::new(), 0 as Event);
         for _ in 0..file.count()? {
             lens.push(file.number()? as usize);
             end = end.checked_add(file.number()?).filter(|&next| next > end).ok_or(Malformed)?;
@@ -174,7 +174,7 @@ impl OpLog {
         self.totals = (self.totals.0 + later.totals.0, self.totals.1 + later.totals.1);
         let blocks = later.graph.blocks();
         for block in 0..blocks.len() {
-            let parents: Vec<u32> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
+            let parents: Vec<Event> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
             // A block of the later events with no block for a parent followed the old heads.
             let parents = if parents.is_empty() { &packed.heads } else { &parents };
             self.graph.push(parents, blocks.events(block).len() as u32);
@@ -188,9 +188,9 @@ impl OpLog {
 
     /// Returns the events that the chain of block `block` starts from: its parents, which for
     /// a chain with no block before it are the heads of the history still as it was saved.
-    fn parents_of(&self, block: usize) -> Vec<u32> {
+    fn parents_of(&self, block: usize) -> Vec<Event> {
         let blocks = self.graph.blocks();
-        let parents: Vec<u32> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
+        let parents: Vec<Event> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
         match &self.packed {
             Some(packed) if parents.is_empty() => packed.heads.clone(),
             _ => parents,
@@ -200,7 +200,7 @@ impl OpLog {
     /// Chooses where to cut the events `from..to`, which the log holds, into blocks: at
     /// critical versions, about [`BLOCK`] events before the end and twice as far apart each
     /// time. Returns `from` and then the end of each block.
-    fn cuts(&self, from: u32, to: u32) -> Vec<u32> {
+    fn cuts(&self, from: Event, to: Event) -> Vec<Event> {
         let blocks = self.graph.blocks();
         let (mut cuts, mut size) = (vec![to], BLOCK);
         for segment in self.graph.segments().iter().rev() {
@@ -229,7 +229,7 @@ impl OpLog {
     }
 
     /// Packs the events `events`, which the log holds, as a block.
-    fn pack(&self, events: Range<u32>) -> Vec<u8> {
+    fn pack(&self, events: Range<Event>) -> Vec<u8> {
         let mut columns = Vec::new();
 
         // The runs of events by one agent. An agent's runs nearly always carry on from one
@@ -309,7 +309,7 @@ impl OpLog {
 
     /// Reads a block that [`pack`](Self::pack) wrote, whose events come straight after those
     /// the log holds, and adds them. Returns the parents of the first.
-    fn unpack(&mut self, block: &[u8]) -> Result<Vec<u32>, Malformed> {
+    fn unpack(&mut self, block: &[u8]) -> Result<Vec<Event>, Malformed> {
         let mut file = Reader(block);
         let columns = file.packed()?;
         let text = String::from_utf8(file.packed()?).map_err(|_| Malformed)?;

@@ -5,7 +5,7 @@
 //! that holds edits it has not seen cannot be placed this way, and the region goes to the
 //! tracker. A block is stable once every later block has seen it (causal stability).
 
-use crate::oplog::{OpKind, OpLog};
+use crate::oplog::{OpIndex, OpKind, OpLog};
 use crate::replay::Placed;
 use std::ops::Range;
 use strider_graph::Blocks;
@@ -217,7 +217,7 @@ pub(crate) struct Shifter {
 impl Shifter {
     /// Merges a region by shifting, recording in `doc` where its ops go. Returns false, with
     /// `doc` as it was, if the region needs the tracker.
-    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[u32], region: &Range<usize>, doc: &mut Placed) -> bool {
+    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<usize>, doc: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;
         }

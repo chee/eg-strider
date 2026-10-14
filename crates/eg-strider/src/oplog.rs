@@ -12,12 +12,19 @@ pub use file::Malformed;
 use crate::replay::{self, Base, Memo};
 use std::cmp::Ordering;
 use std::ops::Range;
-use strider_graph::Graph;
+use strider_graph::{Event, Graph};
 
 /// A local version: the number of an event in one replica's log. Numbers are not shared
 /// between replicas; any numbering that puts parents before children is valid.
 pub type LV = usize;
 pub type AgentId = u32;
+
+/// An op's place in the log's list of ops.
+pub(crate) type OpIndex = u32;
+
+/// Where some inserted text is in [`OpLog::content`]: its first byte, and the byte after its
+/// last.
+pub(crate) type ByteRange = (u32, u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpKind {
@@ -37,7 +44,7 @@ pub enum Edit {
 
 /// A run of consecutive single-character events of one kind.
 struct Op {
-    lv: u32,
+    lv: Event,
     len: u32,
     kind: OpKind,
     /// Deletes only: false for backspace, where the first event removes the last position.
@@ -48,13 +55,13 @@ struct Op {
     /// The run touches document positions `pos..pos + len`, measured before its first
     /// event.
     pos: u32,
-    /// Inserts only: byte range of the inserted text in `OpLog::content`.
-    content: (u32, u32),
+    /// Inserts only: the inserted text.
+    content: ByteRange,
 }
 
 /// A consecutive run of events by one agent.
 struct AgentRun {
-    lv: u32,
+    lv: Event,
     len: u32,
     agent: AgentId,
     seq: u32,
@@ -63,7 +70,7 @@ struct AgentRun {
 /// Part of one op, as handed to the replayer.
 #[derive(Clone, Copy)]
 pub(crate) struct OpSlice {
-    pub lv: u32,
+    pub lv: Event,
     pub len: u32,
     pub kind: OpKind,
     pub fwd: bool,
@@ -71,8 +78,8 @@ pub(crate) struct OpSlice {
     pub trims: bool,
     /// Inserts go at `pos`; deletes remove `pos..pos + len`.
     pub pos: u32,
-    /// Inserts only: where the text is in [`OpLog::content`], in bytes.
-    pub text: (u32, u32),
+    /// Inserts only: the inserted text.
+    pub text: ByteRange,
 }
 
 #[derive(Default)]
@@ -94,7 +101,7 @@ pub struct OpLog {
     /// had to read all of it.
     packed: Option<file::Packed>,
     /// Reused to hold the parents of the event being added.
-    parents: Vec<u32>,
+    parents: Vec<Event>,
     /// How many characters the inserts put in, and how many the deletes take out.
     totals: (u32, u32),
 }
@@ -290,7 +297,7 @@ impl OpLog {
     /// Adds `len` events in a chain to the graph, the first at version `parents` or, without
     /// any, at the current frontier. Returns whether they simply follow the last event, and
     /// their numbers.
-    fn link(&mut self, parents: Option<&[LV]>, len: u32) -> (bool, Range<u32>) {
+    fn link(&mut self, parents: Option<&[LV]>, len: u32) -> (bool, Range<Event>) {
         // History that is still as it was saved has to be read for an event that was made
         // without all of it: one with no parent held here, and not every old head for parents.
         // A block of it starts at a critical version, so an event has all that comes before
@@ -298,7 +305,7 @@ impl OpLog {
         if let (Some(packed), Some(parents)) = (&self.packed, parents) {
             let floor = self.graph.floor() as LV;
             if !parents.iter().any(|&parent| parent >= floor) && !packed.heads.iter().all(|&head| parents.contains(&(head as LV))) {
-                let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent as u32));
+                let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent as Event));
                 self.unpack_from(block);
             }
         }
@@ -311,7 +318,7 @@ impl OpLog {
         let mut at = std::mem::take(&mut self.parents);
         at.clear();
         match parents {
-            Some(parents) => at.extend(parents.iter().map(|&p| u32::try_from(p).expect("parent is not a known event"))),
+            Some(parents) => at.extend(parents.iter().map(|&p| Event::try_from(p).expect("parent is not a known event"))),
             None => at.extend_from_slice(self.graph.frontier()),
         }
         let events = self.graph.push(&at, len);
@@ -321,7 +328,7 @@ impl OpLog {
 
     /// Records that `agent` made the `len` events from `lv`, numbering them from `seq` or,
     /// without one, from where its last left off.
-    fn assign(&mut self, agent: AgentId, seq: Option<u32>, lv: u32, len: u32) {
+    fn assign(&mut self, agent: AgentId, seq: Option<u32>, lv: Event, len: u32) {
         let seq = seq.unwrap_or(self.next_seq[agent as usize]);
         let next = &mut self.next_seq[agent as usize];
         *next = (*next).max(seq + len);
@@ -355,11 +362,11 @@ impl OpLog {
     }
 
     /// Makes an op start at event `at`, if one runs across it.
-    fn split_op(&mut self, at: u32) {
+    fn split_op(&mut self, at: Event) {
         let i = self.op_containing(at) as usize;
         let Some(op) = self.ops.get(i).filter(|op| op.lv < at) else { return };
         let end = op.lv + op.len;
-        let part = |events: Range<u32>| {
+        let part = |events: Range<Event>| {
             let part = self.slice(op, &events);
             Op { lv: part.lv, len: part.len, kind: part.kind, fwd: part.fwd, trims: false, pos: part.pos, content: part.text }
         };
@@ -373,7 +380,7 @@ impl OpLog {
 
     /// Finds how many bytes the first `len` characters of the inserted text at `content` take.
     #[cold]
-    fn prefix(&self, content: (u32, u32), len: u32) -> u32 {
+    fn prefix(&self, content: ByteRange, len: u32) -> u32 {
         let text = self.text(content);
         match text.char_indices().nth(len as usize) {
             Some((bytes, _)) => bytes as u32,
@@ -386,7 +393,7 @@ impl OpLog {
 
     /// Returns the inserted text at `content` without its last `cut` characters: what a
     /// delete that [trims](Op::trims) the insert leaves of it.
-    pub(crate) fn trimmed(&self, content: (u32, u32), len: u32, cut: u32) -> (u32, u32) {
+    pub(crate) fn trimmed(&self, content: ByteRange, len: u32, cut: u32) -> ByteRange {
         if content.1 - content.0 == len {
             return (content.0, content.1 - cut);
         }
@@ -394,14 +401,14 @@ impl OpLog {
     }
 
     /// Finds which agent made event `lv`, and its sequence number there.
-    fn agent_at(&self, lv: u32) -> (AgentId, u32) {
+    fn agent_at(&self, lv: Event) -> (AgentId, u32) {
         let run = &self.agent_runs[self.agent_runs.partition_point(|r| r.lv <= lv) - 1];
         (run.agent, run.seq + (lv - run.lv))
     }
 
     /// Breaks the tie between two concurrent inserts at the same place with the same neighbours:
     /// does the insert starting at event `a` go before the one starting at `b`?
-    pub(crate) fn inserts_before(&self, a: u32, b: u32) -> bool {
+    pub(crate) fn inserts_before(&self, a: Event, b: Event) -> bool {
         let (agent_a, seq_a) = self.agent_at(a);
         let (agent_b, seq_b) = self.agent_at(b);
         match self.agent_names[agent_a as usize].cmp(&self.agent_names[agent_b as usize]) {
@@ -413,14 +420,14 @@ impl OpLog {
 
     /// Finds, for each event in `starts`, which must ascend, the index of the op containing it:
     /// the number of ops, for the event after the last.
-    pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = u32>) -> Vec<u32> {
+    pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = Event>) -> Vec<OpIndex> {
         let mut op = 0;
         starts
             .map(|lv| {
                 while self.ops.get(op).is_some_and(|op| op.lv + op.len <= lv) {
                     op += 1;
                 }
-                op as u32
+                op as OpIndex
             })
             .collect()
     }
@@ -428,7 +435,7 @@ impl OpLog {
     /// Iterates over the part of each op that falls inside `events`. `ops` must run from the
     /// index of the op containing the first of them to that of the op containing the event
     /// after the last.
-    pub(crate) fn ops(&self, ops: Range<u32>, events: Range<u32>) -> impl DoubleEndedIterator<Item = OpSlice> + '_ {
+    pub(crate) fn ops(&self, ops: Range<OpIndex>, events: Range<Event>) -> impl DoubleEndedIterator<Item = OpSlice> + '_ {
         // The op containing the event after the last holds some of these too if it starts
         // before then.
         let straddles = self.ops.get(ops.end as usize).is_some_and(|op| op.lv < events.end);
@@ -437,8 +444,8 @@ impl OpLog {
     }
 
     /// Finds the index of the op containing event `lv`.
-    pub(crate) fn op_containing(&self, lv: u32) -> u32 {
-        self.ops.partition_point(|op| op.lv + op.len <= lv) as u32
+    pub(crate) fn op_containing(&self, lv: Event) -> OpIndex {
+        self.ops.partition_point(|op| op.lv + op.len <= lv) as OpIndex
     }
 
     /// Returns all the inserted text, which an [`OpSlice`]'s range is a stretch of.
@@ -447,7 +454,7 @@ impl OpLog {
     }
 
     /// Returns the inserted text that an op's range refers to.
-    fn text(&self, (start, end): (u32, u32)) -> &str {
+    fn text(&self, (start, end): ByteRange) -> &str {
         &self.content[start as usize..end as usize]
     }
 
@@ -458,7 +465,7 @@ impl OpLog {
 
     /// Counts how many characters `events` insert and how many they remove, given that they are
     /// applied as recorded. `first_op` is the index of the op containing the first of them.
-    pub(crate) fn lengths(&self, first_op: u32, events: Range<u32>) -> (u32, u32) {
+    pub(crate) fn lengths(&self, first_op: OpIndex, events: Range<Event>) -> (u32, u32) {
         let (mut inserted, mut removed) = (0, 0);
         for op in &self.ops[first_op as usize..] {
             if op.lv.max(events.start) >= events.end {
@@ -476,7 +483,7 @@ impl OpLog {
 
     /// Finds the bytes holding characters `from..to` of the inserted text at `content`.
     #[cold]
-    fn cut(&self, content: (u32, u32), from: u32, to: u32) -> (u32, u32) {
+    fn cut(&self, content: ByteRange, from: u32, to: u32) -> ByteRange {
         let text = self.text(content);
         // Where each character starts, then where the text ends.
         let mut starts = text.char_indices().map(|(byte, _)| byte as u32).chain([text.len() as u32]);
@@ -487,7 +494,7 @@ impl OpLog {
 
     /// Cuts out the part of `op` that falls inside `events`.
     #[inline]
-    fn slice(&self, op: &Op, events: &Range<u32>) -> OpSlice {
+    fn slice(&self, op: &Op, events: &Range<Event>) -> OpSlice {
         let from = events.start.max(op.lv) - op.lv;
         let to = events.end.min(op.lv + op.len) - op.lv;
         // Nearly always the whole op, which needs no working out whatever its kind.
