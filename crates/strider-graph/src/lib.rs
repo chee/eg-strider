@@ -7,7 +7,8 @@ use std::ops::Range;
 /// Replica local version number/index for an event.
 pub type EventId = u32;
 
-/// Index of a block, in order of the blocks' first events.
+/// Index of a block among those the graph holds, in order of their first events. Shifts by one
+/// when an earlier block splits.
 pub type BlockId = u32;
 
 /// The event graph of a document's history: which events each event's author had seen. Merging
