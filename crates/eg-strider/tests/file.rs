@@ -5,17 +5,17 @@ use eg_strider::{Edit, EventIndex, Malformed, OpLog};
 fn history() -> OpLog {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
-    let base = log.add_insert(a, 0, "one two thrée four").end - 1;
-    let left = log.add_delete_at(a, &[base], 2..7, false);
-    log.add_insert_at(b, &[left.start + 1], 4, "🙂");
-    let right = log.add_insert_at(b, &[base], 18, "!").end - 1;
-    let merged = log.add_insert_at(a, &[left.end - 1, right], 0, "> ").end - 1;
-    log.add_delete_at(b, &[merged], 0..1, true);
-    log.add_insert(a, 0, "é");
+    let base = log.add_insert(a, 0, "one two thrée four").unwrap().end - 1;
+    let left = log.add_delete_at(a, &[base], 2..7, false).unwrap();
+    log.add_insert_at(b, &[left.start + 1], 4, "🙂").unwrap();
+    let right = log.add_insert_at(b, &[base], 18, "!").unwrap().end - 1;
+    let merged = log.add_insert_at(a, &[left.end - 1, right], 0, "> ").unwrap().end - 1;
+    log.add_delete_at(b, &[merged], 0..1, true).unwrap();
+    log.add_insert(a, 0, "é").unwrap();
     // A run that arrives together, with a correction of what it has just typed.
     let (c, tip) = (log.get_or_create_agent("c"), log.frontier());
     let run = [Edit::Insert { pos: 1, len: 4 }, Edit::Delete { pos: 3, len: 2, backspace: true }, Edit::Insert { pos: 3, len: 1 }];
-    log.add_remote_ops(c, 0, &tip, &run, "tÿpos");
+    log.add_remote_ops(c, 0, &tip, &run, "tÿpos").unwrap();
     log
 }
 
@@ -23,9 +23,9 @@ fn history() -> OpLog {
 fn carry_on(log: &mut OpLog) {
     let (b, c) = (log.get_or_create_agent("b"), log.get_or_create_agent("c"));
     let tip = log.frontier();
-    let side = log.add_insert_at(c, &[3], 2, "mid").end - 1;
+    let side = log.add_insert_at(c, &[3], 2, "mid").unwrap().end - 1;
     let both: Vec<EventIndex> = tip.iter().copied().chain([side]).collect();
-    log.add_insert_at(b, &both, 0, "#");
+    log.add_insert_at(b, &both, 0, "#").unwrap();
 }
 
 /// The same history with two more events that are concurrent with each other, so that it
@@ -33,8 +33,8 @@ fn carry_on(log: &mut OpLog) {
 fn open_ended() -> OpLog {
     let mut log = history();
     let (a, b, tip) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"), log.frontier());
-    log.add_insert_at(a, &tip, 0, "left ");
-    log.add_insert_at(b, &tip, 3, " right");
+    log.add_insert_at(a, &tip, 0, "left ").unwrap();
+    log.add_insert_at(b, &tip, 3, " right").unwrap();
     log
 }
 
@@ -57,7 +57,7 @@ fn a_loaded_log_carries_on_as_the_original_does() {
         // Typing on at the end needs none of the saved history.
         for log in [&mut log, &mut loaded] {
             let a = log.get_or_create_agent("a");
-            log.add_insert(a, 1, "on ");
+            log.add_insert(a, 1, "on ").unwrap();
         }
         assert_eq!(loaded.checkout(), log.checkout());
         // An event made at an old version does.
@@ -77,7 +77,7 @@ fn an_event_at_an_old_version_reads_only_the_history_since() {
     let mut log = OpLog::new();
     let a = log.get_or_create_agent("a");
     for at in (0..EVENTS as usize).step_by(4) {
-        log.add_insert(a, at, "abcd");
+        log.add_insert(a, at, "abcd").unwrap();
     }
     let mut loaded = OpLog::load(log.save()).unwrap();
     assert_eq!(loaded.unread(), EVENTS as usize);
@@ -85,7 +85,7 @@ fn an_event_at_an_old_version_reads_only_the_history_since() {
     for (parent, text) in [(EVENTS - 10, "recent"), (EVENTS - 3, "more recent"), (10, "old")] {
         for log in [&mut log, &mut loaded] {
             let b = log.get_or_create_agent("b");
-            log.add_insert_at(b, &[parent], 5, text);
+            log.add_insert_at(b, &[parent], 5, text).unwrap();
         }
         assert_eq!(loaded.checkout(), log.checkout());
         if parent > EVENTS / 2 {
@@ -93,7 +93,7 @@ fn an_event_at_an_old_version_reads_only_the_history_since() {
             // What is left unread is saved as it was, and the rest again.
             let mut again = OpLog::load(loaded.save()).unwrap();
             assert_eq!(again.checkout(), log.checkout());
-            again.forget();
+            again.forget().unwrap();
             assert_eq!(again.checkout(), log.checkout());
         } else {
             assert_eq!(loaded.unread(), 0);
@@ -107,7 +107,7 @@ fn an_empty_log_is_saved_and_loaded() {
     let mut loaded = OpLog::load(OpLog::new().save()).unwrap();
     assert_eq!((loaded.len(), loaded.checkout()), (0, ""));
     let a = loaded.get_or_create_agent("a");
-    loaded.add_insert(a, 0, "hi");
+    loaded.add_insert(a, 0, "hi").unwrap();
     assert_eq!(loaded.checkout(), "hi");
 }
 
@@ -129,7 +129,13 @@ fn a_damaged_file_is_refused_or_loaded_but_never_panics() {
         for flip in [0x01, 0x80, 0xff] {
             let mut damaged = saved.clone();
             damaged[at] ^= flip;
-            let _ = OpLog::load(damaged);
+            let Ok(mut loaded) = OpLog::load(damaged) else { continue };
+            // Reading the history back, for an edit at an old version or to start over, either
+            // works or is refused.
+            let b = loaded.get_or_create_agent("b");
+            if loaded.add_insert_at(b, &[0], 0, "x").is_ok() && loaded.forget().is_ok() {
+                loaded.checkout();
+            }
         }
     }
 }

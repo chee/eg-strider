@@ -137,6 +137,7 @@ pub fn extend(log: &mut OpLog, history: &History, limit: usize) {
     for chunk in history.chunks.iter().skip_while(|chunk| chunk.events.end <= have).take_while(|chunk| chunk.events.end <= limit) {
         assert_eq!(log.len(), chunk.events.start);
         let text = &history.text[chunk.text.start as usize..chunk.text.end as usize];
-        log.add_remote_ops(agents[chunk.agent], chunk.sequence_number as SequenceNumber, history.parents(chunk), history.ops(chunk), text);
+        log.add_remote_ops(agents[chunk.agent], chunk.sequence_number as SequenceNumber, history.parents(chunk), history.ops(chunk), text)
+            .expect("a trace's events are valid");
     }
 }

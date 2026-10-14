@@ -93,11 +93,14 @@ impl Graph {
         &self.blocks
     }
 
-    /// Appends a chain of `len` events, the first with `parents`. Returns their ids.
+    /// Appends a chain of `len` events, the first with `parents`. Returns their ids. `len` must
+    /// not be 0, so that there are never more blocks than events, and `parents` must be known
+    /// events in ascending order.
     pub fn push(&mut self, parents: &[EventIndex], len: u32) -> Range<EventIndex> {
-        // A block with no events would let there be more blocks than events.
-        assert!(len > 0, "a run of no events");
         let start = self.len();
+        debug_assert!(len > 0, "a run of no events");
+        debug_assert!(parents.is_sorted_by(|a, b| a < b), "parents not in ascending order");
+        debug_assert!(parents.iter().all(|&parent| parent < start), "a parent is not a known event");
         let end = start.checked_add(len).expect("too many events");
         if self.continues(parents) {
             // Nothing else can have the last event as a parent yet, so its block just grows,
@@ -106,23 +109,9 @@ impl Graph {
             *self.frontier.last_mut().expect("the last event is in the frontier") = end - 1;
             return start..end;
         }
-        assert!(parents.iter().all(|&p| p < start), "parent is not a known event");
-        // Parents must be ascending and distinct: the frontier comparison below needs it, and
-        // splitting blocks in ascending order keeps the indexes already in `ends` valid. They
-        // nearly always arrive that way, so only otherwise are they copied and sorted.
-        let sorted: Vec<EventIndex>;
-        let parents = if parents.is_sorted_by(|a, b| a < b) {
-            parents
-        } else {
-            let mut copy = parents.to_vec();
-            copy.sort_unstable();
-            copy.dedup();
-            sorted = copy;
-            &sorted
-        };
 
-        // A parent part-way along a block splits it there. Taking them in ascending order
-        // keeps the blocks already found where they were.
+        // A parent part-way along a block splits it there. Taking them in ascending order keeps
+        // the indexes already in `ends` valid, since a split only moves the blocks after it.
         let mut ends = std::mem::take(&mut self.ends);
         ends.clear();
         let floor = self.floor();

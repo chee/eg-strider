@@ -50,7 +50,8 @@ impl OpLog {
     /// merged text, then the history in blocks that each start at a critical version, so that a
     /// block and those after it read alone. A block stores each field as a column of LEB128
     /// varints, run-length encoded where values repeat, with positions relative to the op
-    /// before and parents as distances back. Columns and text are compressed with Zstandard.
+    /// before and parents as distances back. Columns and text are compressed with Zstandard,
+    /// each with a checksum.
     pub fn save(&mut self) -> Vec<u8> {
         self.checkout();
         let (floor, len) = (self.graph.floor(), self.graph.len());
@@ -129,28 +130,31 @@ impl OpLog {
 
         log.graph = Graph::after(events, &frontier);
         log.base = Base { events, chars, text };
+        log.frontier_chars = Some(chars);
         log.packed = (events > 0).then_some(Packed { bytes, blocks, starts, frontier });
         Ok(log)
     }
 
     /// Reads the saved history from block `from` on, so that the log holds every event from
     /// that block's first.
-    pub(crate) fn unpack_from(&mut self, from: SavedBlockIndex) {
-        let Some(mut packed) = self.packed.take() else { return };
-        let later = std::mem::take(self);
-        (self.agent_names, self.next_sequence_numbers, self.memo) = (later.agent_names, later.next_sequence_numbers, later.memo);
-        (self.base, self.latest) = (later.base, later.latest);
-        self.memo.outdate();
-        self.graph = Graph::after(packed.starts[from], &[]);
+    pub(crate) fn unpack_from(&mut self, from: SavedBlockIndex) -> Result<(), Malformed> {
+        let Some(packed) = &self.packed else { return Ok(()) };
+        // The blocks are read into a log of their own, so that a damaged one leaves this one as it was.
+        let mut read = OpLog { agent_names: self.agent_names.clone(), graph: Graph::after(packed.starts[from], &[]), ..OpLog::default() };
         // The first event of a block has the frontier of the history before it for parents.
         let mut frontier = Vec::new();
         for (i, block) in packed.blocks[from..].iter().enumerate() {
-            let first = self.unpack(&packed.bytes[block.clone()]).expect("the saved history is damaged");
+            let first = read.unpack(&packed.bytes[block.clone()])?;
             if i == 0 {
                 frontier = first;
             }
         }
 
+        let mut packed = self.packed.take().expect("the saved history was just read");
+        let later = std::mem::replace(self, read);
+        (self.next_sequence_numbers, self.memo, self.frontier_chars) = (later.next_sequence_numbers, later.memo, later.frontier_chars);
+        (self.base, self.latest) = (later.base, later.latest);
+        self.memo.outdate();
         let shift = self.content.len() as u32;
         self.content.push_str(&later.content);
         self.ops.extend(later.ops.into_iter().map(|op| Op { content: (op.content.0 + shift, op.content.1 + shift), ..op }));
@@ -168,6 +172,7 @@ impl OpLog {
         packed.starts.truncate(from + 1);
         packed.frontier = frontier;
         self.packed = (from > 0).then_some(packed);
+        Ok(())
     }
 
     /// Returns the parents of block `block`'s first event: for a chain with no block before it,
@@ -367,6 +372,9 @@ impl OpLog {
                     for _ in 1..count {
                         parents.push(first.checked_sub(backs.number()?).filter(|&parent| parent < first).ok_or(Malformed)?);
                     }
+                    if !parents.is_sorted_by(|a, b| a < b) {
+                        return Err(Malformed);
+                    }
                 }
             }
             first.checked_add(len).filter(|&end| len > 0 && end <= events).ok_or(Malformed)?;
@@ -435,9 +443,12 @@ fn unzigzag(n: u64) -> i64 {
     (n >> 1) as i64 ^ -((n & 1) as i64)
 }
 
-/// Compresses bytes.
+/// Compresses bytes, with a checksum that unpacking checks, so that damage is found when a
+/// part is read rather than when what it holds is used.
 fn squeezed(bytes: &[u8]) -> Vec<u8> {
-    zstd::bulk::compress(bytes, 3).expect("compressing into memory")
+    let mut compressor = zstd::bulk::Compressor::new(3).expect("a compression level zstd has");
+    compressor.include_checksum(true).expect("zstd takes a checksum");
+    compressor.compress(bytes).expect("compressing into memory")
 }
 
 /// Unpacks `len` bytes that [`squeezed`] compressed.

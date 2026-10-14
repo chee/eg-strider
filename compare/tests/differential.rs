@@ -98,7 +98,7 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
     prop_assert_eq!(log.checkout(), expected.as_str(), "second checkout");
     let mut loaded = OpLog::load(log.save()).expect("a saved log loads");
     prop_assert_eq!(loaded.checkout(), expected.as_str(), "the saved document");
-    loaded.forget();
+    loaded.forget().unwrap();
     prop_assert_eq!(loaded.checkout(), expected.as_str(), "merged again from the saved history");
 
     // Growing a little at a time and checking out at each step, so that regions are extended

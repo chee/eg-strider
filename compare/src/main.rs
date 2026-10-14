@@ -362,7 +362,7 @@ fn main() {
             // One more edit at the end, merged on top of what is there.
             let typist = log.get_or_create_agent("typist");
             let t = Instant::now();
-            log.add_insert(typist, expected_chars, "!");
+            log.add_insert(typist, expected_chars, "!").unwrap();
             let merged = log.checkout().len();
             let again_ms = since(t);
             same &= merged == expected.len() + 1;
@@ -407,15 +407,15 @@ fn main() {
             let (ms, mut log) = median_of(reps, reopen, |mut log| {
                 let typist = log.get_or_create_agent("typist");
                 match back {
-                    None => log.add_insert(typist, 0, "!"),
-                    Some(back) => log.add_insert_at(typist, &[(log.len() - 1 - back.min(log.len() - 1)) as EventIndex], 0, "!"),
+                    None => log.add_insert(typist, 0, "!").unwrap(),
+                    Some(back) => log.add_insert_at(typist, &[(log.len() - 1 - back.min(log.len() - 1)) as EventIndex], 0, "!").unwrap(),
                 };
                 log.checkout();
                 log
             });
             // Merged from nothing, the history with that edit comes to the same text.
             let merged = log.checkout().to_string();
-            log.forget();
+            log.forget().unwrap();
             same &= log.checkout() == merged;
             (ms, log.unread())
         });
