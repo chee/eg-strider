@@ -134,18 +134,18 @@ pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
     for (i, block) in blocks.iter().enumerate() {
         let mut seen = vec![0; next.len()];
         let made_by = |parent: usize| blocks.partition_point(|a| a.start <= parent) - 1;
-        for k in block.parents.iter().map(|&parent| made_by(parent)) {
-            for (mine, &theirs) in seen.iter_mut().zip(&plans[k].seen) {
+        for parent_block in block.parents.iter().map(|&parent| made_by(parent)) {
+            for (mine, &theirs) in seen.iter_mut().zip(&plans[parent_block].seen) {
                 *mine = (*mine).max(theirs);
             }
-            seen[plans[k].peer] = seen[plans[k].peer].max(plans[k].counter + blocks[k].len);
+            seen[plans[parent_block].peer] = seen[plans[parent_block].peer].max(plans[parent_block].counter + blocks[parent_block].len);
         }
         // A peer of this agent all of whose events the author had seen can carry on.
         let peer = match peers_of[block.agent].iter().find(|&&peer| seen[peer] == next[peer]) {
             Some(&peer) => peer,
             None => {
                 // It starts from the parent that had seen the most.
-                let had_seen = |k: &usize| plans[*k].seen.iter().sum::<usize>() + blocks[*k].len;
+                let had_seen = |parent_block: &usize| plans[*parent_block].seen.iter().sum::<usize>() + blocks[*parent_block].len;
                 if let Some(from) = block.parents.iter().map(|&parent| made_by(parent)).max_by_key(had_seen) {
                     copies[from].push(next.len());
                 }
@@ -174,20 +174,20 @@ pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
         if i % 64 == 0 && began.elapsed() > limit {
             return None;
         }
-        let doc = docs[plan.peer].get_or_insert_with(|| R::new(ids[plan.peer], ascii));
+        let document = docs[plan.peer].get_or_insert_with(|| R::new(ids[plan.peer], ascii));
         let mut wanted = Vec::new();
         for (other, &seen) in plan.seen.iter().enumerate() {
             let from = held[plan.peer].get(other).copied().unwrap_or(0);
             if other != plan.peer && seen > from {
                 let theirs = &made[other];
                 let range = theirs.partition_point(|&(counter, _)| counter < from)..theirs.partition_point(|&(counter, _)| counter < seen);
-                wanted.extend(theirs[range].iter().filter_map(|&(_, k)| updates[k].as_ref()));
+                wanted.extend(theirs[range].iter().filter_map(|&(_, update)| updates[update].as_ref()));
             }
         }
         if !wanted.is_empty() {
-            doc.apply(&wanted);
+            document.apply(&wanted);
         }
-        let (update, shifted) = doc.edit(&block.edits);
+        let (update, shifted) = document.edit(&block.edits);
         moved += shifted;
         updates.push(update);
         made[plan.peer].push((plan.counter, i));
@@ -209,7 +209,7 @@ pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
 }
 
 pub struct Automerge {
-    doc: automerge::AutoCommit,
+    document: automerge::AutoCommit,
     text: automerge::ObjId,
 }
 
@@ -221,49 +221,49 @@ impl Replica for Automerge {
         // Every replica starts from the same document, which holds the text object.
         static BASE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
         let base = BASE.get_or_init(|| {
-            let mut doc = AutoCommit::new().with_actor(ActorId::from(vec![0u8; 8]));
-            doc.put_object(ROOT, "text", ObjType::Text).unwrap();
-            doc.save()
+            let mut document = AutoCommit::new().with_actor(ActorId::from(vec![0u8; 8]));
+            document.put_object(ROOT, "text", ObjType::Text).unwrap();
+            document.save()
         });
-        let doc = AutoCommit::load(base).unwrap().with_actor(ActorId::from(peer.to_be_bytes().to_vec()));
-        let (_, text) = doc.get(ROOT, "text").unwrap().unwrap();
-        Automerge { doc, text }
+        let document = AutoCommit::load(base).unwrap().with_actor(ActorId::from(peer.to_be_bytes().to_vec()));
+        let (_, text) = document.get(ROOT, "text").unwrap().unwrap();
+        Automerge { document, text }
     }
 
     fn fork(&mut self, peer: u64) -> Self {
-        let doc = self.doc.fork().with_actor(automerge::ActorId::from(peer.to_be_bytes().to_vec()));
-        Automerge { doc, text: self.text.clone() }
+        let document = self.document.fork().with_actor(automerge::ActorId::from(peer.to_be_bytes().to_vec()));
+        Automerge { document, text: self.text.clone() }
     }
 
     fn apply(&mut self, updates: &[&Self::Update]) {
-        self.doc.apply_changes(updates.iter().map(|&change| change.clone())).unwrap();
+        self.document.apply_changes(updates.iter().map(|&change| change.clone())).unwrap();
     }
 
     fn edit(&mut self, edits: &[Edit]) -> (Option<Self::Update>, usize) {
         use automerge::{transaction::Transactable, ReadDoc};
         let (mut moved, mut made) = (0, false);
         for edit in edits {
-            let len = self.doc.length(&self.text);
+            let len = self.document.length(&self.text);
             let at = edit.at.min(len);
             let count = if edit.ins { edit.len } else { edit.len.min(len - at) };
             moved += usize::from(at < edit.at || count < edit.len);
             if count > 0 {
                 let removed = if edit.ins { 0 } else { count as isize };
-                self.doc.splice_text(&self.text, at, removed, &edit.text).unwrap();
+                self.document.splice_text(&self.text, at, removed, &edit.text).unwrap();
                 made = true;
             }
         }
-        self.doc.commit();
-        (made.then(|| self.doc.get_last_local_change().unwrap().clone()), moved)
+        self.document.commit();
+        (made.then(|| self.document.get_last_local_change().unwrap().clone()), moved)
     }
 
     fn save(&mut self) -> Vec<u8> {
-        self.doc.save_nocompress()
+        self.document.save_nocompress()
     }
 }
 
 pub struct Yjs {
-    doc: yrs::Doc,
+    document: yrs::Doc,
     text: yrs::TextRef,
     /// The text, kept only when it is not all ASCII: yrs counts positions in bytes.
     chars: Option<Vec<char>>,
@@ -274,24 +274,24 @@ impl Replica for Yjs {
 
     fn new(peer: u64, ascii: bool) -> Self {
         let options = yrs::Options { client_id: yrs::block::ClientID::new(peer), skip_gc: true, offset_kind: yrs::OffsetKind::Bytes, ..Default::default() };
-        let doc = yrs::Doc::with_options(options);
-        let text = doc.get_or_insert_text("text");
-        Yjs { doc, text, chars: (!ascii).then(Vec::new) }
+        let document = yrs::Doc::with_options(options);
+        let text = document.get_or_insert_text("text");
+        Yjs { document, text, chars: (!ascii).then(Vec::new) }
     }
 
     fn fork(&mut self, peer: u64) -> Self {
         use yrs::updates::decoder::Decode;
         use yrs::{ReadTxn, StateVector, Transact};
-        let state = self.doc.transact().encode_state_as_update_v1(&StateVector::default());
+        let state = self.document.transact().encode_state_as_update_v1(&StateVector::default());
         let copy = Yjs { chars: self.chars.clone(), ..Yjs::new(peer, true) };
-        copy.doc.transact_mut().apply_update(yrs::Update::decode_v1(&state).unwrap()).unwrap();
+        copy.document.transact_mut().apply_update(yrs::Update::decode_v1(&state).unwrap()).unwrap();
         copy
     }
 
     fn apply(&mut self, updates: &[&Self::Update]) {
         use yrs::updates::decoder::Decode;
         use yrs::{GetString, Transact};
-        let mut txn = self.doc.transact_mut();
+        let mut txn = self.document.transact_mut();
         for update in updates {
             txn.apply_update(yrs::Update::decode_v1(update).unwrap()).unwrap();
         }
@@ -302,7 +302,7 @@ impl Replica for Yjs {
 
     fn edit(&mut self, edits: &[Edit]) -> (Option<Self::Update>, usize) {
         use yrs::{Text, Transact};
-        let mut txn = self.doc.transact_mut();
+        let mut txn = self.document.transact_mut();
         let (mut moved, mut made) = (0, false);
         for edit in edits {
             let len = self.chars.as_ref().map_or_else(|| self.text.len(&txn) as usize, Vec::len);
@@ -333,19 +333,19 @@ impl Replica for Yjs {
 
     fn save(&mut self) -> Vec<u8> {
         use yrs::{ReadTxn, StateVector, Transact};
-        self.doc.transact().encode_state_as_update_v2(&StateVector::default())
+        self.document.transact().encode_state_as_update_v2(&StateVector::default())
     }
 }
 
 pub struct Loro {
-    doc: loro::LoroDoc,
+    document: loro::LoroDoc,
 }
 
 impl Loro {
     /// Wraps a document, giving it `peer` as its id.
-    fn with_peer(doc: loro::LoroDoc, peer: u64) -> Self {
-        doc.set_peer_id(peer).unwrap();
-        Loro { doc }
+    fn with_peer(document: loro::LoroDoc, peer: u64) -> Self {
+        document.set_peer_id(peer).unwrap();
+        Loro { document }
     }
 }
 
@@ -357,17 +357,17 @@ impl Replica for Loro {
     }
 
     fn fork(&mut self, peer: u64) -> Self {
-        Loro::with_peer(self.doc.fork(), peer)
+        Loro::with_peer(self.document.fork(), peer)
     }
 
     fn apply(&mut self, updates: &[&Self::Update]) {
         let updates: Vec<Vec<u8>> = updates.iter().map(|&update| update.clone()).collect();
-        self.doc.import_batch(&updates).unwrap();
+        self.document.import_batch(&updates).unwrap();
     }
 
     fn edit(&mut self, edits: &[Edit]) -> (Option<Self::Update>, usize) {
-        let before = self.doc.oplog_vv();
-        let text = self.doc.get_text(TEXT);
+        let before = self.document.oplog_vv();
+        let text = self.document.get_text(TEXT);
         let (mut moved, mut made) = (0, false);
         for edit in edits {
             let len = text.len_unicode();
@@ -381,11 +381,11 @@ impl Replica for Loro {
             }
             made |= count > 0;
         }
-        self.doc.commit();
-        (made.then(|| self.doc.export(loro::ExportMode::updates(&before)).unwrap()), moved)
+        self.document.commit();
+        (made.then(|| self.document.export(loro::ExportMode::updates(&before)).unwrap()), moved)
     }
 
     fn save(&mut self) -> Vec<u8> {
-        self.doc.export(loro::ExportMode::all_updates()).unwrap()
+        self.document.export(loro::ExportMode::all_updates()).unwrap()
     }
 }

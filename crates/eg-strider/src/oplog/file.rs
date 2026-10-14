@@ -13,7 +13,7 @@
 //!
 //! - a number is a LEB128 varint, and a column is its length in bytes and then its values;
 //! - a column whose values mostly repeat is stored as runs: a value, then how many times;
-//! - an op's position is stored as how far it is from where the op before left off, and a
+//! - an op's position is stored as how far it is from where the op before left offset, and a
 //!   parent as how far back it is;
 //! - the columns of a block, the text it inserts and the document's text are each compressed
 //!   with Zstandard.
@@ -84,7 +84,7 @@ impl OpLog {
 
         let mut out = MAGIC.to_vec();
         number(&mut out, self.agent_names.len());
-        for (name, &next) in self.agent_names.iter().zip(&self.next_seq) {
+        for (name, &next) in self.agent_names.iter().zip(&self.next_sequence_numbers) {
             number(&mut out, name.len());
             out.extend_from_slice(name.as_bytes());
             number(&mut out, next as usize);
@@ -117,7 +117,7 @@ impl OpLog {
         for _ in 0..file.count()? {
             let len = file.count()?;
             log.agent_names.push(std::str::from_utf8(file.take(len)).map_err(|_| Malformed)?.to_string());
-            log.next_seq.push(file.number()?);
+            log.next_sequence_numbers.push(file.number()?);
         }
         let (events, chars) = (file.number()?, file.number()?);
         let heads = (0..file.count()?).map(|_| events.checked_sub(file.number()?).ok_or(Malformed)).collect::<Result<Vec<_>, _>>()?;
@@ -157,7 +157,7 @@ impl OpLog {
     pub(crate) fn unpack_from(&mut self, from: SavedBlockIndex) {
         let Some(mut packed) = self.packed.take() else { return };
         let later = std::mem::take(self);
-        (self.agent_names, self.next_seq, self.memo) = (later.agent_names, later.next_seq, later.memo);
+        (self.agent_names, self.next_sequence_numbers, self.memo) = (later.agent_names, later.next_sequence_numbers, later.memo);
         (self.base, self.latest) = (later.base, later.latest);
         self.memo.outdate();
         self.graph = Graph::after(packed.starts[from], &[]);
@@ -238,11 +238,11 @@ impl OpLog {
         // The runs of events by one agent. An agent's runs nearly always carry on from one
         // another, so after its first in the block a run's sequence number is stored as how
         // far it is from that.
-        let first = self.agent_runs.partition_point(|run| run.lv + run.len <= events.start);
+        let first = self.agent_runs.partition_point(|run| run.first_event + run.len <= events.start);
         let agent_runs = || {
-            self.agent_runs[first..].iter().take_while(|run| run.lv < events.end).map(|run| {
-                let (start, end) = (run.lv.max(events.start), (run.lv + run.len).min(events.end));
-                (run.agent, run.seq + (start - run.lv), end - start)
+            self.agent_runs[first..].iter().take_while(|run| run.first_event < events.end).map(|run| {
+                let (start, end) = (run.first_event.max(events.start), (run.first_event + run.len).min(events.end));
+                (run.agent, run.sequence_number + (start - run.first_event), end - start)
             })
         };
         column(&mut columns, |out| {
@@ -251,7 +251,7 @@ impl OpLog {
         });
         let mut next = vec![0; self.agent_names.len()];
         column(&mut columns, |out| {
-            runs(out, agent_runs().map(|(agent, seq, len)| zigzag(i64::from(seq) - i64::from(std::mem::replace(&mut next[agent as usize], seq + len)))))
+            runs(out, agent_runs().map(|(agent, sequence_number, len)| zigzag(i64::from(sequence_number) - i64::from(std::mem::replace(&mut next[agent as usize], sequence_number + len)))))
         });
         column(&mut columns, |out| agent_runs().for_each(|(.., len)| number(out, len as usize)));
 
@@ -268,7 +268,7 @@ impl OpLog {
             for op in ops() {
                 let trims = op.trims && open;
                 open = op.kind == OpKind::Ins || trims;
-                let flags = usize::from(trims) << 3 | usize::from(wide(&op)) << 2 | usize::from(!op.fwd) << 1 | usize::from(op.kind == OpKind::Del);
+                let flags = usize::from(trims) << 3 | usize::from(wide(&op)) << 2 | usize::from(!op.forward) << 1 | usize::from(op.kind == OpKind::Del);
                 number(out, (op.len as usize) << 4 | flags);
             }
         });
@@ -281,7 +281,7 @@ impl OpLog {
         column(&mut columns, |out| ops().filter(wide).for_each(|op| number(out, bytes(&op))));
 
         // The graph, as chains of events: how long each is, and its first event's parents as
-        // how far back they are. A chain cut off from its start by the block follows the event
+        // how far back they are. A chain cut offset from its start by the block follows the event
         // before it, which is stored as one parent fewer than none.
         let blocks = self.graph.blocks();
         let chains = || (blocks.containing(events.start)..blocks.len()).take_while(|&block| blocks.start(block) < events.end);
@@ -327,9 +327,9 @@ impl OpLog {
         for _ in 0..agent_runs {
             let (agent, len) = (agents.number()?, lens.number()?);
             let expected = next.get_mut(agent as usize).ok_or(Malformed)?;
-            let seq = u32::try_from(i64::from(*expected) + unzigzag(ahead.next()?)).map_err(|_| Malformed)?;
-            *expected = seq.checked_add(len).ok_or(Malformed)?;
-            self.agent_runs.push(AgentRun { lv: events, len, agent, seq });
+            let sequence_number = u32::try_from(i64::from(*expected) + unzigzag(ahead.next()?)).map_err(|_| Malformed)?;
+            *expected = sequence_number.checked_add(len).ok_or(Malformed)?;
+            self.agent_runs.push(AgentRun { first_event: events, len, agent, sequence_number });
             events = events.checked_add(len).filter(|_| len > 0).ok_or(Malformed)?;
         }
 
@@ -339,16 +339,16 @@ impl OpLog {
         let (mut heads, mut places, mut wides) = (columns.column()?, columns.column()?, columns.column()?);
         let ops = heads.count()?;
         self.ops.reserve(ops);
-        let (mut lv, mut at, mut cursor) = (start, 0usize, 0u32);
+        let (mut event, mut at, mut cursor) = (start, 0usize, 0u32);
         for _ in 0..ops {
             let head = heads.varint()?;
             let len = u32::try_from(head >> 4).ok().filter(|&len| len > 0).ok_or(Malformed)?;
             let pos = u32::try_from(i64::from(cursor) + unzigzag(places.varint()?)).map_err(|_| Malformed)?;
-            let (kind, fwd) = (if head & 1 == 1 { OpKind::Del } else { OpKind::Ins }, head & 2 == 0);
+            let (kind, forward) = (if head & 1 == 1 { OpKind::Del } else { OpKind::Ins }, head & 2 == 0);
             cursor = after(kind, pos, len);
             // Only a delete right after an insert, or after another such delete, can trim it.
             let trims = head & 8 != 0;
-            let follows = |before: &Op| before.lv + before.len == lv && (before.kind == OpKind::Ins || before.trims);
+            let follows = |before: &Op| before.first_event + before.len == event && (before.kind == OpKind::Ins || before.trims);
             if trims && (kind == OpKind::Ins || !self.ops.last().is_some_and(follows)) {
                 return Err(Malformed);
             }
@@ -360,13 +360,13 @@ impl OpLog {
             let inserted = at.checked_add(bytes).and_then(|end| text.get(at..end)).ok_or(Malformed)?;
             match kind {
                 // A character is every byte that does not carry on from the one before.
-                OpKind::Ins if fwd && inserted.bytes().filter(|&byte| byte as i8 >= -0x40).count() == len as usize => self.totals.0 += len,
+                OpKind::Ins if forward && inserted.bytes().filter(|&byte| byte as i8 >= -0x40).count() == len as usize => self.totals.0 += len,
                 OpKind::Ins => return Err(Malformed),
                 OpKind::Del => self.totals.1 += len,
             }
-            self.ops.push(Op { lv, len, kind, fwd, trims, pos, content: (base + at as u32, base + (at + bytes) as u32) });
+            self.ops.push(Op { first_event: event, len, kind, forward, trims, pos, content: (base + at as u32, base + (at + bytes) as u32) });
             at += bytes;
-            lv = lv.checked_add(len).ok_or(Malformed)?;
+            event = event.checked_add(len).ok_or(Malformed)?;
         }
 
         let (mut chains, mut counts, mut backs) = (columns.column()?, Runs::of(columns.column()?), columns.column()?);
@@ -389,12 +389,12 @@ impl OpLog {
             first += len;
         }
 
-        let whole = file.0.is_empty() && columns.0.is_empty() && lv == events && first == events && at == text.len();
+        let whole = file.0.is_empty() && columns.0.is_empty() && event == events && first == events && at == text.len();
         heads.filter(|_| whole).ok_or(Malformed)
     }
 }
 
-/// Returns where an op leaves off: after what it inserted, or where it deleted from. The
+/// Returns where an op leaves offset: after what it inserted, or where it deleted from. The
 /// next op is most often right there or a little before.
 fn after(kind: OpKind, pos: u32, len: u32) -> u32 {
     match kind {

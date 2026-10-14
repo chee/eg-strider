@@ -105,7 +105,7 @@ struct Chains {
     /// For each chain, the number of events in its first `j` blocks, for every `j`.
     events_before: Rows,
     /// Each block's history: how many blocks along each chain are in it. Chains that began
-    /// after the block are left off.
+    /// after the block are left offset.
     seen: Rows,
 }
 

@@ -115,7 +115,7 @@ fn dt_append(history: &History<TextOperation, usize>) -> ListOpLog {
     let mut oplog = ListOpLog::new();
     let agents: Vec<_> = history.agents.iter().map(|name| oplog.get_or_create_agent_id(name)).collect();
     for chunk in &history.chunks {
-        oplog.add_operations_remote(agents[chunk.agent], history.parents(chunk), chunk.seq, history.ops(chunk));
+        oplog.add_operations_remote(agents[chunk.agent], history.parents(chunk), chunk.sequence_number, history.ops(chunk));
     }
     oplog
 }
@@ -147,9 +147,9 @@ fn dt_open(saved: &[u8]) -> (ListOpLog, JumpRope) {
 /// Rewrites a saved Automerge document as its changes, each after its length: the history
 /// as one peer would send it to another.
 fn automerge_changes(saved: &[u8]) -> Vec<u8> {
-    let mut doc = automerge::AutoCommit::load(saved).unwrap();
+    let mut document = automerge::AutoCommit::load(saved).unwrap();
     let mut out = Vec::new();
-    for change in doc.get_changes(&[]) {
+    for change in document.get_changes(&[]) {
         let raw = change.raw_bytes();
         out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
         out.extend_from_slice(raw);
@@ -169,18 +169,18 @@ fn automerge_decode(mut bytes: &[u8]) -> Vec<automerge::Change> {
 }
 
 /// Returns an Automerge document with its text.
-fn automerge_text(doc: automerge::AutoCommit) -> (automerge::AutoCommit, String) {
+fn automerge_text(document: automerge::AutoCommit) -> (automerge::AutoCommit, String) {
     use automerge::ReadDoc;
-    let (_, text) = doc.get(automerge::ROOT, "text").unwrap().unwrap();
-    let string = doc.text(&text).unwrap();
-    (doc, string)
+    let (_, text) = document.get(automerge::ROOT, "text").unwrap().unwrap();
+    let string = document.text(&text).unwrap();
+    (document, string)
 }
 
 /// Applies changes to a new Automerge document.
 fn automerge_apply(changes: Vec<automerge::Change>) -> (automerge::AutoCommit, String) {
-    let mut doc = automerge::AutoCommit::new();
-    doc.apply_changes(changes).unwrap();
-    automerge_text(doc)
+    let mut document = automerge::AutoCommit::new();
+    document.apply_changes(changes).unwrap();
+    automerge_text(document)
 }
 
 /// Loads a saved Automerge document.
@@ -198,35 +198,35 @@ fn yjs_decode(bytes: &[u8]) -> yrs::Update {
 /// Applies an update to a new Yjs document and returns it with its text.
 fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
     use yrs::{GetString, Transact};
-    let doc = yrs::Doc::new();
-    let text = doc.get_or_insert_text("text");
-    doc.transact_mut().apply_update(update).unwrap();
-    let string = text.get_string(&doc.transact());
-    (doc, string)
+    let document = yrs::Doc::new();
+    let text = document.get_or_insert_text("text");
+    document.transact_mut().apply_update(update).unwrap();
+    let string = text.get_string(&document.transact());
+    (document, string)
 }
 
 /// Saves a Yjs document: its whole state as one update, the only form it has.
-fn yjs_save(doc: &mut yrs::Doc) -> Vec<u8> {
+fn yjs_save(document: &mut yrs::Doc) -> Vec<u8> {
     use yrs::{ReadTxn, Transact};
-    doc.transact().encode_state_as_update_v2(&yrs::StateVector::default())
+    document.transact().encode_state_as_update_v2(&yrs::StateVector::default())
 }
 
 /// Imports a snapshot into a new Loro document and returns it with its text.
 fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
-    let doc = LoroDoc::new();
-    doc.import(bytes).unwrap();
-    let string = doc.get_text(TEXT).to_string();
-    (doc, string)
+    let document = LoroDoc::new();
+    document.import(bytes).unwrap();
+    let string = document.get_text(TEXT).to_string();
+    (document, string)
 }
 
 /// Applies ops to a new Loro document. Loro takes remote edits either as bytes or as the
 /// ops themselves, in the form it also exchanges as JSON, which is the one that starts from
 /// ops in memory.
 fn loro_apply(ops: loro::JsonSchema) -> (LoroDoc, String) {
-    let doc = LoroDoc::new();
-    doc.import_json_updates(ops).unwrap();
-    let string = doc.get_text(TEXT).to_string();
-    (doc, string)
+    let document = LoroDoc::new();
+    document.import_json_updates(ops).unwrap();
+    let string = document.get_text(TEXT).to_string();
+    (document, string)
 }
 
 /// What a system took on the two tasks.
@@ -251,10 +251,10 @@ struct Measured {
 /// timed but is counted as memory. The text each task hands back is a copy made to check it,
 /// and is not counted as held.
 fn measure<O, D>(reps: u32, expected: &str, ops: impl Fn() -> O, merge: impl Fn(O) -> (D, String), save: impl Fn(&mut D) -> Vec<u8>, open: impl Fn(&[u8]) -> (D, String)) -> Measured {
-    let (mut doc, text) = merge(ops());
-    let saved = save(&mut doc);
+    let (mut document, text) = merge(ops());
+    let saved = save(&mut document);
     let same = text == expected && open(&saved).1 == expected;
-    drop((doc, text));
+    drop((document, text));
     let merge_ms = median_of(reps, &ops, &merge).0;
     let open_ms = median_of(reps, || (), |()| open(&saved)).0;
     let held = |((_doc, text), memory): ((D, String), Memory)| Memory { peak: memory.peak, kept: memory.kept.saturating_sub(text.capacity()) };
@@ -457,11 +457,11 @@ fn main() {
         let loro = replayed::<compare::replicas::Loro>(path, "loro", &dt, replay).map(|(updates, notes)| {
             let source = loro_import(&updates).0;
             let ops = || source.export_json_updates(&Default::default(), &source.oplog_vv());
-            (measure(reps, &expected, ops, loro_apply, |doc| doc.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
+            (measure(reps, &expected, ops, loro_apply, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
         });
         let automerge = replayed::<compare::replicas::Automerge>(path, "automerge", &dt, replay).map(|(saved, notes)| {
             let changes = automerge_changes(&saved);
-            (measure(reps, &expected, || automerge_decode(&changes), automerge_apply, |doc| doc.save(), automerge_open), notes)
+            (measure(reps, &expected, || automerge_decode(&changes), automerge_apply, |document| document.save(), automerge_open), notes)
         });
         others.push(format!(
             "{name:6} {}",

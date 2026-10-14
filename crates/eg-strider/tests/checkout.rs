@@ -135,7 +135,7 @@ fn corrected_typing() -> (Vec<Edit>, &'static str) {
 
 /// Appends the same ops one call at a time, each following the one before.
 fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Edit], text: &str) {
-    let (mut seq, mut rest) = (0, text);
+    let (mut sequence_number, mut rest) = (0, text);
     let mut parents = log.frontier();
     for op in ops {
         let events = match *op {
@@ -143,11 +143,11 @@ fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Edit], text: &str) {
                 let bytes = rest.char_indices().nth(len as usize).map_or(rest.len(), |(at, _)| at);
                 let (inserted, after) = rest.split_at(bytes);
                 rest = after;
-                log.add_remote_insert(agent, seq, &parents, pos as usize, inserted)
+                log.add_remote_insert(agent, sequence_number, &parents, pos as usize, inserted)
             }
-            Edit::Delete { pos, len, backspace } => log.add_remote_delete(agent, seq, &parents, pos as usize..(pos + len) as usize, !backspace),
+            Edit::Delete { pos, len, backspace } => log.add_remote_delete(agent, sequence_number, &parents, pos as usize..(pos + len) as usize, !backspace),
         };
-        seq += events.end - events.start;
+        sequence_number += events.end - events.start;
         parents = vec![events.end - 1];
     }
 }

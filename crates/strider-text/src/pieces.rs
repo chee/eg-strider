@@ -130,8 +130,8 @@ impl Pieces {
     pub fn insert_deleted(&mut self, pos: u32, len: u32) {
         let deleted = Piece { len, at: DELETED };
         loop {
-            let (k, start) = self.chunk_at(pos);
-            let chunk = &mut self.chunks[self.order[k] as usize];
+            let (place, start) = self.chunk_at(pos);
+            let chunk = &mut self.chunks[self.order[place] as usize];
             let (i, offset) = chunk.find(pos - start);
             let room = CHUNK - chunk.len();
             // A deleted piece they land in, or next to, takes them in.
@@ -152,11 +152,11 @@ impl Pieces {
                 }
                 _ if offset == 0 && room >= 1 => chunk.insert(i, deleted),
                 _ => {
-                    self.split(k);
+                    self.split(place);
                     continue;
                 }
             }
-            self.totals[k] += len;
+            self.totals[place] += len;
             return;
         }
     }
@@ -167,13 +167,13 @@ impl Pieces {
     pub fn remove(&mut self, pos: u32, len: u32, mut survivor: impl FnMut(u32, u32, u32)) {
         let mut done = 0;
         while done < len {
-            let (mut k, mut start) = self.chunk_at(pos);
-            if pos == start + self.totals[k] {
-                start += self.totals[k];
-                k += 1;
-                self.near = (k, start);
+            let (mut place, mut start) = self.chunk_at(pos);
+            if pos == start + self.totals[place] {
+                start += self.totals[place];
+                place += 1;
+                self.near = (place, start);
             }
-            let id = self.order[k];
+            let id = self.order[place];
             let chunk = &mut self.chunks[id as usize];
             let (i, offset) = chunk.find(pos - start);
             let piece = chunk.piece(i);
@@ -182,7 +182,7 @@ impl Pieces {
             // halves are no longer next to each other in the final text.
             let halved = offset > 0 && offset + n < piece.len && piece.at != DELETED;
             if halved && chunk.len() == CHUNK {
-                self.split(k);
+                self.split(place);
                 continue;
             }
             if piece.at != DELETED {
@@ -204,7 +204,7 @@ impl Pieces {
                 (offset + n == piece.len).then_some(i + 1)
             };
             done += n;
-            self.totals[k] -= n;
+            self.totals[place] -= n;
 
             // What was on either side of the removed characters may now be one piece.
             if let Some(i) = seam.filter(|&i| done == len && i > 0 && i < chunk.len()) {
@@ -215,10 +215,10 @@ impl Pieces {
                 }
             }
             if chunk.len() == 0 && self.order.len() > 1 {
-                self.order.remove(k);
-                self.totals.remove(k);
+                self.order.remove(place);
+                self.totals.remove(place);
                 self.spare.push(id);
-                self.near = if k < self.order.len() { (k, start) } else { (k - 1, start - self.totals[k - 1]) };
+                self.near = if place < self.order.len() { (place, start) } else { (place - 1, start - self.totals[place - 1]) };
             }
         }
     }
@@ -236,22 +236,22 @@ impl Pieces {
     /// Finds the chunk that position `pos` is in, or at either end of: its place in `order`, and
     /// the position where it starts.
     fn chunk_at(&mut self, pos: u32) -> (usize, u32) {
-        let (mut k, mut start) = self.near;
+        let (mut place, mut start) = self.near;
         while pos < start {
-            k -= 1;
-            start -= self.totals[k];
+            place -= 1;
+            start -= self.totals[place];
         }
-        while pos > start + self.totals[k] {
-            start += self.totals[k];
-            k += 1;
+        while pos > start + self.totals[place] {
+            start += self.totals[place];
+            place += 1;
         }
-        self.near = (k, start);
-        (k, start)
+        self.near = (place, start);
+        (place, start)
     }
 
     /// Moves the second half of a chunk's pieces into a new chunk after it.
-    fn split(&mut self, k: usize) {
-        let left = &mut self.chunks[self.order[k] as usize];
+    fn split(&mut self, place: usize) {
+        let left = &mut self.chunks[self.order[place] as usize];
         let half = left.len / 2;
         let mut right = Chunk::EMPTY;
         right.len = left.len - half;
@@ -270,8 +270,8 @@ impl Pieces {
                 self.chunks.len() as u32 - 1
             }
         };
-        self.order.insert(k + 1, id);
-        self.totals.insert(k + 1, moved);
-        self.totals[k] -= moved;
+        self.order.insert(place + 1, id);
+        self.totals.insert(place + 1, moved);
+        self.totals[place] -= moved;
     }
 }

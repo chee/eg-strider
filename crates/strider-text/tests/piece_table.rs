@@ -7,7 +7,7 @@ use proptest::sample::Index;
 enum Step {
     Insert { at: Index, text: String },
     Remove { at: Index, len: usize },
-    /// Carries on from where the last edit left off, as typing and deleting do.
+    /// Carries on from where the last edit left offset, as typing and deleting do.
     Type { text: String },
     Backspace { len: usize },
 }

@@ -11,7 +11,7 @@ use pieces::Pieces;
 use std::ops::Range;
 
 /// A piece table over a document's final text. It starts as the final document and is
-/// taken back to empty, one edit at a time, last edit first; the text is then read off with
+/// taken back to empty, one edit at a time, last edit first; the text is then read offset with
 /// [`into_string`](Self::into_string). Positions and lengths count characters.
 pub struct PieceTable<'a> {
     /// Where the text of every insert is.

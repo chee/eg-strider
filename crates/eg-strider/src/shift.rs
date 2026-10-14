@@ -221,9 +221,9 @@ pub(crate) struct Shifter {
 }
 
 impl Shifter {
-    /// Merges a region by shifting, recording in `doc` where its ops go. Returns false, with
-    /// `doc` as it was, if the region needs the tracker.
-    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<BlockId>, doc: &mut Placed) -> bool {
+    /// Merges a region by shifting, recording in `document` where its ops go. Returns false, with
+    /// `document` as it was, if the region needs the tracker.
+    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<BlockId>, document: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;
         }
@@ -231,23 +231,23 @@ impl Shifter {
         let Shifter { seen, stable, clusters } = self;
         clusters.clear();
 
-        let mark = doc.mark();
+        let mark = document.mark();
         for (i, block) in (region.start..region.end).enumerate() {
             let viewer = Viewer { block: i as BlockInRegion, seen: &seen[i * words..][..words], stable: &stable[i * words..][..words] };
-            doc.begin(block..block + 1);
+            document.begin(block..block + 1);
             for op in log.ops(first_op[block]..first_op[block + 1], blocks.events(block)) {
                 let at = match op.kind {
                     OpKind::Ins => clusters.insert(&viewer, op.pos as i64, op.len as i64),
                     OpKind::Del => clusters.remove(&viewer, op.pos as i64, op.len as i64),
                 };
                 match (at, op.kind) {
-                    (Some(at), OpKind::Ins) => doc.insert(at as u32, op.len),
+                    (Some(at), OpKind::Ins) => document.insert(at as u32, op.len),
                     (Some(at), OpKind::Del) => {
-                        doc.remove(at as u32, op.len);
-                        doc.end_delete();
+                        document.remove(at as u32, op.len);
+                        document.end_delete();
                     }
                     (None, _) => {
-                        doc.undo_to(mark);
+                        document.undo_to(mark);
                         return false;
                     }
                 }

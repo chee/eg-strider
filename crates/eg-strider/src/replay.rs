@@ -224,7 +224,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
     let events = |stretch: &Range<usize>| blocks.start(stretch.start)..blocks.start(stretch.end);
     debug_assert!((log.graph.floor()..log.graph.len()).contains(&base.events), "a base the log does not reach back to");
     let new = blocks.containing(base.events) as CompactBlockId;
-    let mut doc = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: base.chars, new, held: false };
+    let mut document = Placed { order: Vec::with_capacity(memo.room.0), at: Vec::with_capacity(memo.room.1), runs: 0, len: base.chars, new, held: false };
     let mut workspace = Workspace::default();
     // The segments that have events after the base, and for each the first of those.
     let after = |segment: &Segment| Some(events(segment.blocks())).filter(|events| events.end > base.events).map(|events| events.start.max(base.events));
@@ -235,24 +235,24 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
                 // A history with no concurrency is one stretch, and the log keeps its count.
                 let whole = plan.segments.len() == 1 && from == blocks.start(0);
                 let (inserted, removed) = if whole { log.total_lengths() } else { log.lengths(plan.op_at(log, linear, from), from..blocks.start(linear.end)) };
-                doc.len = doc.len + inserted - removed;
+                document.len = document.len + inserted - removed;
             }
             Segment::Region(region) => {
                 debug_assert_eq!(from, blocks.start((new as usize).max(region.start)), "a base partway through a block of a region");
-                merge_region(log, plan, region, kept, &mut workspace, &mut doc)
+                merge_region(log, plan, region, kept, &mut workspace, &mut document)
             }
         }
     }
     // The text is built without the room that merging took.
     drop(workspace);
     plan.kept = kept;
-    memo.room = (doc.order.len(), doc.at.len());
+    memo.room = (document.order.len(), document.at.len());
 
     // Backwards: take every edit back, starting from the final document.
-    let mut text = PieceTable::new(doc.len, log.content());
+    let mut text = PieceTable::new(document.len, log.content());
     let bytes = |(start, end): ByteRange| start as usize..end as usize;
-    let mut order = doc.order.iter().rev().peekable();
-    let mut places = doc.at.iter().rev().copied();
+    let mut order = document.order.iter().rev().peekable();
+    let mut places = document.at.iter().rev().copied();
     let mut place = || places.next().expect("a place for every op of a region");
     let mut trims: Vec<OpSlice> = Vec::new();
     for segment in plan.segments.iter().rev() {
@@ -267,7 +267,7 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
                         continue;
                     }
                     let cut = trims.iter().map(|trim| trim.len).sum::<u32>();
-                    let folds = cut > 0 && op.kind == OpKind::Ins && cut <= op.len && trims.last().is_some_and(|first| first.lv == op.lv + op.len);
+                    let folds = cut > 0 && op.kind == OpKind::Ins && cut <= op.len && trims.last().is_some_and(|first| first.first_event == op.first_event + op.len);
                     if cut > 0 && !folds {
                         // Not enough of the insert is here: this stretch begins partway
                         // through it.
@@ -303,14 +303,14 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
     }
     // What is left is the document at the base, whose text is already known.
     text.undo_rest(&base.text);
-    (text.into_string(), doc.len)
+    (text.into_string(), document.len)
 }
 
-/// Merges one region, recording in `doc` where its ops go.
-fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Kept, workspace: &mut Workspace, doc: &mut Placed) {
+/// Merges one region, recording in `document` where its ops go.
+fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Kept, workspace: &mut Workspace, document: &mut Placed) {
     let Workspace { tracker, walker, shifter } = workspace;
     // Nothing kept: the region has not needed the tracker so far. See whether it does now.
-    if kept.events == 0 && shifter.merge(log, log.graph.blocks(), &plan.first_op, region, doc) {
+    if kept.events == 0 && shifter.merge(log, log.graph.blocks(), &plan.first_op, region, document) {
         return;
     }
     let blocks = log.graph.blocks();
@@ -318,8 +318,8 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
     let goes_before = |a: EventId, b: EventId| log.inserts_before(start + a, start + b);
     // The region's blocks that the document already holds, which are its first. The document
     // was no longer when the region began than it is now plus what those events removed.
-    let held = (doc.new as usize).clamp(region.start, region.end);
-    tracker.begin_region((end - start) as usize, doc.len + (blocks.start(held) - start));
+    let held = (document.new as usize).clamp(region.start, region.end);
+    tracker.begin_region((end - start) as usize, document.len + (blocks.start(held) - start));
 
     // Blocks resolved in full by earlier replays are placed by id. Their events stay in the
     // tracker's prepare version, which is where the walk of the rest begins.
@@ -332,14 +332,14 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
         if stretch.is_empty() {
             continue;
         }
-        doc.begin(stretch.clone());
+        document.begin(stretch.clone());
         for op in plan.ops(log, &stretch) {
-            let lv = op.lv - start;
+            let event = op.first_event - start;
             match op.kind {
                 OpKind::Ins => {
                     let (left, right) = (next(), next());
-                    let pos = tracker.insert_by_id(lv, op.len, left, right, goes_before);
-                    doc.insert(pos, op.len);
+                    let pos = tracker.insert_by_id(event, op.len, left, right, goes_before);
+                    document.insert(pos, op.len);
                 }
                 OpKind::Del => {
                     let mut done = 0;
@@ -347,10 +347,10 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
                         let (first, stretch) = (next(), next());
                         let (n, descending) = ((stretch & !DESCENDING).min(op.len - done), stretch & DESCENDING != 0);
                         let item = if descending { first + 1 - n } else { first };
-                        tracker.delete_by_id(Targets { lv: lv + done, len: n, item, descending }, |pos, len| doc.remove(pos, len));
+                        tracker.delete_by_id(Targets { first_event: event + done, len: n, item, descending }, |pos, len| document.remove(pos, len));
                         done += n;
                     }
-                    doc.end_delete();
+                    document.end_delete();
                 }
             }
         }
@@ -364,18 +364,18 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
     walker.walk(blocks, region, known_blocks, held - region.start, |step| match step {
         Move::Retreat(stretch) => {
             for op in plan.ops(log, &stretch) {
-                tracker.retreat(op.kind, op.lv - start..op.lv - start + op.len);
+                tracker.retreat(op.kind, op.first_event - start..op.first_event - start + op.len);
             }
         }
         Move::Advance(stretch) => {
             for op in plan.ops(log, &stretch) {
-                tracker.advance(op.kind, op.lv - start..op.lv - start + op.len);
+                tracker.advance(op.kind, op.first_event - start..op.first_event - start + op.len);
             }
         }
         Move::Apply(block) => {
-            doc.begin(block..block + 1);
+            document.begin(block..block + 1);
             for op in plan.ops(log, &(block..block + 1)) {
-                walk_op(start, op, tracker, &goes_before, doc);
+                walk_op(start, op, tracker, &goes_before, document);
             }
         }
     });
@@ -384,13 +384,13 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
     kept.events = end - start;
     kept.resolved.clear();
     for op in plan.ops(log, region) {
-        let lv = op.lv - start;
+        let event = op.first_event - start;
         match op.kind {
-            OpKind::Ins => kept.resolved.extend(tracker.origins(lv)),
+            OpKind::Ins => kept.resolved.extend(tracker.origins(event)),
             OpKind::Del => {
                 let mut done = 0;
                 while done < op.len {
-                    let targets = tracker.targets(lv + done, lv + op.len);
+                    let targets = tracker.targets(event + done, event + op.len);
                     kept.resolved.extend([targets.first(), targets.len | if targets.descending { DESCENDING } else { 0 }]);
                     done += targets.len;
                 }
@@ -401,16 +401,16 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<BlockId>, kept: &mut Ke
 }
 
 /// Merges one op at the tracker's prepare version.
-fn walk_op(start: EventId, op: OpSlice, tracker: &mut Tracker, goes_before: &impl Fn(EventId, EventId) -> bool, doc: &mut Placed) {
-    let lv = op.lv - start;
+fn walk_op(start: EventId, op: OpSlice, tracker: &mut Tracker, goes_before: &impl Fn(EventId, EventId) -> bool, document: &mut Placed) {
+    let event = op.first_event - start;
     match op.kind {
         OpKind::Ins => {
-            let pos = tracker.insert(lv, op.len, op.pos, goes_before);
-            doc.insert(pos, op.len);
+            let pos = tracker.insert(event, op.len, op.pos, goes_before);
+            document.insert(pos, op.len);
         }
         OpKind::Del => {
-            tracker.delete(lv, op.pos, op.len, op.fwd, |pos, len| doc.remove(pos, len));
-            doc.end_delete();
+            tracker.delete(event, op.pos, op.len, op.forward, |pos, len| document.remove(pos, len));
+            document.end_delete();
         }
     }
 }

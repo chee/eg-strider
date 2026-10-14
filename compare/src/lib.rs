@@ -29,7 +29,7 @@ pub struct Chunk {
     pub events: Range<usize>,
     /// The agent's index in [`History::agents`].
     pub agent: usize,
-    pub seq: usize,
+    pub sequence_number: usize,
     parents: Range<u32>,
     ops: Range<u32>,
     /// Where the text that the chunk's inserts put in is in the history's.
@@ -69,7 +69,7 @@ impl History<TextOperation, usize> {
             chunks.push(Chunk {
                 events: entry.span.start..entry.span.end,
                 agent,
-                seq: entry.agent_span.seq_range.start,
+                sequence_number: entry.agent_span.seq_range.start,
                 parents: first_parent..parents.len() as u32,
                 ops: first_op..ops.len() as u32,
                 text: 0..0,
@@ -139,6 +139,6 @@ pub fn extend(log: &mut OpLog, history: &History, limit: usize) {
     for chunk in history.chunks.iter().skip_while(|chunk| chunk.events.end <= have).take_while(|chunk| chunk.events.end <= limit) {
         assert_eq!(log.len(), chunk.events.start);
         let text = &history.text[chunk.text.start as usize..chunk.text.end as usize];
-        log.add_remote_ops(agents[chunk.agent], chunk.seq as SequenceNumber, history.parents(chunk), history.ops(chunk), text);
+        log.add_remote_ops(agents[chunk.agent], chunk.sequence_number as SequenceNumber, history.parents(chunk), history.ops(chunk), text);
     }
 }
