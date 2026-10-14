@@ -5,19 +5,19 @@
 //! version. A version is held as a version vector: the region's blocks are split into
 //! chains, and a version is how far along each chain it reaches.
 
-use crate::Blocks;
+use crate::{BlockId, Blocks};
 use std::ops::Range;
 
 /// One step of a walk. Ranges are of blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Move {
     /// Take these blocks out of the working version.
-    Retreat(Range<usize>),
+    Retreat(Range<BlockId>),
     /// Put these blocks back into the working version.
-    Advance(Range<usize>),
+    Advance(Range<BlockId>),
     /// The working version is now this block's parents: merge the block, which also adds it to
     /// the working version.
-    Apply(usize),
+    Apply(BlockId),
 }
 
 /// A list of lists stored flat: row `i` is `items[start[i]..start[i + 1]]`.
@@ -80,7 +80,7 @@ struct RegionGraph {
 }
 
 impl RegionGraph {
-    fn build(&mut self, blocks: &Blocks, region: &Range<usize>) {
+    fn build(&mut self, blocks: &Blocks, region: &Range<BlockId>) {
         let RegionGraph { parents, children } = self;
         parents.clear();
         for block in region.start..region.end {
@@ -112,7 +112,7 @@ struct Chains {
 impl Chains {
     /// Splits the blocks into chains and works out each block's history. A block joins a
     /// chain it has seen the whole of, if there is one.
-    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<usize>) {
+    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<BlockId>) {
         let Chains { chain, place, members, events_before, seen } = self;
         chain.clear();
         place.clear();
@@ -220,7 +220,7 @@ struct Schedule {
 impl Schedule {
     /// Starts with the first `known` blocks counted as visited, and the rest of the first
     /// `first` to visit before any other.
-    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<usize>, known: usize, first: usize) {
+    fn build(&mut self, graph: &RegionGraph, blocks: &Blocks, region: &Range<BlockId>, known: usize, first: usize) {
         let count = region.len();
         let (from, to) = (blocks.start(region.start), blocks.start(region.end));
         let per_bit = (to - from).div_ceil(127).max(1);
@@ -310,7 +310,7 @@ impl Walker {
     /// Walks the blocks in `region`, which must lie between two critical versions, calling
     /// `visit` with each step. The first `known` blocks are already in the working version,
     /// and the rest of the first `first` are visited before any other.
-    pub fn walk(&mut self, blocks: &Blocks, region: &Range<usize>, known: usize, first: usize, mut visit: impl FnMut(Move)) {
+    pub fn walk(&mut self, blocks: &Blocks, region: &Range<BlockId>, known: usize, first: usize, mut visit: impl FnMut(Move)) {
         let Walker { graph, chains, schedule, current } = self;
         graph.build(blocks, region);
         chains.build(graph, blocks, region);

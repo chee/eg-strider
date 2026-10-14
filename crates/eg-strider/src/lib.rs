@@ -4,6 +4,9 @@
 //! concurrent. It adds three things. Regions whose concurrent edits do not touch are merged
 //! by offset arithmetic alone, what the CRDT works out is memoised at each critical
 //! version, and the text is assembled backwards without a rope.
+//!
+//! A plain integer counts or places characters or bytes. Every other kind of number has a
+//! name: [`EventId`], [`AgentId`], [`SequenceNumber`], and inside, block, item and op numbers.
 
 mod oplog;
 mod replay;

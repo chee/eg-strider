@@ -8,7 +8,7 @@
 use crate::oplog::{OpIndex, OpKind, OpLog};
 use crate::replay::Placed;
 use std::ops::Range;
-use strider_graph::Blocks;
+use strider_graph::{BlockId, Blocks};
 
 /// Regions with more blocks than this go straight to the tracker. The sets of blocks kept for
 /// each block grow with the square of this: 256 KB here.
@@ -18,6 +18,12 @@ const MAX_BLOCKS: usize = 1024;
 /// more than the tracker would.
 const MAX_CLUSTERS: usize = 64;
 
+/// A block's place among its region's blocks, counting from 0.
+type BlockInRegion = u32;
+
+/// A set of a region's blocks, one bit each, 64 to a word.
+type BlockSet = [u64];
+
 /// A stretch of the document that blocks of the region have edited. `start` and `len` are in
 /// the document as merged so far.
 struct Cluster {
@@ -25,12 +31,12 @@ struct Cluster {
     len: i64,
     /// The blocks that edited here and are not stable, and by how much each changed the
     /// cluster's length.
-    members: Vec<(u32, i64)>,
+    members: Vec<(BlockInRegion, i64)>,
 }
 
 impl Cluster {
     /// Records that `block` changed the cluster's length by `grew`.
-    fn add(&mut self, block: u32, grew: i64) {
+    fn add(&mut self, block: BlockInRegion, grew: i64) {
         match self.members.last_mut() {
             Some((last, by)) if *last == block => *by += grew,
             _ => self.members.push((block, grew)),
@@ -40,15 +46,15 @@ impl Cluster {
 
 /// The block whose edits are being placed.
 struct Viewer<'a> {
-    block: u32,
+    block: BlockInRegion,
     /// The region's blocks in its version, itself included.
-    seen: &'a [u64],
+    seen: &'a BlockSet,
     /// The blocks that it and every block after it have seen.
-    stable: &'a [u64],
+    stable: &'a BlockSet,
 }
 
 /// Tells whether `block` is in `set`.
-fn has(set: &[u64], block: u32) -> bool {
+fn has(set: &BlockSet, block: BlockInRegion) -> bool {
     set[block as usize / 64] >> (block % 64) & 1 == 1
 }
 
@@ -56,7 +62,7 @@ fn has(set: &[u64], block: u32) -> bool {
 struct Clusters {
     /// In document order.
     list: Vec<Cluster>,
-    spare: Vec<Vec<(u32, i64)>>,
+    spare: Vec<Vec<(BlockInRegion, i64)>>,
 }
 
 impl Clusters {
@@ -217,7 +223,7 @@ pub(crate) struct Shifter {
 impl Shifter {
     /// Merges a region by shifting, recording in `doc` where its ops go. Returns false, with
     /// `doc` as it was, if the region needs the tracker.
-    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<usize>, doc: &mut Placed) -> bool {
+    pub fn merge(&mut self, log: &OpLog, blocks: &Blocks, first_op: &[OpIndex], region: &Range<BlockId>, doc: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;
         }
@@ -227,7 +233,7 @@ impl Shifter {
 
         let mark = doc.mark();
         for (i, block) in (region.start..region.end).enumerate() {
-            let viewer = Viewer { block: i as u32, seen: &seen[i * words..][..words], stable: &stable[i * words..][..words] };
+            let viewer = Viewer { block: i as BlockInRegion, seen: &seen[i * words..][..words], stable: &stable[i * words..][..words] };
             doc.begin(block..block + 1);
             for op in log.ops(first_op[block]..first_op[block + 1], blocks.events(block)) {
                 let at = match op.kind {
@@ -251,7 +257,7 @@ impl Shifter {
     }
 
     /// Fills in `seen` and `stable` for the region. Returns how many words each set has.
-    fn sets(&mut self, blocks: &Blocks, region: &Range<usize>) -> usize {
+    fn sets(&mut self, blocks: &Blocks, region: &Range<BlockId>) -> usize {
         let count = region.len();
         let words = count.div_ceil(64);
         self.seen.clear();

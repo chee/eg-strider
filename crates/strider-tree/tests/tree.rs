@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use strider_tree::{Id, PrepareEffectTree, View, Widths};
+use strider_tree::{EntryId, PrepareEffectTree, View, Widths};
 
 /// Widths as the tree takes them, from a (prepare, effect) pair.
 fn w(pair: [u32; 2]) -> Widths {
@@ -33,8 +33,8 @@ fn edit() -> impl Strategy<Value = Edit> {
 /// Applies the edits to a tree and to a plain list, checking that every answer agrees.
 fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseError> {
     let mut tree = PrepareEffectTree::<N>::new(w([3, 5]));
-    let mut list: Vec<(Id, [u32; 2])> = vec![(0, [3, 5])];
-    let effect_idx = |list: &[(Id, [u32; 2])]| list.iter().map(|e| e.1[1]).sum::<u32>();
+    let mut list: Vec<(EntryId, [u32; 2])> = vec![(0, [3, 5])];
+    let effect_idx = |list: &[(EntryId, [u32; 2])]| list.iter().map(|e| e.1[1]).sum::<u32>();
 
     for edit in edits {
         match *edit {

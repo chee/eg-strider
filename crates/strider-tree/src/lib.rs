@@ -24,7 +24,7 @@
 use std::cmp::Ordering;
 
 /// Names an entry. Ids are handed out in order of creation, starting from 0.
-pub type Id = u32;
+pub type EntryId = u32;
 
 /// Which version of the document a width or a character index is counted in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -285,7 +285,7 @@ impl<const N: usize> PrepareEffectTree<N> {
     }
 
     /// Returns the id of the entry at `at`.
-    pub fn id(&self, at: Cursor) -> Id {
+    pub fn id(&self, at: Cursor) -> EntryId {
         self.leaves[at.leaf as usize].slots[at.slot as usize].child
     }
 
@@ -295,7 +295,7 @@ impl<const N: usize> PrepareEffectTree<N> {
     }
 
     /// Finds where entry `id` is now.
-    pub fn cursor(&self, id: Id) -> Cursor {
+    pub fn cursor(&self, id: EntryId) -> Cursor {
         let leaf = self.home[id as usize];
         Cursor { leaf, slot: self.leaves[leaf as usize].index_of(id) as u32 }
     }
@@ -434,14 +434,14 @@ impl<const N: usize> PrepareEffectTree<N> {
 
     /// Adds an entry just before `before`, or at the end for `None`. Returns its id and the
     /// index it starts at in the effect view.
-    pub fn insert(&mut self, before: Option<Cursor>, widths: Widths) -> (Id, u32) {
+    pub fn insert(&mut self, before: Option<Cursor>, widths: Widths) -> (EntryId, u32) {
         let (id, at) = self.place(before, widths);
         (id, self.climb(at, widths))
     }
 
     /// Adds an entry as [`insert`](Self::insert) does, for a caller that already knows where
     /// it starts. Returns its id.
-    pub fn add(&mut self, before: Option<Cursor>, widths: Widths) -> Id {
+    pub fn add(&mut self, before: Option<Cursor>, widths: Widths) -> EntryId {
         let (id, at) = self.place(before, widths);
         self.widen(at.leaf, widths);
         id
@@ -449,7 +449,7 @@ impl<const N: usize> PrepareEffectTree<N> {
 
     /// Puts a new entry in a leaf just before `before`, or at the end for `None`, leaving the
     /// leaf's ancestors to be told of its widths. Returns its id and where it is.
-    fn place(&mut self, before: Option<Cursor>, widths: Widths) -> (Id, Cursor) {
+    fn place(&mut self, before: Option<Cursor>, widths: Widths) -> (EntryId, Cursor) {
         let before = before.unwrap_or_else(|| {
             let leaf = self.last_leaf();
             Cursor { leaf, slot: self.leaves[leaf as usize].len }
@@ -464,7 +464,7 @@ impl<const N: usize> PrepareEffectTree<N> {
     /// Splits an entry in two: a new entry takes `widths` out of the entry at `at`, and
     /// sits just before it if `before`, otherwise just after. Returns the new entry's id
     /// and where the two now are, in sequence order.
-    pub fn split_entry(&mut self, at: Cursor, widths: Widths, before: bool) -> (Id, [Cursor; 2]) {
+    pub fn split_entry(&mut self, at: Cursor, widths: Widths, before: bool) -> (EntryId, [Cursor; 2]) {
         let at = self.make_room(at);
         self.changing(at.leaf);
         let id = self.new_entry(at.leaf);
@@ -474,9 +474,9 @@ impl<const N: usize> PrepareEffectTree<N> {
     }
 
     /// Hands out the id for a new entry that is about to go into `leaf`.
-    fn new_entry(&mut self, leaf: u32) -> Id {
+    fn new_entry(&mut self, leaf: u32) -> EntryId {
         self.home.push(leaf);
-        self.home.len() as Id - 1
+        self.home.len() as EntryId - 1
     }
 
     /// Ensures the leaf at `at` has a free slot. Returns where the slot that was at `at`

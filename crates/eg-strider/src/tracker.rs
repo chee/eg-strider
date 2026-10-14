@@ -9,7 +9,7 @@ use crate::oplog::OpKind;
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::EventId;
-use strider_tree::{Cursor, PrepareEffectTree, View, Widths};
+use strider_tree::{Cursor, EntryId, PrepareEffectTree, View, Widths};
 
 /// A character the tracker knows: the number within the region of the event that inserted
 /// it, or one of the document as it stood when the region began.
@@ -105,7 +105,7 @@ pub(crate) struct Tracker {
     deleted: Vec<Targets>,
     /// For each page of the document as it stood when the region began, the underwater span
     /// that holds the page's first character.
-    pages: Vec<u32>,
+    pages: Vec<EntryId>,
     /// Per span: the `scan_stamp` of the last `integrate` scan that passed over it.
     scanned: Vec<u32>,
     scan_stamp: u32,
@@ -157,14 +157,14 @@ impl Tracker {
     }
 
     /// Finds the span holding `item`, and how far into it.
-    fn locate(&self, item: ItemId) -> (u32, u32) {
+    fn locate(&self, item: ItemId) -> (EntryId, u32) {
         let span = if item & UNDERWATER != 0 { self.underwater(item) } else { self.by_event[item as usize] };
         (span, item - self.spans[span as usize].item)
     }
 
     /// Finds the span holding an underwater item: the one holding the first character of
     /// its page, or one further along the document.
-    fn underwater(&self, item: ItemId) -> u32 {
+    fn underwater(&self, item: ItemId) -> EntryId {
         let holds = |id: u32| {
             let span = &self.spans[id as usize];
             span.item & UNDERWATER != 0 && item.wrapping_sub(span.item) < span.len

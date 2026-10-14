@@ -22,7 +22,7 @@ use super::{AgentRun, Op, OpKind, OpLog, OpSlice};
 use crate::replay::Base;
 use std::borrow::Cow;
 use std::ops::Range;
-use strider_graph::{EventId, Graph, Segment};
+use strider_graph::{BlockId, EventId, Graph, Segment};
 
 const MAGIC: &[u8] = b"eg-strider\x05";
 
@@ -31,6 +31,9 @@ const MAGIC: &[u8] = b"eg-strider\x05";
 /// most often needs, can be read without much else, and the rest packs well in a few large
 /// blocks. Tiny in debug builds, so that tests on short histories save several.
 const BLOCK: u32 = if cfg!(debug_assertions) { 8 } else { 1 << 15 };
+
+/// A block of saved history's place among the saved blocks.
+pub(crate) type SavedBlockIndex = usize;
 
 /// A file that is not a saved document, or is a damaged one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +61,7 @@ pub(crate) struct Packed {
 
 impl Packed {
     /// Finds the block holding an event.
-    pub fn block_holding(&self, event: EventId) -> usize {
+    pub fn block_holding(&self, event: EventId) -> SavedBlockIndex {
         self.starts.partition_point(|&start| start <= event) - 1
     }
 }
@@ -151,7 +154,7 @@ impl OpLog {
 
     /// Reads the history that is still as it was saved from block `from` on, so that the log
     /// holds every event since that block's first.
-    pub(crate) fn unpack_from(&mut self, from: usize) {
+    pub(crate) fn unpack_from(&mut self, from: SavedBlockIndex) {
         let Some(mut packed) = self.packed.take() else { return };
         let later = std::mem::take(self);
         (self.agent_names, self.next_seq, self.memo) = (later.agent_names, later.next_seq, later.memo);
@@ -188,7 +191,7 @@ impl OpLog {
 
     /// Returns the events that the chain of block `block` starts from: its parents, which for
     /// a chain with no block before it are the heads of the history still as it was saved.
-    fn parents_of(&self, block: usize) -> Vec<EventId> {
+    fn parents_of(&self, block: BlockId) -> Vec<EventId> {
         let blocks = self.graph.blocks();
         let parents: Vec<EventId> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
         match &self.packed {
