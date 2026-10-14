@@ -218,3 +218,22 @@ fn an_event_from_before_the_last_merge_is_merged_into_it() {
         assert_eq!(build(true).1, expected);
     }
 }
+
+/// Holding backspace deletes one character at a time, each just before the last. The log
+/// stores the run as one delete, as it would a backspace of all of them at once.
+#[test]
+fn holding_backspace_is_stored_as_one_delete() {
+    let (mut held, mut at_once) = (OpLog::new(), OpLog::new());
+    for log in [&mut held, &mut at_once] {
+        let a = log.get_or_create_agent("a");
+        log.add_insert(a, 0, "hello world");
+    }
+    let a = held.get_or_create_agent("a");
+    for at in (6..11).rev() {
+        held.add_delete(a, at..at + 1);
+    }
+    let (a, tip) = (at_once.get_or_create_agent("a"), at_once.frontier());
+    at_once.add_delete_at(a, &tip, 6..11, false).unwrap();
+    assert_eq!(held.checkout(), "hello ");
+    assert_eq!(held.save(), at_once.save());
+}

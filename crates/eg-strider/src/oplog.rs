@@ -391,8 +391,8 @@ impl OpLog {
         }
     }
 
-    /// Stores an op, merging it into the last op when it carries it on, as typing or holding
-    /// delete does. Returns the length of the op it ends up in.
+    /// Stores an op, merging it into the last op when it carries it on, as typing, holding
+    /// delete or holding backspace does. Returns the length of the op it ends up in.
     fn store(&mut self, follows: bool, op: Op) -> u32 {
         match op.kind {
             OpKind::Ins => self.totals.0 += op.len,
@@ -409,6 +409,20 @@ impl OpLog {
             {
                 o.len += op.len;
                 o.content.1 = op.content.1;
+                o.len
+            }
+            // Backspace: a delete that ends where the last began, each removing one character
+            // or already running backwards.
+            Some(o)
+                if follows
+                    && o.kind == OpKind::Del
+                    && op.kind == OpKind::Del
+                    && o.trims == op.trims
+                    && (o.len == 1 || !o.forward)
+                    && (op.len == 1 || !op.forward)
+                    && op.pos + op.len == o.pos =>
+            {
+                (o.pos, o.len, o.forward) = (op.pos, o.len + op.len, false);
                 o.len
             }
             _ => {
