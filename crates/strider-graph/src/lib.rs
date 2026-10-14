@@ -57,7 +57,6 @@ impl Graph {
 
     /// Returns the events nothing descends from yet, ascending.
     pub fn frontier(&self) -> &[EventIndex] {
-        // Kept in order: each new event is the highest so far, and goes on the end.
         &self.frontier
     }
 
@@ -72,16 +71,19 @@ impl Graph {
         if at <= self.floor() || at >= self.len() {
             return false;
         }
+
         let block = self.blocks.containing(at);
         let critical = |block: BlockIndex| self.critical.binary_search(&block).is_ok();
         if self.blocks.start(block) == at {
             return !critical(block);
         }
+
         // Partway along a block, every later event has what comes before unless something is
         // concurrent with the block.
         if critical(block) && (block + 1 == self.blocks.len() || critical(block + 1)) {
             return false;
         }
+
         self.split(block, at);
         true
     }
@@ -105,9 +107,11 @@ impl Graph {
             return start..end;
         }
         assert!(parents.iter().all(|&p| p < start), "parent is not a known event");
-        // Parents usually arrive in order; only otherwise are they copied to be sorted.
+        // Parents must be ascending and distinct: the frontier comparison below needs it, and
+        // splitting blocks in ascending order keeps the indexes already in `ends` valid. They
+        // nearly always arrive that way, so only otherwise are they copied and sorted.
         let sorted: Vec<EventIndex>;
-        let parents = if parents.windows(2).all(|pair| pair[0] < pair[1]) {
+        let parents = if parents.is_sorted_by(|a, b| a < b) {
             parents
         } else {
             let mut copy = parents.to_vec();
@@ -130,7 +134,8 @@ impl Graph {
             }
             ends.push(block);
         }
-        // An event whose parents are the whole frontier has seen everything, and is all the frontier is now.
+        // An event whose parents are the whole frontier has seen everything, and becomes the
+        // whole frontier.
         let merges_all = parents == self.frontier;
         let seen = if merges_all { start } else { ends.iter().map(|&block| self.seen_after(block)).max().unwrap_or(floor) };
         let new = self.blocks.len();
