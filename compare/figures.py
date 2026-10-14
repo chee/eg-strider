@@ -38,15 +38,13 @@ def times(ratio):
     return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
 
 
-def chart(results, kind, label, caption, ticks, share=(), part=None):
-    """Draws one bar per system for each trace. The axis runs in decades of the first tick, and is long enough for the kinds of figure in `share` too, so that charts
-    of them line up. `part` names a figure that is a part of each bar, with what to call
-    it: the bar is drawn lighter up to there. A system whose text came out unlike
-    diamond-types' is starred."""
+def chart(results, kind, label, caption, ticks, share=()):
+    """Draws one bar per system for each trace. The axis runs in decades of the first tick,
+    and is long enough for the kinds of figure in `share` too, so that charts of them line
+    up. A system whose text came out unlike diamond-types' is starred."""
     by_trace = {r["trace"]: r[kind] for r in results}
     # A library left out of the run has no figures at all, and no rows.
     shown = [system for system in SYSTEMS if any(r[kind].get(system[1]) is not None for r in results)]
-    parts = {r["trace"]: r[part[0]] for r in results} if part else {}
     same = {r["trace"]: r["same"] for r in results}
     traces = [t for t in ORDER if t in by_trace]
     systems = shown
@@ -94,11 +92,6 @@ def chart(results, kind, label, caption, ticks, share=(), part=None):
                 end = x(value)
                 out.append(f'<rect x="{LEFT}" y="{y}" width="{max(end - LEFT, 1):.1f}" height="{ROW - 2}" fill="{colour}"/>')
                 behind = f' <tspan fill="#888">({times(value / least)}×)</tspan>' if value > least else ""
-                within = parts.get(trace, {}).get(key)
-                if within:
-                    # Both ends of the lighter part can be read off the axis.
-                    out.append(f'<rect x="{LEFT}" y="{y}" width="{max(min(x(within), end) - LEFT, 0):.1f}" height="{ROW - 2}" fill="white" fill-opacity="0.5"/>')
-                    behind = f' <tspan fill="#888">· {part[1]} {label(within)}</tspan>{behind}'
                 star = "*" if same[trace].get(key) is False else ""
                 out.append(f'<text x="{end + 5:.1f}" y="{y + 8.5}" font-size="9">{label(value)}{star}{behind}</text>')
             else:
@@ -117,7 +110,7 @@ def main(results_path, out_dir):
     charts = {
         "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES, share=["open_ms"]),
         "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES, share=["merge_ms"]),
-        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history. The lighter part of a bar is the ops being merged. {scale}", sizes, ["merge_kept"], ("merge_ops", "ops")),
+        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history, the ops being merged included. {scale}", sizes, ["merge_kept"]),
         "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, ["merge_peak"]),
         "file-size": chart(results, "saved", memory, f"Size of a saved document. {scale}", sizes),
     }
