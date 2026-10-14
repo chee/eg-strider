@@ -72,12 +72,13 @@ const WARM_UP: std::time::Duration = std::time::Duration::from_millis(300);
 /// How long replaying a history into another library may take before it is given up.
 const LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Where histories replayed into other libraries are kept, apart from the downloaded traces.
-const REPLAYED: &str = "traces/replayed";
+/// Where histories replayed into other libraries are kept, as the batches each writer sent,
+/// apart from the downloaded traces.
+const REPLAYED: &str = "traces/batches";
 
-/// Loads a history in another library's format, with how many peers it took and how many edits
-/// had to be moved. Replayed on first use and kept in [`REPLAYED`]. Nothing for a library in
-/// `left_out`.
+/// Loads a history as the batches each writer's replica of another library sent it as, with how
+/// many peers it took and how many edits had to be moved. Replayed on first use and kept in
+/// [`REPLAYED`]. Nothing for a library in `left_out`.
 fn replayed<R: compare::replicas::Replica>(
     name: &str,
     kind: &str,
@@ -105,9 +106,9 @@ fn replayed<R: compare::replicas::Replica>(
         return Err("did not finish");
     };
     let notes = format!("{:>6} {:>6}", replayed.peers, replayed.moved);
-    std::fs::write(file(""), &replayed.saved).unwrap();
+    std::fs::write(file(""), &replayed.batches).unwrap();
     std::fs::write(file("-notes"), &notes).unwrap();
-    Ok((replayed.saved, notes))
+    Ok((replayed.batches, notes))
 }
 
 /// Appends a history to a new eg-strider log through its remote-edit calls, then merges it.
@@ -153,28 +154,19 @@ fn dt_open(saved: &[u8]) -> (ListOpLog, JumpRope) {
     (ListOpLog::load_from(file).unwrap(), JumpRope::from(text.as_str()))
 }
 
-/// Rewrites a saved Automerge document as its changes, each after its length, as one peer would
-/// send them.
-fn automerge_changes(saved: &[u8]) -> Vec<u8> {
-    let mut document = automerge::AutoCommit::load(saved).unwrap();
-    let mut out = Vec::new();
-    for change in document.get_changes(&[]) {
-        let raw = change.raw_bytes();
-        out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
-        out.extend_from_slice(raw);
-    }
-    out
+/// Splits batches kept each after its length.
+fn batches(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    std::iter::from_fn(move || {
+        let (len, rest) = bytes.split_first_chunk::<4>()?;
+        let (batch, rest) = rest.split_at(u32::from_le_bytes(*len) as usize);
+        bytes = rest;
+        Some(batch)
+    })
 }
 
 /// Reads Automerge changes into memory without applying them.
-fn automerge_decode(mut bytes: &[u8]) -> Vec<automerge::Change> {
-    let mut changes = Vec::new();
-    while let Some((len, rest)) = bytes.split_first_chunk::<4>() {
-        let (raw, rest) = rest.split_at(u32::from_le_bytes(*len) as usize);
-        changes.push(automerge::Change::try_from(raw).unwrap());
-        bytes = rest;
-    }
-    changes
+fn automerge_decode(bytes: &[u8]) -> Vec<automerge::Change> {
+    batches(bytes).map(|raw| automerge::Change::try_from(raw).unwrap()).collect()
 }
 
 /// Returns an Automerge document with its text.
@@ -185,10 +177,12 @@ fn automerge_text(document: automerge::AutoCommit) -> (automerge::AutoCommit, St
     (document, string)
 }
 
-/// Applies changes to a new Automerge document.
+/// Applies changes to a new Automerge document, one by one as they would arrive.
 fn automerge_apply(changes: Vec<automerge::Change>) -> (automerge::AutoCommit, String) {
     let mut document = automerge::AutoCommit::new();
-    document.apply_changes(changes).unwrap();
+    for change in changes {
+        document.apply_changes([change]).unwrap();
+    }
     automerge_text(document)
 }
 
@@ -197,19 +191,28 @@ fn automerge_open(saved: &[u8]) -> (automerge::AutoCommit, String) {
     automerge_text(automerge::AutoCommit::load(saved).unwrap())
 }
 
-/// Reads a Yjs update into memory, through yrs, without applying it.
+/// Reads a saved Yjs document, one update of its whole state, into memory without applying it.
 fn yjs_decode(bytes: &[u8]) -> yrs::Update {
     use yrs::updates::decoder::Decode;
     yrs::Update::decode_v2(bytes).unwrap()
 }
 
-/// Applies an update to a new Yjs document and returns it with its text. Garbage collection is
-/// off, so that it keeps the text of deleted characters as every other library does.
-fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
+/// Reads the updates each writer sent into memory without applying them.
+fn yjs_decode_batches(bytes: &[u8]) -> Vec<yrs::Update> {
+    use yrs::updates::decoder::Decode;
+    batches(bytes).map(|update| yrs::Update::decode_v1(update).unwrap()).collect()
+}
+
+/// Applies updates to a new Yjs document, one by one as they would arrive, and returns it with
+/// its text. Garbage collection is off, so that it keeps the text of deleted characters as every
+/// other library does.
+fn yjs_apply(updates: impl IntoIterator<Item = yrs::Update>) -> (yrs::Doc, String) {
     use yrs::{GetString, Transact};
     let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
     let text = document.get_or_insert_text("text");
-    document.transact_mut().apply_update(update).unwrap();
+    for update in updates {
+        document.transact_mut().apply_update(update).unwrap();
+    }
     let string = text.get_string(&document.transact());
     (document, string)
 }
@@ -228,11 +231,25 @@ fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
     (document, string)
 }
 
-/// Applies ops to a new Loro document. Loro takes remote edits as bytes or as ops in its JSON
-/// form; the latter starts from ops in memory.
-fn loro_apply(ops: loro::JsonSchema) -> (LoroDoc, String) {
+/// Reads the updates each writer sent into memory as ops, without applying them. Loro takes
+/// remote edits as bytes or as ops in its JSON form; the latter starts from ops in memory.
+fn loro_decode_batches(bytes: &[u8]) -> Vec<loro::JsonSchema> {
+    let reader = LoroDoc::new();
+    batches(bytes)
+        .map(|update| {
+            let before = reader.oplog_vv();
+            reader.import(update).unwrap();
+            reader.export_json_updates(&before, &reader.oplog_vv())
+        })
+        .collect()
+}
+
+/// Applies ops to a new Loro document, batch by batch as they would arrive.
+fn loro_apply(batches: Vec<loro::JsonSchema>) -> (LoroDoc, String) {
     let document = LoroDoc::new();
-    document.import_json_updates(ops).unwrap();
+    for ops in batches {
+        document.import_json_updates(ops).unwrap();
+    }
     let string = document.get_text(TEXT).to_string();
     (document, string)
 }
@@ -328,8 +345,9 @@ fn columns(of: [Option<String>; 5]) -> String {
 /// editing traces, and checks that each ends with diamond-types' text, and whether that is the
 /// trace's. The two tasks are merging a history whose ops are in memory, through each library's
 /// own calls, and reopening a saved document from its bytes until it is ready for more edits.
-/// The paper's own Yjs and Automerge files for a trace, when beside it, are merged too, to check
-/// the replays against.
+/// The other libraries merge the batches each writer's replica sent, one by one. The paper's own
+/// Yjs and Automerge files for a trace, when beside it, are opened too, to check the replays'
+/// saved documents against.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let replay = args.iter().any(|a| a == "--replay");
@@ -489,16 +507,13 @@ fn main() {
 
         // The other libraries, on the same history replayed into each.
         let yjs = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay, &left_out)
-            .map(|(update, notes)| (measure(reps, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))), notes));
-        let loro = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay, &left_out).map(|(updates, notes)| {
-            let source = loro_import(&updates).0;
-            let ops = || source.export_json_updates(&Default::default(), &source.oplog_vv());
-            (measure(reps, &expected, ops, loro_apply, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
+            .map(|(sent, notes)| (measure(reps, &expected, || yjs_decode_batches(&sent), yjs_apply, yjs_save, |saved| yjs_apply([yjs_decode(saved)])), notes));
+        let loro = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay, &left_out).map(|(sent, notes)| {
+            let ops = loro_decode_batches(&sent);
+            (measure(reps, &expected, || ops.clone(), loro_apply, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
         });
-        let automerge = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay, &left_out).map(|(saved, notes)| {
-            let changes = automerge_changes(&saved);
-            (measure(reps, &expected, || automerge_decode(&changes), automerge_apply, |document| document.save(), automerge_open), notes)
-        });
+        let automerge = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay, &left_out)
+            .map(|(sent, notes)| (measure(reps, &expected, || automerge_decode(&sent), automerge_apply, |document| document.save(), automerge_open), notes));
         others.push(format!(
             "{name:6} {}",
             [("yrs", &yjs), ("Loro", &loro), ("Automerge", &automerge)]
@@ -508,26 +523,26 @@ fn main() {
                 })
                 .join("  ")
         ));
-        // The paper's own files for the trace, made by Yjs and Automerge themselves, to check the
-        // replays against: the time to merge each, its size, and whether its text is the trace's.
-        // A check, so one run of each will do.
+        // The paper's own saved documents for the trace, made by Yjs and Automerge themselves, to
+        // check the replays against: the time to open each beside ours, its size, and whether its
+        // text is the trace's. A check, so one run of each will do.
         let beside = |suffix: &str| std::fs::read(path.replace(".json", suffix)).ok();
-        let paper_yjs = beside(".yjs")
-            .filter(|_| !left_out.contains(&"yrs"))
-            .map(|update| measure(1, &expected, || yjs_decode(&update), yjs_apply, yjs_save, |saved| yjs_apply(yjs_decode(saved))));
-        let paper_automerge = beside(".am").filter(|_| !left_out.contains(&"automerge")).map(|saved| {
-            let changes = automerge_changes(&saved);
-            measure(1, &expected, || automerge_decode(&changes), automerge_apply, |document| document.save(), automerge_open)
-        });
+        let opened = |file: Vec<u8>, open: &dyn Fn(&[u8]) -> String| {
+            let t = Instant::now();
+            let text = open(&file);
+            (since(t), file.len(), text == expected)
+        };
+        let paper_yjs = beside(".yjs").filter(|_| !left_out.contains(&"yrs")).map(|file| opened(file, &|bytes| yjs_apply([yjs_decode(bytes)]).1));
+        let paper_automerge = beside(".am").filter(|_| !left_out.contains(&"automerge")).map(|file| opened(file, &|bytes| automerge_open(bytes).1));
         let ours = [yjs.as_ref().ok().map(|m| m.0), automerge.as_ref().ok().map(|m| m.0)];
         papers.push(format!(
             "{name:6} {}",
             [("yrs", ours[0], paper_yjs), ("Automerge", ours[1], paper_automerge)]
                 .map(|(library, ours, paper)| {
-                    let merge = |m: Option<Measured>| m.map_or("-".to_string(), |m| format!("{:.2} ms", m.merge_ms));
-                    let size = |m: Option<Measured>| m.map_or("-".to_string(), |m| mb(m.saved));
-                    let text = paper.map_or("-", |m| if m.same { "same text" } else { "different text" });
-                    format!("{library:>10} {:>11} {:>11} {:>9} {:>9} {text:>14}", merge(ours), merge(paper), size(ours), size(paper))
+                    let (open, size) = (ours.map_or("-".to_string(), |m| format!("{:.2} ms", m.open_ms)), ours.map_or("-".to_string(), |m| mb(m.saved)));
+                    let (paper_open, paper_size) = (paper.map_or("-".to_string(), |p| format!("{:.2} ms", p.0)), paper.map_or("-".to_string(), |p| mb(p.1)));
+                    let text = paper.map_or("-", |p| if p.2 { "same text" } else { "different text" });
+                    format!("{library:>10} {open:>11} {paper_open:>11} {size:>9} {paper_size:>9} {text:>14}")
                 })
                 .join("  ")
         ));
@@ -583,12 +598,12 @@ fn main() {
     for line in others {
         println!("{line}");
     }
-    println!("\nthe paper's own Yjs and Automerge files beside these replays: the time to merge each, its size, and whether the paper's file ends with diamond-types' text");
+    println!("\nthe paper's own Yjs and Automerge files beside the saved documents of these replays: the time to open each, its size, and whether the paper's file ends with diamond-types' text");
     println!(
         "{:6} {}",
         "trace",
         ["yrs", "Automerge"]
-            .map(|library| format!("{library:>10} {:>11} {:>11} {:>9} {:>9} {:>14}", "replayed", "paper's", "replayed", "paper's", "paper's text"))
+            .map(|library| format!("{library:>10} {:>11} {:>11} {:>9} {:>9} {:>14}", "ours", "paper's", "ours", "paper's", "paper's text"))
             .join("  ")
     );
     for line in papers {

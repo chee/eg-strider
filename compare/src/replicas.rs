@@ -31,12 +31,13 @@ pub trait Replica {
     /// or cut short.
     fn edit(&mut self, edits: &[Edit]) -> (Option<Self::Update>, usize);
 
-    /// Saves everything the replica holds, in the library's own format.
-    fn save(&mut self) -> Vec<u8>;
+    /// Returns an update as the library sends it.
+    fn bytes(update: &Self::Update) -> Vec<u8>;
 }
 
 pub struct Replayed {
-    pub saved: Vec<u8>,
+    /// What each writer's replica sent, batch by batch in the order made, each after its length.
+    pub batches: Vec<u8>,
     pub peers: usize,
     pub moved: usize,
 }
@@ -196,9 +197,13 @@ pub fn replay<R: Replica>(history: &History<TextOperation, usize>, limit: Durati
         }
     }
 
-    let mut all = R::new(u32::MAX as u64, ascii);
-    all.apply(&updates.iter().flatten().collect::<Vec<_>>());
-    Some(Replayed { saved: all.save(), peers, moved })
+    let mut batches = Vec::new();
+    for update in updates.iter().flatten() {
+        let bytes = R::bytes(update);
+        batches.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        batches.extend_from_slice(&bytes);
+    }
+    Some(Replayed { batches, peers, moved })
 }
 
 pub struct Automerge {
@@ -250,8 +255,8 @@ impl Replica for Automerge {
         (made.then(|| self.document.get_last_local_change().unwrap().clone()), moved)
     }
 
-    fn save(&mut self) -> Vec<u8> {
-        self.document.save_nocompress()
+    fn bytes(change: &Self::Update) -> Vec<u8> {
+        change.raw_bytes().to_vec()
     }
 }
 
@@ -324,9 +329,8 @@ impl Replica for Yjs {
         (made.then(|| txn.encode_update_v1()), moved)
     }
 
-    fn save(&mut self) -> Vec<u8> {
-        use yrs::{ReadTxn, StateVector, Transact};
-        self.document.transact().encode_state_as_update_v2(&StateVector::default())
+    fn bytes(update: &Self::Update) -> Vec<u8> {
+        update.clone()
     }
 }
 
@@ -378,7 +382,7 @@ impl Replica for Loro {
         (made.then(|| self.document.export(loro::ExportMode::updates(&before)).unwrap()), moved)
     }
 
-    fn save(&mut self) -> Vec<u8> {
-        self.document.export(loro::ExportMode::all_updates()).unwrap()
+    fn bytes(update: &Self::Update) -> Vec<u8> {
+        update.clone()
     }
 }

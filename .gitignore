@@ -2,5 +2,5 @@
 # Machine-specific toolchain pins.
 /.cargo
 # Benchmark traces from github.com/josephg/egwalker-paper (datasets/*.{json,yjs,am}) in
-# traces/paper, and their replays into other libraries in traces/replayed.
+# traces/paper, and the batches their replays into other libraries sent in traces/batches.
 /traces
