@@ -304,7 +304,7 @@ impl OpLog {
                 }
             };
             let trims = kind == OpKind::Del && open.is_some_and(|(end, left)| pos + len == end && len <= left);
-            let whole = self.store(follows && !trims, Op { first_event: next, len, kind, forward, trims, pos, content: (at, at + bytes) });
+            let whole = self.store(follows, Op { first_event: next, len, kind, forward, trims, pos, content: (at, at + bytes) });
             open = match kind {
                 OpKind::Ins => Some((pos + len, whole)),
                 OpKind::Del if trims => open.map(|(end, left)| (end - len, left - len)),
