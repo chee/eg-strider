@@ -170,23 +170,22 @@ fn automerge_decode(bytes: &[u8]) -> Vec<automerge::Change> {
 }
 
 /// Returns an Automerge document with its text.
-fn automerge_text(document: automerge::AutoCommit) -> (automerge::AutoCommit, String) {
+fn automerge_text(document: &automerge::AutoCommit) -> String {
     use automerge::ReadDoc;
     let (_, text) = document.get(automerge::ROOT, "text").unwrap().unwrap();
-    let string = document.text(&text).unwrap();
-    (document, string)
+    document.text(&text).unwrap()
 }
 
 /// Applies changes to a new Automerge document, all at once.
-fn automerge_apply(changes: Vec<automerge::Change>) -> (automerge::AutoCommit, String) {
+fn automerge_apply(changes: Vec<automerge::Change>) -> automerge::AutoCommit {
     let mut document = automerge::AutoCommit::new();
     document.apply_changes(changes).unwrap();
-    automerge_text(document)
+    document
 }
 
 /// Loads a saved Automerge document.
-fn automerge_open(saved: &[u8]) -> (automerge::AutoCommit, String) {
-    automerge_text(automerge::AutoCommit::load(saved).unwrap())
+fn automerge_open(saved: &[u8]) -> automerge::AutoCommit {
+    automerge::AutoCommit::load(saved).unwrap()
 }
 
 /// Reads a saved Yjs document, one update of its whole state, into memory without applying it.
@@ -203,26 +202,30 @@ fn yjs_decode_batches(bytes: &[u8]) -> Vec<yrs::Update> {
 
 /// Applies an update to a new Yjs document and returns it with its text. Garbage collection is
 /// off, so that it keeps the text of deleted characters as every other library does.
-fn yjs_apply(update: yrs::Update) -> (yrs::Doc, String) {
-    use yrs::{GetString, Transact};
+fn yjs_apply(update: yrs::Update) -> yrs::Doc {
+    use yrs::Transact;
     let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
-    let text = document.get_or_insert_text("text");
+    document.get_or_insert_text("text");
     document.transact_mut().apply_update(update).unwrap();
-    let string = text.get_string(&document.transact());
-    (document, string)
+    document
 }
 
 /// Applies updates to a new Yjs document, each in a transaction of its own: yrs's quickest way
 /// to take many. Combining them first with its own call for that takes seconds on C1 and C2.
-fn yjs_merge(updates: Vec<yrs::Update>) -> (yrs::Doc, String) {
-    use yrs::{GetString, Transact};
+fn yjs_merge(updates: Vec<yrs::Update>) -> yrs::Doc {
+    use yrs::Transact;
     let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
-    let text = document.get_or_insert_text("text");
+    document.get_or_insert_text("text");
     for update in updates {
         document.transact_mut().apply_update(update).unwrap();
     }
-    let string = text.get_string(&document.transact());
-    (document, string)
+    document
+}
+
+/// Returns a Yjs document's text.
+fn yjs_text(document: &yrs::Doc) -> String {
+    use yrs::{GetString, Transact};
+    document.get_or_insert_text("text").get_string(&document.transact())
 }
 
 /// Saves a Yjs document as one update of its whole state, the only form it has.
@@ -232,11 +235,15 @@ fn yjs_save(document: &mut yrs::Doc) -> Vec<u8> {
 }
 
 /// Imports a snapshot into a new Loro document and returns it with its text.
-fn loro_import(bytes: &[u8]) -> (LoroDoc, String) {
+fn loro_import(bytes: &[u8]) -> LoroDoc {
     let document = LoroDoc::new();
     document.import(bytes).unwrap();
-    let string = document.get_text(TEXT).to_string();
-    (document, string)
+    document
+}
+
+/// Returns a Loro document's text.
+fn loro_text(document: &LoroDoc) -> String {
+    document.get_text(TEXT).to_string()
 }
 
 /// Reads the updates each writer sent into memory as ops, without applying them. Loro takes
@@ -249,11 +256,10 @@ fn loro_decode_batches(bytes: &[u8]) -> loro::JsonSchema {
 }
 
 /// Applies ops to a new Loro document, all at once.
-fn loro_apply(ops: loro::JsonSchema) -> (LoroDoc, String) {
+fn loro_apply(ops: loro::JsonSchema) -> LoroDoc {
     let document = LoroDoc::new();
     document.import_json_updates(ops).unwrap();
-    let string = document.get_text(TEXT).to_string();
-    (document, string)
+    document
 }
 
 /// What a system took on the two tasks.
@@ -274,25 +280,25 @@ struct Measured {
 }
 
 /// Measures a library on the two tasks. `ops` puts a history's ops in memory, untimed but
-/// counted. The text each task returns is a copy for checking, and is not counted as held.
+/// counted. A document's text is read only to check it, outside the times and memory.
 fn measure<O, D>(
     reps: u32,
     expected: &str,
     ops: impl Fn() -> O,
-    merge: impl Fn(O) -> (D, String),
+    merge: impl Fn(O) -> D,
+    text: impl Fn(&D) -> String,
     save: impl Fn(&mut D) -> Vec<u8>,
-    open: impl Fn(&[u8]) -> (D, String),
+    open: impl Fn(&[u8]) -> D,
 ) -> Measured {
-    let (mut document, text) = merge(ops());
+    let mut document = merge(ops());
     let saved = save(&mut document);
-    let same = text == expected && open(&saved).1 == expected;
-    drop((document, text));
+    let same = text(&document) == expected && text(&open(&saved)) == expected;
+    drop(document);
     let merge_ms = median_of(reps, &ops, &merge).0;
     let open_ms = median_of(reps, || (), |()| open(&saved)).0;
-    let held = |((_doc, text), memory): ((D, String), Memory)| Memory { peak: memory.peak, kept: memory.kept.saturating_sub(text.capacity()) };
     let held_by_ops = memory_of(&ops).1.kept;
-    let merging = held(memory_of(|| merge(ops())));
-    let opening = held(memory_of(|| open(&saved)));
+    let merging = memory_of(|| merge(ops())).1;
+    let opening = memory_of(|| open(&saved)).1;
     Measured { merge_ms, ops: held_by_ops, merging, open_ms, opening, saved: saved.len(), same }
 }
 
@@ -407,8 +413,9 @@ fn main() {
             let mut log = OpLog::new();
             compare::extend(&mut log, &history, usize::MAX);
             let append_ms = since(t);
-            same &= log.checkout() == expected;
+            let merged = log.checkout();
             let merge_ms = since(t);
+            same &= merged == expected;
             // One more edit at the end, merged on top of what is there.
             let typist = log.get_or_create_agent("typist");
             let t = Instant::now();
@@ -508,14 +515,16 @@ fn main() {
         );
 
         // The other libraries, on the same history replayed into each.
-        let yjs = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay, &left_out)
-            .map(|(sent, notes)| (measure(reps, &expected, || yjs_decode_batches(&sent), yjs_merge, yjs_save, |saved| yjs_apply(yjs_decode(saved))), notes));
+        let yjs = replayed::<compare::replicas::Yjs>(name, "yrs", &dt_history, replay, &left_out).map(|(sent, notes)| {
+            (measure(reps, &expected, || yjs_decode_batches(&sent), yjs_merge, yjs_text, yjs_save, |saved| yjs_apply(yjs_decode(saved))), notes)
+        });
         let loro = replayed::<compare::replicas::Loro>(name, "loro", &dt_history, replay, &left_out).map(|(sent, notes)| {
             let ops = loro_decode_batches(&sent);
-            (measure(reps, &expected, || ops.clone(), loro_apply, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
+            (measure(reps, &expected, || ops.clone(), loro_apply, loro_text, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import), notes)
         });
-        let automerge = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay, &left_out)
-            .map(|(sent, notes)| (measure(reps, &expected, || automerge_decode(&sent), automerge_apply, |document| document.save(), automerge_open), notes));
+        let automerge = replayed::<compare::replicas::Automerge>(name, "automerge", &dt_history, replay, &left_out).map(|(sent, notes)| {
+            (measure(reps, &expected, || automerge_decode(&sent), automerge_apply, automerge_text, |document| document.save(), automerge_open), notes)
+        });
         others.push(format!(
             "{name:6} {}",
             [("yrs", &yjs), ("Loro", &loro), ("Automerge", &automerge)]
@@ -529,13 +538,16 @@ fn main() {
         // check the replays against: the time to open each beside ours, its size, and whether its
         // text is the trace's. A check, so one run of each will do.
         let beside = |suffix: &str| std::fs::read(path.replace(".json", suffix)).ok();
-        let opened = |file: Vec<u8>, open: &dyn Fn(&[u8]) -> String| {
+        let paper_yjs = beside(".yjs").filter(|_| !left_out.contains(&"yrs")).map(|file| {
             let t = Instant::now();
-            let text = open(&file);
-            (since(t), file.len(), text == expected)
-        };
-        let paper_yjs = beside(".yjs").filter(|_| !left_out.contains(&"yrs")).map(|file| opened(file, &|bytes| yjs_apply(yjs_decode(bytes)).1));
-        let paper_automerge = beside(".am").filter(|_| !left_out.contains(&"automerge")).map(|file| opened(file, &|bytes| automerge_open(bytes).1));
+            let document = yjs_apply(yjs_decode(&file));
+            (since(t), file.len(), yjs_text(&document) == expected)
+        });
+        let paper_automerge = beside(".am").filter(|_| !left_out.contains(&"automerge")).map(|file| {
+            let t = Instant::now();
+            let document = automerge_open(&file);
+            (since(t), file.len(), automerge_text(&document) == expected)
+        });
         let ours = [yjs.as_ref().ok().map(|m| m.0), automerge.as_ref().ok().map(|m| m.0)];
         papers.push(format!(
             "{name:6} {}",
