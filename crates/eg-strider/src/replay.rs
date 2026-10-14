@@ -7,7 +7,7 @@
 
 use crate::oplog::{OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
-use crate::tracker::Tracker;
+use crate::tracker::{Targets, Tracker};
 use std::ops::Range;
 use strider_graph::{Move, Segment, Walker};
 use strider_text::PieceTable;
@@ -274,9 +274,9 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
                 let mut done = 0;
                 while done < op.len {
                     let (first, stretch) = (next(), next());
-                    let n = (stretch & !DESCENDING).min(op.len - done);
-                    let targets = (0..n).map(|i| if stretch & DESCENDING == 0 { first + i } else { first - i });
-                    tracker.delete_by_id(lv + done, targets, |pos, len| doc.remove(pos, len));
+                    let (n, descending) = ((stretch & !DESCENDING).min(op.len - done), stretch & DESCENDING != 0);
+                    let item = if descending { first + 1 - n } else { first };
+                    tracker.delete_by_id(Targets { lv: lv + done, len: n, item, descending }, |pos, len| doc.remove(pos, len));
                     done += n;
                 }
                 doc.end_delete();
@@ -316,14 +316,9 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<usize>, kept: &mut Kept
             OpKind::Del => {
                 let mut done = 0;
                 while done < op.len {
-                    let first = tracker.target(lv + done);
-                    let stretch = |step: u32| {
-                        let follows = |&i: &u32| tracker.target(lv + done + i) == first.wrapping_add(step.wrapping_mul(i));
-                        (1..op.len - done).take_while(follows).count() as u32 + 1
-                    };
-                    let (up, down) = (stretch(1), stretch(1u32.wrapping_neg()));
-                    kept.resolved.extend(if up >= down { [first, up] } else { [first, down | DESCENDING] });
-                    done += up.max(down);
+                    let targets = tracker.targets(lv + done, lv + op.len);
+                    kept.resolved.extend([targets.first(), targets.len | if targets.descending { DESCENDING } else { 0 }]);
+                    done += targets.len;
                 }
             }
         }

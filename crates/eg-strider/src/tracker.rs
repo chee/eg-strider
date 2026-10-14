@@ -44,6 +44,32 @@ struct Span {
     ever_deleted: bool,
 }
 
+/// A stretch of delete events whose targets are consecutive items: the first event's is the
+/// lowest, or with `descending` the highest.
+#[derive(Clone, Copy)]
+pub(crate) struct Targets {
+    /// The first of the events.
+    pub lv: u32,
+    pub len: u32,
+    /// The lowest item deleted.
+    pub item: u32,
+    pub descending: bool,
+}
+
+impl Targets {
+    /// Returns the item that the first event deletes.
+    pub fn first(&self) -> u32 {
+        if self.descending { self.item + self.len - 1 } else { self.item }
+    }
+
+    /// Returns the part of the stretch from event `lv`, of at most `len` events.
+    fn from(&self, lv: u32, len: u32) -> Targets {
+        let (skip, len) = (lv - self.lv, len.min(self.lv + self.len - lv));
+        let item = if self.descending { self.item + self.len - skip - len } else { self.item + skip };
+        Targets { lv, len, item, descending: self.descending }
+    }
+}
+
 impl Span {
     /// Returns the length as seen in the prepare version and in the effect version.
     fn widths(&self) -> Widths {
@@ -68,8 +94,10 @@ pub(crate) struct Tracker {
     /// By tree entry id.
     spans: Vec<Span>,
     /// Per region event. For an insert, the span holding the character it inserted; for a
-    /// delete, the item it deleted.
+    /// delete, which of `deleted` it belongs to.
     by_event: Vec<u32>,
+    /// What the delete events deleted, a stretch of consecutive items at a time.
+    deleted: Vec<Targets>,
     /// For each page of the document as it stood when the region began, the underwater span
     /// that holds the page's first character.
     pages: Vec<u32>,
@@ -84,6 +112,7 @@ impl Default for Tracker {
             tree: PrepareEffectTree::new(Widths::default()),
             spans: Vec::new(),
             by_event: Vec::new(),
+            deleted: Vec::new(),
             pages: Vec::new(),
             scanned: Vec::new(),
             scan_stamp: 0,
@@ -112,6 +141,7 @@ impl Tracker {
         self.scan_stamp = 0;
         self.by_event.clear();
         self.by_event.resize(events, NONE);
+        self.deleted.clear();
     }
 
     // ---------------------------------------------------------------- finding things
@@ -400,11 +430,10 @@ impl Tracker {
             let n = (len - done).min(self.span(at).len - off);
             at = self.isolate(at, off, n);
             debug_assert_eq!(self.span(at).state, INSERTED);
-            let item = self.span(at).item;
-            for i in 0..n {
-                let event = if fwd { lv + done + i } else { lv + len - 1 - done - i };
-                self.by_event[event as usize] = item + i;
-            }
+            // The events that deleted these characters: the next ones, or with a backspace
+            // the ones before those already accounted for.
+            let first = if fwd { lv + done } else { lv + len - done - n };
+            self.note_deleted(Targets { lv: first, len: n, item: self.span(at).item, descending: !fwd });
             if let Some(index) = self.mark_deleted(at) {
                 removed(index, n);
             }
@@ -421,28 +450,34 @@ impl Tracker {
         }
     }
 
-    /// Merges deletes whose targets are already known by id: region event `lv + i` deletes
-    /// the `i`th of `targets`, as [`target`](Self::target) reported when the events were
-    /// first merged.
-    pub fn delete_by_id(&mut self, lv: u32, targets: impl ExactSizeIterator<Item = u32>, mut removed: impl FnMut(u32, u32)) {
-        let end = lv + targets.len() as u32;
-        for (i, target) in targets.enumerate() {
-            self.by_event[lv as usize + i] = target;
-        }
-        let mut lv = lv;
-        while lv < end {
-            let (events, mut item) = self.target_run(lv, end);
-            let stop = item + events;
-            while item < stop {
-                let (span, off) = self.locate(item);
-                let n = (stop - item).min(self.spans[span as usize].len - off);
-                let at = self.isolate(self.tree.cursor(span), off, n);
-                if let Some(index) = self.mark_deleted(at) {
-                    removed(index, n);
-                }
-                item += n;
+    /// Records what a stretch of delete events deleted, as part of the stretch before it if
+    /// that is the same delete carrying on.
+    fn note_deleted(&mut self, targets: Targets) {
+        let Targets { lv, len, item, descending } = targets;
+        match self.deleted.last_mut() {
+            // A backspace reaches the next span with the events before those it has used.
+            Some(last) if last.descending == descending && last.item + last.len == item && (if descending { lv + len == last.lv } else { last.lv + last.len == lv }) => {
+                last.len += len;
+                last.lv = last.lv.min(lv);
             }
-            lv += events;
+            _ => self.deleted.push(targets),
+        }
+        self.by_event[lv as usize..(lv + len) as usize].fill(self.deleted.len() as u32 - 1);
+    }
+
+    /// Merges deletes whose targets are already known, as [`targets`](Self::targets) reported
+    /// them when the events were first merged.
+    pub fn delete_by_id(&mut self, targets: Targets, mut removed: impl FnMut(u32, u32)) {
+        self.note_deleted(targets);
+        let (mut item, stop) = (targets.item, targets.item + targets.len);
+        while item < stop {
+            let (span, off) = self.locate(item);
+            let n = (stop - item).min(self.spans[span as usize].len - off);
+            let at = self.isolate(self.tree.cursor(span), off, n);
+            if let Some(index) = self.mark_deleted(at) {
+                removed(index, n);
+            }
+            item += n;
         }
     }
 
@@ -464,28 +499,10 @@ impl Tracker {
         }
     }
 
-    /// Returns the item deleted by region event `lv`.
-    pub fn target(&self, lv: u32) -> u32 {
-        self.by_event[lv as usize]
-    }
-
-    /// Finds the longest stretch of the delete events `lv..end` that starts at `lv` and whose
-    /// targets are consecutive items, forwards or backwards.
-    fn target_run(&self, lv: u32, end: u32) -> (u32, u32) {
-        let first = self.by_event[lv as usize];
-        let run = |step: u32| {
-            let mut n = 1;
-            while lv + n < end && self.by_event[(lv + n) as usize] == first.wrapping_add(step.wrapping_mul(n)) {
-                n += 1;
-            }
-            n
-        };
-        let (up, down) = (run(1), run(1u32.wrapping_neg()));
-        if up >= down {
-            (up, first)
-        } else {
-            (down, first + 1 - down)
-        }
+    /// Returns what the delete events from `lv` deleted, up to event `end` or to where their
+    /// targets stop being consecutive items.
+    pub fn targets(&self, lv: u32, end: u32) -> Targets {
+        self.deleted[self.by_event[lv as usize] as usize].from(lv, end - lv)
     }
 
     // ---------------------------------------------------------------- moving the prepare version
@@ -515,7 +532,7 @@ impl Tracker {
                     lv = end;
                 }
                 OpKind::Del => {
-                    let (n, mut item) = self.target_run(lv, events.end);
+                    let Targets { len: n, mut item, .. } = self.targets(lv, events.end);
                     let stop = item + n;
                     while item < stop {
                         let (span, off) = self.locate(item);
