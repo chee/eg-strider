@@ -260,6 +260,7 @@ dependencies = [
  "jumprope",
  "loro",
  "proptest",
+ "serde_json",
  "yrs",
  "zstd",
 ]

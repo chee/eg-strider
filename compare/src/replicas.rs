@@ -1,5 +1,5 @@
-use diamond_types::list::operation::ListOpKind;
-use diamond_types::list::ListOpLog;
+use crate::History;
+use diamond_types::list::operation::{ListOpKind, TextOperation};
 use std::time::{Duration, Instant};
 
 /// The name of the text in every library's document.
@@ -50,22 +50,22 @@ struct Block {
     edits: Vec<Edit>,
 }
 
-/// Cuts a log into blocks: its chunks, split after every event that is another's parent.
-fn blocks(dt: &ListOpLog) -> Vec<Block> {
-    let chunks = dt.as_chunked_operation_vec();
-    let mut cuts: Vec<usize> = chunks.iter().flat_map(|chunk| chunk.parents.as_ref().iter().map(|&p| p + 1)).collect();
+/// Cuts a history into blocks: its chunks, split after every event that is another's parent.
+fn blocks(history: &History<TextOperation, usize>) -> Vec<Block> {
+    let chunks = &history.chunks;
+    let mut cuts: Vec<usize> = chunks.iter().flat_map(|chunk| history.parents(chunk).iter().map(|&p| p + 1)).collect();
     cuts.sort_unstable();
     cuts.dedup();
 
     let mut blocks = Vec::new();
-    for chunk in &chunks {
-        let (start, end) = (chunk.span.start, chunk.span.end);
+    for chunk in chunks {
+        let (start, end) = (chunk.events.start, chunk.events.end);
         let inside = &cuts[cuts.partition_point(|&cut| cut <= start)..cuts.partition_point(|&cut| cut < end)];
         let mut from = start;
         for &to in inside.iter().chain([&end]) {
             let mut edits = Vec::new();
             let mut first = start;
-            for op in &chunk.ops {
+            for op in history.ops(chunk) {
                 let span = op.loc.span;
                 let n = span.end - span.start;
                 let (a, b) = (from.max(first) - first, to.min(first + n).saturating_sub(first));
@@ -80,8 +80,8 @@ fn blocks(dt: &ListOpLog) -> Vec<Block> {
                 }
                 first += n;
             }
-            let parents = if from == start { chunk.parents.as_ref().to_vec() } else { vec![from - 1] };
-            blocks.push(Block { start: from, len: to - from, agent: chunk.agent_span.agent as usize, parents, edits });
+            let parents = if from == start { history.parents(chunk).to_vec() } else { vec![from - 1] };
+            blocks.push(Block { start: from, len: to - from, agent: chunk.agent, parents, edits });
             from = to;
         }
     }
@@ -97,20 +97,20 @@ struct Plan {
     seen: Vec<usize>,
 }
 
-/// Replays a diamond-types log into replicas of another library (Loro, Automerge, Yjs), so that
-/// all are measured on the same history. Each peer has a replica, sent exactly what the author
+/// Replays a history into replicas of another library (Loro, Automerge, Yjs), so that all are
+/// measured on the same history. Each peer has a replica, sent exactly what the author
 /// of its next edits had seen. An agent with concurrent events becomes several peers, and a new
 /// peer starts as a copy of an existing replica. `None` if `limit` runs out.
-pub fn replay<R: Replica>(dt: &ListOpLog, limit: Duration) -> Option<Replayed> {
+pub fn replay<R: Replica>(history: &History<TextOperation, usize>, limit: Duration) -> Option<Replayed> {
     let began = Instant::now();
-    let blocks = blocks(dt);
+    let blocks = blocks(history);
     let ascii = blocks.iter().all(|block| block.edits.iter().all(|edit| edit.text.is_ascii()));
 
     // Ties between concurrent inserts are broken by peer id where diamond-types uses
     // the agent's name: numbering peers in name order makes most of them agree.
     let agents = blocks.iter().map(|block| block.agent + 1).max().unwrap_or(0);
     let mut by_name: Vec<usize> = (0..agents).collect();
-    by_name.sort_by_key(|&agent| dt.get_agent_name(agent as _));
+    by_name.sort_by_key(|&agent| &history.agents[agent]);
     let mut rank = vec![0u64; agents];
     for (place, &agent) in by_name.iter().enumerate() {
         rank[agent] = place as u64 + 1;
