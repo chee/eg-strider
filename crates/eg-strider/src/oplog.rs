@@ -344,7 +344,7 @@ impl OpLog {
     }
 
     /// Records that `agent` made the `len` events from `event`, numbering them from `sequence_number` or,
-    /// without one, from where its last left offset.
+    /// without one, from where its last left off.
     fn assign(&mut self, agent: AgentId, sequence_number: Option<SequenceNumber>, event: EventId, len: u32) {
         let sequence_number = sequence_number.unwrap_or(self.next_sequence_numbers[agent as usize]);
         let next = &mut self.next_sequence_numbers[agent as usize];

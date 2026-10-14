@@ -13,7 +13,7 @@
 //!
 //! - a number is a LEB128 varint, and a column is its length in bytes and then its values;
 //! - a column whose values mostly repeat is stored as runs: a value, then how many times;
-//! - an op's position is stored as how far it is from where the op before left offset, and a
+//! - an op's position is stored as how far it is from where the op before left off, and a
 //!   parent as how far back it is;
 //! - the columns of a block, the text it inserts and the document's text are each compressed
 //!   with Zstandard.
@@ -286,7 +286,7 @@ impl OpLog {
         column(&mut columns, |out| ops().filter(wide).for_each(|op| number(out, bytes(&op))));
 
         // The graph, as chains of events: how long each is, and its first event's parents as
-        // how far back they are. A chain cut offset from its start by the block follows the event
+        // how far back they are. A chain cut off from its start by the block follows the event
         // before it, which is stored as one parent fewer than none.
         let blocks = self.graph.blocks();
         let chains = || (blocks.containing(events.start)..blocks.len()).take_while(|&block| blocks.start(block) < events.end);
@@ -399,7 +399,7 @@ impl OpLog {
     }
 }
 
-/// Returns where an op leaves offset: after what it inserted, or where it deleted from. The
+/// Returns where an op leaves off: after what it inserted, or where it deleted from. The
 /// next op is most often right there or a little before.
 fn after(kind: OpKind, pos: u32, len: u32) -> u32 {
     match kind {

@@ -2,7 +2,7 @@
 //! the region's inserted text as spans (the items of a sequence CRDT such as Yjs or Fugue,
 //! with left and right origins) in a B+ tree that measures them in two versions: the one an
 //! event was made in (prepare) and the merged document (effect). Merging an event means
-//! finding its position in the first and reading it offset in the second. A flat array maps each
+//! finding its position in the first and reading it off in the second. A flat array maps each
 //! event to its span or its delete target, for moving the prepare version.
 
 use crate::oplog::OpKind;
