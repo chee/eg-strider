@@ -3,7 +3,7 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
 use std::ops::Range;
-use strider_graph::{Graph, Segment};
+use strider_graph::{BlockId, Graph, Segment};
 
 /// The analysis done in one go over the whole history, as it was before it became incremental.
 struct Batch {
@@ -142,12 +142,12 @@ impl Cut {
                 while end < blocks && critical(end + 1) {
                     end += 1;
                 }
-                segments.push(Segment::Linear(i..end));
+                segments.push(Segment::Linear(i as BlockId..end as BlockId));
             } else {
                 while !critical(end) {
                     end += 1;
                 }
-                segments.push(Segment::Region(i..end));
+                segments.push(Segment::Region(i as BlockId..end as BlockId));
             }
             i = end;
         }
@@ -189,10 +189,10 @@ proptest! {
             }
 
             let (cut, blocks) = (batch.blocks(), graph.blocks());
-            prop_assert_eq!(blocks.len(), cut.len());
+            prop_assert_eq!(blocks.len() as usize, cut.len());
             for block in 0..cut.len() {
-                prop_assert_eq!(blocks.events(block), cut.start[block]..cut.start[block + 1]);
-                prop_assert_eq!(blocks.parents(block), cut.parents(block));
+                prop_assert_eq!(blocks.events(block as BlockId), cut.start[block]..cut.start[block + 1]);
+                prop_assert_eq!(blocks.parents(block as BlockId), cut.parents(block));
             }
             prop_assert_eq!(graph.segments(), cut.segments());
         }

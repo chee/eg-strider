@@ -235,7 +235,7 @@ impl Shifter {
         for (i, block) in (region.start..region.end).enumerate() {
             let viewer = Viewer { block: i as BlockInRegion, seen: &seen[i * words..][..words], stable: &stable[i * words..][..words] };
             document.begin(block..block + 1);
-            for op in log.ops(first_op[block]..first_op[block + 1], blocks.events(block)) {
+            for op in log.ops(first_op[block as usize]..first_op[block as usize + 1], blocks.events(block)) {
                 let at = match op.kind {
                     OpKind::Ins => clusters.insert(&viewer, op.pos as i64, op.len as i64),
                     OpKind::Del => clusters.remove(&viewer, op.pos as i64, op.len as i64),
@@ -265,7 +265,7 @@ impl Shifter {
         if words == 1 {
             // Most regions are this small: each set is one word, with no slices to cut.
             for i in 0..count {
-                let inside = blocks.parents(region.start + i).iter().filter_map(|&p| (p as usize).checked_sub(region.start));
+                let inside = blocks.parents(region.start + i as BlockId).iter().filter_map(|&p| p.checked_sub(region.start)).map(|p| p as usize);
                 let seen = inside.fold(1 << i, |seen, parent| seen | self.seen[parent]);
                 self.seen.push(seen);
             }
@@ -282,7 +282,7 @@ impl Shifter {
             let (earlier, own) = self.seen.split_at_mut(i * words);
             let own = &mut own[..words];
             // Parents from before the region are before a critical version: all have them.
-            for parent in blocks.parents(region.start + i).iter().filter_map(|&p| (p as usize).checked_sub(region.start)) {
+            for parent in blocks.parents(region.start + i as BlockId).iter().filter_map(|&p| p.checked_sub(region.start)).map(|p| p as usize) {
                 for (word, theirs) in own.iter_mut().zip(&earlier[parent * words..][..words]) {
                     *word |= theirs;
                 }

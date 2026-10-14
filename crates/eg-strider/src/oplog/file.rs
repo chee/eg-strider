@@ -177,7 +177,7 @@ impl OpLog {
         self.totals = (self.totals.0 + later.totals.0, self.totals.1 + later.totals.1);
         let blocks = later.graph.blocks();
         for block in 0..blocks.len() {
-            let parents: Vec<EventId> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
+            let parents: Vec<EventId> = blocks.parents(block).iter().map(|&parent| blocks.start(parent + 1) - 1).collect();
             // A block of the later events with no block for a parent followed the old heads.
             let parents = if parents.is_empty() { &packed.heads } else { &parents };
             self.graph.push(parents, blocks.events(block).len() as u32);
@@ -193,7 +193,7 @@ impl OpLog {
     /// a chain with no block before it are the heads of the history still as it was saved.
     fn parents_of(&self, block: BlockId) -> Vec<EventId> {
         let blocks = self.graph.blocks();
-        let parents: Vec<EventId> = blocks.parents(block).iter().map(|&parent| blocks.start(parent as usize + 1) - 1).collect();
+        let parents: Vec<EventId> = blocks.parents(block).iter().map(|&parent| blocks.start(parent + 1) - 1).collect();
         match &self.packed {
             Some(packed) if parents.is_empty() => packed.heads.clone(),
             _ => parents,
@@ -285,7 +285,7 @@ impl OpLog {
         // before it, which is stored as one parent fewer than none.
         let blocks = self.graph.blocks();
         let chains = || (blocks.containing(events.start)..blocks.len()).take_while(|&block| blocks.start(block) < events.end);
-        let whole = |block: &usize| blocks.start(*block) >= events.start;
+        let whole = |block: &BlockId| blocks.start(*block) >= events.start;
         column(&mut columns, |out| {
             number(out, chains().count());
             for block in chains() {

@@ -18,14 +18,11 @@ use std::ops::Range;
 pub type EventId = u32;
 
 /// A block's place in the graph's list of blocks, which is the order of their first events.
-pub type BlockId = usize;
+/// Every block holds at least one event, so there are never more blocks than events.
+pub type BlockId = u32;
 
-/// A [`BlockId`] kept in four bytes, for the lists that hold one for every block. Converting
-/// either way loses nothing: every block holds at least one event, so there are never more
-/// blocks than events, and events are numbered in a `u32`.
-pub type CompactBlockId = u32;
-
-const _: () = assert!(usize::BITS >= CompactBlockId::BITS, "a CompactBlockId must fit in a BlockId");
+// Numbers kept in a u32 index lists, as a usize.
+const _: () = assert!(usize::BITS >= u32::BITS, "a u32 must fit in a usize");
 
 /// An append-only event graph, kept cut into blocks and with its critical versions known.
 #[derive(Default)]
@@ -37,9 +34,9 @@ pub struct Graph {
     /// history: exact when the block has seen everything before it, else a lower bound.
     seen: Vec<EventId>,
     /// The blocks that start at a critical version, in order.
-    critical: Vec<CompactBlockId>,
+    critical: Vec<BlockId>,
     /// Reused while adding events: the blocks their parents end.
-    ends: Vec<CompactBlockId>,
+    ends: Vec<BlockId>,
 }
 
 impl Graph {
@@ -62,7 +59,7 @@ impl Graph {
 
     /// Returns the number of events.
     pub fn len(&self) -> EventId {
-        self.blocks.start[self.blocks.len()]
+        self.blocks.start(self.blocks.len())
     }
 
     /// Tells whether the graph has no events.
@@ -89,8 +86,8 @@ impl Graph {
             return false;
         }
         let block = self.blocks.containing(at);
-        let critical = |block: BlockId| self.critical.binary_search(&(block as CompactBlockId)).is_ok();
-        if self.blocks.start[block] == at {
+        let critical = |block: BlockId| self.critical.binary_search(&block).is_ok();
+        if self.blocks.start(block) == at {
             return !critical(block);
         }
         // Partway along a block, every later event has what comes before unless something is
@@ -142,15 +139,15 @@ impl Graph {
         // Parents from before the graph begins are in every event's history, and name no block.
         for &parent in parents.iter().filter(|&&parent| parent >= floor) {
             let block = self.blocks.containing(parent);
-            if parent + 1 < self.blocks.start[block + 1] {
+            if parent + 1 < self.blocks.start(block + 1) {
                 self.split(block, parent + 1);
             }
-            ends.push(block as CompactBlockId);
+            ends.push(block);
         }
         // An event that merges every head has seen all there is, and leaves no other head.
         let merges_all = parents == self.heads;
-        let seen = if merges_all { start } else { ends.iter().map(|&block| self.seen_after(block as usize)).max().unwrap_or(floor) };
-        let new = self.blocks.len() as CompactBlockId;
+        let seen = if merges_all { start } else { ends.iter().map(|&block| self.seen_after(block)).max().unwrap_or(floor) };
+        let new = self.blocks.len();
         self.blocks.parents.extend_from_slice(&ends);
         self.blocks.parent_start.push(self.blocks.parents.len() as u32);
         self.blocks.start.push(end);
@@ -159,7 +156,7 @@ impl Graph {
 
         // A version is critical only while every later block has seen all that came before
         // it.
-        while self.critical.last().is_some_and(|&block| self.blocks.start[block as usize] > seen) {
+        while self.critical.last().is_some_and(|&block| self.blocks.start(block) > seen) {
             self.critical.pop();
         }
         if seen == start {
@@ -177,36 +174,37 @@ impl Graph {
     /// Returns how many events from the start of history are all in the history of a
     /// block's last event.
     fn seen_after(&self, block: BlockId) -> EventId {
-        if self.seen[block] == self.blocks.start[block] {
-            self.blocks.start[block + 1]
+        let i = block as usize;
+        if self.seen[i] == self.blocks.start[i] {
+            self.blocks.start[i + 1]
         } else {
-            self.seen[block]
+            self.seen[i]
         }
     }
 
     /// Splits a block so that a new one starts at event `at`.
     fn split(&mut self, block: BlockId, at: EventId) {
         let blocks = &mut self.blocks;
-        let (first, second) = (block as CompactBlockId, block as CompactBlockId + 1);
+        let (first, second, i) = (block, block + 1, block as usize);
         // Later blocks named this one for its last event, which the second part now has;
         // and every block after it moves up one.
-        let later = blocks.parent_start[block + 1] as usize;
+        let later = blocks.parent_start[i + 1] as usize;
         for parent in &mut blocks.parents[later..] {
-            *parent += u32::from(*parent >= first);
+            *parent += BlockId::from(*parent >= first);
         }
         blocks.parents.insert(later, first);
-        blocks.start.insert(block + 1, at);
-        blocks.parent_start.insert(block + 1, later as u32);
-        for start in &mut blocks.parent_start[block + 2..] {
+        blocks.start.insert(i + 1, at);
+        blocks.parent_start.insert(i + 1, later as u32);
+        for start in &mut blocks.parent_start[i + 2..] {
             *start += 1;
         }
-        self.seen.insert(block + 1, if self.seen[block] == blocks.start[block] { at } else { self.seen[block] });
+        self.seen.insert(i + 1, if self.seen[i] == blocks.start[i] { at } else { self.seen[i] });
 
         let moved = self.critical.partition_point(|&critical| critical <= first);
         for critical in &mut self.critical[moved..] {
             *critical += 1;
         }
-        if self.seen[block + 1..].iter().all(|&seen| seen >= at) {
+        if self.seen[i + 1..].iter().all(|&seen| seen >= at) {
             self.critical.insert(moved, second);
         }
     }
@@ -215,15 +213,15 @@ impl Graph {
     /// every earlier event in its history.
     pub fn segments(&self) -> Vec<Segment> {
         let blocks = self.blocks.len();
-        let next = |i: usize| self.critical.get(i + 1).map_or(blocks, |&block| block as usize);
+        let next = |i: usize| self.critical.get(i + 1).copied().unwrap_or(blocks);
         let mut segments = Vec::new();
         let mut i = 0;
         while i < self.critical.len() {
-            let from = self.critical[i] as usize;
+            let from = self.critical[i];
             if next(i) == from + 1 {
                 // Critical on both sides: nothing is concurrent with this block. Take
                 // every block that follows in the same way.
-                while i + 1 < self.critical.len() && next(i + 1) == self.critical[i + 1] as usize + 1 {
+                while i + 1 < self.critical.len() && next(i + 1) == self.critical[i + 1] + 1 {
                     i += 1;
                 }
                 segments.push(Segment::Linear(from..next(i)));
@@ -243,7 +241,7 @@ pub struct Blocks {
     start: Vec<EventId>,
     parent_start: Vec<u32>,
     /// Each block's parents: the blocks that its first event's parents end.
-    parents: Vec<CompactBlockId>,
+    parents: Vec<BlockId>,
 }
 
 impl Default for Blocks {
@@ -271,9 +269,9 @@ impl Segment {
 }
 
 impl Blocks {
-    /// Returns the number of blocks.
-    pub fn len(&self) -> usize {
-        self.parent_start.len() - 1
+    /// Returns the number of blocks, which is the number of the block after the last.
+    pub fn len(&self) -> BlockId {
+        (self.parent_start.len() - 1) as BlockId
     }
 
     /// Tells whether there are no blocks.
@@ -284,28 +282,29 @@ impl Blocks {
     /// Returns the first event of a block. `block` may be one past the last block, giving the total
     /// number of events.
     pub fn start(&self, block: BlockId) -> EventId {
-        self.start[block]
+        self.start[block as usize]
     }
 
     /// Returns the events in a block.
     pub fn events(&self, block: BlockId) -> Range<EventId> {
-        self.start[block]..self.start[block + 1]
+        self.start(block)..self.start(block + 1)
     }
 
     /// Returns the blocks that a block's first event has as parents.
-    pub fn parents(&self, block: BlockId) -> &[CompactBlockId] {
-        &self.parents[self.parent_start[block] as usize..self.parent_start[block + 1] as usize]
+    pub fn parents(&self, block: BlockId) -> &[BlockId] {
+        let i = block as usize;
+        &self.parents[self.parent_start[i] as usize..self.parent_start[i + 1] as usize]
     }
 
     /// Finds the block holding an event.
     pub fn containing(&self, event: EventId) -> BlockId {
         // Parents are mostly recent events, so the search widens backwards from the last block.
-        let (mut end, mut step) = (self.len(), 1);
+        let (mut end, mut step) = (self.len() as usize, 1);
         while step < end && self.start[end - step] > event {
             end -= step;
             step *= 2;
         }
         let from = end.saturating_sub(step);
-        from + self.start[from..end].partition_point(|&start| start <= event) - 1
+        (from + self.start[from..end].partition_point(|&start| start <= event) - 1) as BlockId
     }
 }

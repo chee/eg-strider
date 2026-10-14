@@ -1,4 +1,4 @@
-use strider_graph::{Graph, Move, Segment, Walker};
+use strider_graph::{BlockId, Graph, Move, Segment, Walker};
 use proptest::prelude::*;
 use proptest::sample::Index;
 
@@ -45,7 +45,7 @@ fn histories(graph: &Graph) -> Vec<Vec<bool>> {
     for block in 0..blocks.len() {
         let mut seen = vec![false; graph.len() as usize];
         for &p in blocks.parents(block) {
-            let last = blocks.events(p as usize).end as usize - 1;
+            let last = blocks.events(p).end as usize - 1;
             seen[last] = true;
             for (s, &a) in seen.iter_mut().zip(&of_event[last]) {
                 *s |= a;
@@ -75,7 +75,7 @@ fn reduce(graph: &Graph, version: &[u32]) -> Vec<u32> {
 fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_quarters: usize) {
     let blocks = graph.blocks();
     let histories = histories(graph);
-    let mut applied = vec![false; blocks.len()];
+    let mut applied = vec![false; blocks.len() as usize];
     for segment in graph.segments() {
         let Segment::Region(region) = segment else { continue };
         let known = region.len() * known_quarters / 4;
@@ -83,8 +83,8 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_q
         let mut visited = known;
         let base = blocks.start(region.start) as usize;
         let mut version = vec![false; graph.len() as usize];
-        version[..blocks.start(region.start + known) as usize].fill(true);
-        applied[region.start..region.start + known].fill(true);
+        version[..blocks.start(region.start + known as BlockId) as usize].fill(true);
+        applied[region.start as usize..region.start as usize + known].fill(true);
 
         walker.walk(blocks, &region, known, first, |step| match step {
             Move::Retreat(stretch) => {
@@ -98,8 +98,8 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_q
                 }
             }
             Move::Apply(block) => {
-                assert!(!std::mem::replace(&mut applied[block], true), "block applied twice");
-                assert!(visited >= first || block < region.start + first, "block {block} applied before the first {first}");
+                assert!(!std::mem::replace(&mut applied[block as usize], true), "block applied twice");
+                assert!(visited >= first || block < region.start + first as BlockId, "block {block} applied before the first {first}");
                 visited += 1;
                 let first = blocks.events(block).start as usize;
                 assert_eq!(version[base..], histories[first][base..], "wrong version for block {block}");
@@ -108,7 +108,7 @@ fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_q
                 }
             }
         });
-        assert!(applied[region.start..region.end].iter().all(|&a| a), "a block was never applied");
+        assert!(applied[region.start as usize..region.end as usize].iter().all(|&a| a), "a block was never applied");
     }
 }
 

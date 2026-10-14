@@ -84,8 +84,8 @@ impl RegionGraph {
         let RegionGraph { parents, children } = self;
         parents.clear();
         for block in region.start..region.end {
-            let inside = blocks.parents(block).iter().filter_map(|&p| (p as usize).checked_sub(region.start));
-            parents.items.extend(inside.map(|p| p as u32));
+            let inside = blocks.parents(block).iter().filter_map(|&p| p.checked_sub(region.start));
+            parents.items.extend(inside);
             parents.end_row();
         }
         let edges = (0..region.len()).flat_map(|block| parents.row(block).iter().map(move |&p| (p, block as u32)));
@@ -148,7 +148,7 @@ impl Chains {
             let mut events = 0;
             events_before.items.push(0);
             for &member in members.row(of_chain) {
-                events += blocks.events(region.start + member as usize).len() as u32;
+                events += blocks.events(region.start + member).len() as u32;
                 events_before.items.push(events);
             }
             events_before.end_row();
@@ -227,7 +227,7 @@ impl Schedule {
         self.cover.clear();
         self.cover.resize(count, 0);
         for block in (0..count).rev() {
-            let events = blocks.events(region.start + block);
+            let events = blocks.events(region.start + block as BlockId);
             let low = (events.start - from) / per_bit;
             let high = (events.end - from).div_ceil(per_bit);
             let mut cover = (1u128 << high) - (1u128 << low);
@@ -317,7 +317,7 @@ impl Walker {
         schedule.build(graph, blocks, region, known, first);
         chains.start(known, current);
 
-        let stretch = |first: u32, last: u32| region.start + first as usize..region.start + last as usize + 1;
+        let stretch = |first: u32, last: u32| region.start + first..region.start + last + 1;
         let mut last = None;
         while let Some(block) = schedule.take_nearest(graph, chains, current, last) {
             for (chain, &now) in current.iter().enumerate() {
@@ -328,7 +328,7 @@ impl Walker {
                 let returning = chains.between(chain, now..chains.seen(block, chain));
                 each_stretch(returning, |first, last| visit(Move::Advance(stretch(first, last))));
             }
-            visit(Move::Apply(region.start + block));
+            visit(Move::Apply(region.start + block as BlockId));
             chains.arrive(block, current);
             schedule.visited(graph, block);
             last = Some(block as u32);
