@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
-use strider_graph::{walk, CausalGraph, EventRunIndex, HistoryRange, WalkScratch, WalkStep};
+use strider_graph::{walk, CausalGraph, EventRunIndex, HistoryRange, WalkStep};
 
 /// What one of several replicas does next.
 #[derive(Clone, Debug)]
@@ -71,7 +71,7 @@ fn reduce(graph: &CausalGraph, version: &[u32]) -> Vec<u32> {
 /// Follows the steps of a walk on plain sets, checking that every run is applied exactly
 /// once, that the prepare version is then exactly the run's history, and that the runs
 /// to visit first are.
-fn check_walk(graph: &CausalGraph, scratch: &mut WalkScratch, known_quarters: usize, first_quarters: usize) {
+fn check_walk(graph: &CausalGraph, known_quarters: usize, first_quarters: usize) {
     let runs = graph.runs();
     let histories = histories(graph);
     let mut applied = vec![false; runs.len() as usize];
@@ -85,7 +85,7 @@ fn check_walk(graph: &CausalGraph, scratch: &mut WalkScratch, known_quarters: us
         version[..runs.start(range.start + known as EventRunIndex) as usize].fill(true);
         applied[range.start as usize..range.start as usize + known].fill(true);
 
-        walk(scratch, runs, &range, known, first, |step| match step {
+        walk(runs, &range, known, first, |step| match step {
             WalkStep::Retreat(moved) => {
                 for e in runs.start(moved.start)..runs.start(moved.end) {
                     assert!(std::mem::replace(&mut version[e as usize], false), "retreated an event that was not there");
@@ -115,6 +115,6 @@ proptest! {
     #[test]
     fn every_block_is_applied_at_its_parents_version(replicas in 2usize..6, steps in steps(), known_quarters in 0usize..4, first_quarters in 0usize..5) {
         let graph = graph_of(replicas, &steps);
-        check_walk(&graph, &mut WalkScratch::default(), known_quarters, first_quarters);
+        check_walk(&graph, known_quarters, first_quarters);
     }
 }

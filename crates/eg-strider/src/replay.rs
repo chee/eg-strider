@@ -2,7 +2,7 @@ use crate::crdt_records::{CrdtRecords, DeleteTargets, RecordId};
 use crate::oplog::{ByteRange, OpLog, OperationKind, OperationRunIndex, OperationRunSlice};
 use crate::transform::Transform;
 use std::ops::Range;
-use strider_graph::{walk, EventIndex, EventRunIndex, HistoryRange, WalkScratch, WalkStep};
+use strider_graph::{walk, EventIndex, EventRunIndex, HistoryRange, WalkStep};
 use strider_text::PieceTable;
 
 /// Where merging put each operation of the concurrent ranges: the paper's transformed
@@ -102,7 +102,6 @@ pub(crate) struct DocumentState {
 #[derive(Default)]
 struct MergeScratch {
     records: CrdtRecords,
-    walk: WalkScratch,
     transform: Transform,
 }
 
@@ -306,7 +305,7 @@ fn replay_concurrent_range(
     scratch: &mut MergeScratch,
     transformed: &mut TransformedOperations,
 ) {
-    let MergeScratch { records, walk: walk_scratch, transform } = scratch;
+    let MergeScratch { records, transform } = scratch;
     // Nothing resolved: the range has not needed the CRDT records so far. See whether it does now.
     if resolved.events == 0 && transform.try_merge(log, log.graph.runs(), &plan.first_op_of_run, range, transformed) {
         return;
@@ -361,7 +360,7 @@ fn replay_concurrent_range(
 
     // What the document holds is gone through before anything else, so that where the rest goes
     // is a position in that document.
-    walk(walk_scratch, runs, range, known_runs, (held_until - range.start) as usize, |step| match step {
+    walk(runs, range, known_runs, (held_until - range.start) as usize, |step| match step {
         WalkStep::Retreat(run_range) => {
             for op in plan.ops(log, &run_range) {
                 records.retreat(op.kind, op.first_event - start..op.first_event - start + op.len);

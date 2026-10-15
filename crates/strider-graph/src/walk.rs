@@ -14,18 +14,15 @@ pub enum WalkStep {
 }
 
 /// Lists of lists stored flat: row `i` is `items[start[i]..start[i + 1]]`.
-#[derive(Default)]
 struct JaggedArray {
     start: Vec<u32>,
     items: Vec<u32>,
 }
 
 impl JaggedArray {
-    /// Empties the list, leaving one open row to push to.
-    fn clear(&mut self) {
-        self.start.clear();
-        self.start.push(0);
-        self.items.clear();
+    /// Creates an empty list, with one open row to push to.
+    fn new() -> Self {
+        JaggedArray { start: vec![0], items: Vec::new() }
     }
 
     /// Closes the open row and opens the next.
@@ -43,32 +40,29 @@ impl JaggedArray {
         &self.items[self.start[i] as usize..self.start[i + 1] as usize]
     }
 
-    /// Rebuilds the list as `rows` rows from `(row, item)` pairs, keeping each row's items in
-    /// order.
-    fn group(&mut self, rows: usize, pairs: impl Iterator<Item = (u32, u32)> + Clone) {
-        self.start.clear();
-        self.start.resize(rows + 1, 0);
+    /// Makes a list of `rows` rows from `(row, item)` pairs, keeping each row's items in order.
+    fn grouped(rows: usize, pairs: impl Iterator<Item = (u32, u32)> + Clone) -> Self {
+        let mut start = vec![0; rows + 1];
         for (row, _) in pairs.clone() {
-            self.start[row as usize + 1] += 1;
+            start[row as usize + 1] += 1;
         }
         for i in 1..=rows {
-            self.start[i] += self.start[i - 1];
+            start[i] += start[i - 1];
         }
-        self.items.clear();
-        self.items.resize(self.start[rows] as usize, 0);
+        let mut items = vec![0; start[rows] as usize];
         for (row, item) in pairs {
-            self.items[self.start[row as usize] as usize] = item;
-            self.start[row as usize] += 1;
+            items[start[row as usize] as usize] = item;
+            start[row as usize] += 1;
         }
         // Each start has moved to its row's end, which is where the next row starts.
-        self.start.rotate_right(1);
-        self.start[0] = 0;
+        start.rotate_right(1);
+        start[0] = 0;
+        JaggedArray { start, items }
     }
 }
 
 /// A concurrent range's runs split into chains, each run having the one before it in its
 /// history. A version is then a prefix of each chain.
-#[derive(Default)]
 struct ChainDecomposition {
     /// Each run's chain, and its place along it.
     chain: Vec<u32>,
@@ -85,11 +79,8 @@ struct ChainDecomposition {
 impl ChainDecomposition {
     /// Splits the runs into chains and works out each run's history. A run joins a chain it has
     /// seen all of, if any.
-    fn build(&mut self, parents: &JaggedArray, runs: &EventRuns, range: &Range<EventRunIndex>) {
-        let ChainDecomposition { chain, place, members, events_before, version_vectors } = self;
-        chain.clear();
-        place.clear();
-        version_vectors.clear();
+    fn new(parents: &JaggedArray, runs: &EventRuns, range: &Range<EventRunIndex>) -> Self {
+        let (mut chain, mut place, mut version_vectors) = (Vec::new(), Vec::new(), JaggedArray::new());
         let mut lens: Vec<u32> = Vec::new();
         for run in 0..range.len() {
             let from = version_vectors.items.len();
@@ -115,8 +106,8 @@ impl ChainDecomposition {
             lens[joined] += 1;
         }
 
-        members.group(lens.len(), chain.iter().copied().zip(0..));
-        events_before.clear();
+        let members = JaggedArray::grouped(lens.len(), chain.iter().copied().zip(0..));
+        let mut events_before = JaggedArray::new();
         for of_chain in 0..members.len() {
             let mut events = 0;
             events_before.items.push(0);
@@ -126,6 +117,7 @@ impl ChainDecomposition {
             }
             events_before.end_row();
         }
+        ChainDecomposition { chain, place, members, events_before, version_vectors }
     }
 
     /// Returns how many runs along `chain` are in a run's history.
@@ -152,13 +144,13 @@ impl ChainDecomposition {
         events
     }
 
-    /// Sets `current` to the version holding the first `known` runs.
-    fn start(&self, known: usize, current: &mut Vec<u32>) {
-        current.clear();
-        current.resize(self.members.len(), 0);
+    /// Returns the version holding the first `known` runs.
+    fn start(&self, known: usize) -> Vec<u32> {
+        let mut version = vec![0; self.members.len()];
         for run in 0..known {
-            current[self.chain[run] as usize] = self.place[run] + 1;
+            version[self.chain[run] as usize] = self.place[run] + 1;
         }
+        version
     }
 
     /// Sets `current` to a run's history plus the run itself.
@@ -176,7 +168,6 @@ const CANDIDATES: usize = 64;
 
 /// A topological sort of a concurrent range's runs, numbered from 0 within it: the edges
 /// between them, and which can be visited next.
-#[derive(Default)]
 struct TopologicalSort {
     parents: JaggedArray,
     children: JaggedArray,
@@ -194,50 +185,44 @@ struct TopologicalSort {
 }
 
 impl TopologicalSort {
-    /// Records the edges between the range's runs.
-    fn build_edges(&mut self, runs: &EventRuns, range: &Range<EventRunIndex>) {
-        let TopologicalSort { parents, children, .. } = self;
-        parents.clear();
+    /// Records the edges between the range's runs, and starts with the first `known` runs
+    /// visited and the rest of the first `first` to visit before any other.
+    fn new(runs: &EventRuns, range: &Range<EventRunIndex>, known: usize, first: usize) -> Self {
+        let count = range.len();
+        let mut parents = JaggedArray::new();
         for run in range.start..range.end {
             let inside = runs.parents(run).iter().filter_map(|&p| p.checked_sub(range.start));
             parents.items.extend(inside);
             parents.end_row();
         }
-        let edges = (0..range.len()).flat_map(|run| parents.row(run).iter().map(move |&p| (p, run as u32)));
-        children.group(range.len(), edges);
-    }
+        let edges = (0..count).flat_map(|run| parents.row(run).iter().map(move |&p| (p, run as u32)));
+        let children = JaggedArray::grouped(count, edges);
 
-    /// Starts with the first `known` runs visited, and the rest of the first `first` to visit
-    /// before any other.
-    fn start(&mut self, runs: &EventRuns, range: &Range<EventRunIndex>, known: usize, first: usize) {
-        let count = range.len();
         let (from, to) = (runs.start(range.start), runs.start(range.end));
         let per_bit = (to - from).div_ceil(127).max(1);
-        self.cover.clear();
-        self.cover.resize(count, 0);
+        let mut cover = vec![0u128; count];
         for run in (0..count).rev() {
             let events = runs.events(range.start + run as EventRunIndex);
             let low = (events.start - from) / per_bit;
             let high = (events.end - from).div_ceil(per_bit);
-            let mut cover = (1u128 << high) - (1u128 << low);
-            for &child in self.children.row(run) {
-                cover |= self.cover[child as usize];
+            let mut covered = (1u128 << high) - (1u128 << low);
+            for &child in children.row(run) {
+                covered |= cover[child as usize];
             }
-            self.cover[run] = cover;
+            cover[run] = covered;
         }
 
-        self.unvisited_parents.clear();
-        self.ready.clear();
-        self.first = known..first.max(known);
-        self.first_left = self.first.len();
+        let first = known..first.max(known);
+        let first_left = first.len();
+        let (mut unvisited_parents, mut ready) = (Vec::with_capacity(count), Vec::new());
         for run in 0..count {
-            let parents = self.parents.row(run).iter().filter(|&&p| p as usize >= known).count() as u32;
-            let waiting = parents + u32::from(self.first_left > 0 && run >= self.first.end);
-            self.unvisited_parents.push(waiting);
+            let waiting = parents.row(run).iter().filter(|&&p| p as usize >= known).count() as u32 + u32::from(first_left > 0 && run >= first.end);
+            unvisited_parents.push(waiting);
             if waiting == 0 && run >= known {
-                self.ready.push(run as u32);
+                ready.push(run as u32);
             }
         }
+        TopologicalSort { parents, children, cover, unvisited_parents, ready, first, first_left }
     }
 
     /// Takes the ready run nearest version `current`, preferring a child of the `last` run
@@ -279,30 +264,20 @@ impl TopologicalSort {
     }
 }
 
-/// Space that walks reuse, so that walking many concurrent ranges allocates little.
-#[derive(Default)]
-pub struct WalkScratch {
-    chains: ChainDecomposition,
-    sort: TopologicalSort,
-    /// The prepare version: how far along each chain it reaches.
-    prepare_version: Vec<u32>,
-}
-
 /// Walks a concurrent range, which lies between two critical versions, calling `visit` with
 /// each step: the order its runs are merged in. Moving the prepare version costs time per event
 /// moved, so a topological sort takes, among the ready runs, the one nearest the current
 /// version, held as how far along each chain of runs it reaches. The first `known` runs start
 /// in the prepare version, and the rest of the first `first` are visited before any other.
-pub fn walk(scratch: &mut WalkScratch, runs: &EventRuns, range: &Range<EventRunIndex>, known: usize, first: usize, mut visit: impl FnMut(WalkStep)) {
-    let WalkScratch { chains, sort, prepare_version } = scratch;
-    sort.build_edges(runs, range);
-    chains.build(&sort.parents, runs, range);
-    sort.start(runs, range, known, first);
-    chains.start(known, prepare_version);
+pub fn walk(runs: &EventRuns, range: &Range<EventRunIndex>, known: usize, first: usize, mut visit: impl FnMut(WalkStep)) {
+    let mut sort = TopologicalSort::new(runs, range, known, first);
+    let chains = ChainDecomposition::new(&sort.parents, runs, range);
+    // The prepare version: how far along each chain it reaches.
+    let mut prepare_version = chains.start(known);
 
     let in_graph = |first: u32, last: u32| range.start + first..range.start + last + 1;
     let mut last = None;
-    while let Some(run) = sort.take_nearest(chains, prepare_version, last) {
+    while let Some(run) = sort.take_nearest(&chains, &prepare_version, last) {
         for (chain, &now) in prepare_version.iter().enumerate() {
             let leaving = chains.between(chain, chains.history_along(run, chain)..now);
             each_consecutive_range(leaving, |first, last| visit(WalkStep::Retreat(in_graph(first, last))));
@@ -312,7 +287,7 @@ pub fn walk(scratch: &mut WalkScratch, runs: &EventRuns, range: &Range<EventRunI
             each_consecutive_range(returning, |first, last| visit(WalkStep::Advance(in_graph(first, last))));
         }
         visit(WalkStep::Apply(range.start + run as EventRunIndex));
-        chains.arrive(run, prepare_version);
+        chains.arrive(run, &mut prepare_version);
         sort.visited(run);
         last = Some(run as u32);
     }

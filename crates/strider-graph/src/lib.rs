@@ -1,6 +1,6 @@
 mod walk;
 
-pub use walk::{walk, WalkScratch, WalkStep};
+pub use walk::{walk, WalkStep};
 
 use std::ops::Range;
 
