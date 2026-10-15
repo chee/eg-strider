@@ -36,6 +36,7 @@ pub enum Edit {
 }
 
 /// A run of consecutive events of one kind, in 16 bytes since a log holds so many.
+#[derive(Clone, Copy)]
 struct Op {
     first_event: EventIndex,
     /// The number of events, up to [`MAX_OP_LEN`], with [`DELETE`], [`BACKWARD`] and [`TRIMS`]
@@ -85,6 +86,35 @@ impl Op {
 
     fn trims(&self) -> bool {
         self.len_and_flags & TRIMS != 0
+    }
+
+    /// Takes in `op`, which follows this op, if it carries it on, as typing, holding delete or
+    /// holding backspace does. Returns whether it did.
+    fn join(&mut self, op: Op) -> bool {
+        let (len, kind) = (op.len(), op.kind());
+        if self.kind() != kind || self.len() + len > MAX_OP_LEN {
+            return false;
+        }
+        let carries_on = if kind == OpKind::Ins { self.pos + self.len() == op.pos } else { self.pos == op.pos };
+        if self.forward() && op.forward() && !self.trims() && carries_on {
+            // The flags are above the length, which stays in its bits.
+            self.len_and_flags += len;
+            self.content_end = op.content_end;
+            true
+        } else if kind == OpKind::Del
+            && self.trims() == op.trims()
+            && (self.len() == 1 || !self.forward())
+            && (len == 1 || !op.forward())
+            && op.pos + len == self.pos
+        {
+            // Backspace: a delete that ends where the last began, each removing one character
+            // or already running backwards.
+            self.pos = op.pos;
+            self.len_and_flags = (self.len_and_flags | BACKWARD) + len;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -319,7 +349,10 @@ impl OpLog {
             Edit::Insert { pos, len } => (OpKind::Ins, true, pos, len),
             Edit::Delete { pos, len, backspace } => (OpKind::Del, !backspace, pos, len),
         };
-        let mut follows = event > 0 && parents == [event - 1];
+        // The op being built, which each edit that carries it on is joined into. It is stored
+        // once one does not, so that most edits change nothing in memory.
+        let mut last = if event > 0 && parents == [event - 1] { self.ops.pop() } else { None };
+        let (mut inserted, mut removed) = (0, 0);
         let mut at = self.content.len() as u32;
         self.content.push_str(text);
         let end = u32::try_from(self.content.len()).expect("more inserted text than a u32 counts");
@@ -341,14 +374,24 @@ impl OpLog {
                 }
             };
             let trims = kind == OpKind::Del && open.is_some_and(|(end, left)| pos + len == end && len <= left);
-            let whole = self.store(follows, Op::new(next, len, kind, forward, trims, pos, at + bytes));
+            let op = Op::new(next, len, kind, forward, trims, pos, at + bytes);
+            match kind {
+                OpKind::Ins => inserted += len,
+                OpKind::Del => removed += len,
+            }
+            if !last.as_mut().is_some_and(|last| last.join(op)) {
+                self.ops.extend(last.replace(op));
+            }
+            let whole = last.map_or(len, |last| last.len());
             open = match kind {
                 OpKind::Ins => Some((pos + len, whole)),
                 OpKind::Del if trims => open.map(|(end, left)| (end - len, left - len)),
                 OpKind::Del => None,
             };
-            (at, next, follows) = (at + bytes, next.checked_add(len).expect("more events than a u32 counts"), true);
+            (at, next) = (at + bytes, next.checked_add(len).expect("more events than a u32 counts"));
         }
+        self.ops.extend(last);
+        self.totals = (self.totals.0 + inserted, self.totals.1 + removed);
         debug_assert_eq!(at, end, "the text is not what the inserts put in");
         next - event
     }
@@ -427,49 +470,14 @@ impl OpLog {
         }
     }
 
-    /// Stores an op, merging it into the last op when it carries it on, as typing, holding
-    /// delete or holding backspace does. Returns the length of the op it ends up in.
-    fn store(&mut self, follows: bool, op: Op) -> u32 {
-        let (len, kind) = (op.len(), op.kind());
-        match kind {
-            OpKind::Ins => self.totals.0 += len,
-            OpKind::Del => self.totals.1 += len,
+    /// Stores an op, joining it into the last op when it follows and carries it on.
+    fn store(&mut self, follows: bool, op: Op) {
+        match op.kind() {
+            OpKind::Ins => self.totals.0 += op.len(),
+            OpKind::Del => self.totals.1 += op.len(),
         }
-        match self.ops.last_mut() {
-            Some(o)
-                if follows
-                    && o.kind() == kind
-                    && o.forward()
-                    && op.forward()
-                    && !o.trims()
-                    && o.len() + len <= MAX_OP_LEN
-                    && ((kind == OpKind::Ins && o.pos + o.len() == op.pos) || (kind == OpKind::Del && o.pos == op.pos)) =>
-            {
-                // The flags are above the length, which stays in its bits.
-                o.len_and_flags += len;
-                o.content_end = op.content_end;
-                o.len()
-            }
-            // Backspace: a delete that ends where the last began, each removing one character
-            // or already running backwards.
-            Some(o)
-                if follows
-                    && o.kind() == OpKind::Del
-                    && kind == OpKind::Del
-                    && o.trims() == op.trims()
-                    && (o.len() == 1 || !o.forward())
-                    && (len == 1 || !op.forward())
-                    && o.len() + len <= MAX_OP_LEN
-                    && op.pos + len == o.pos =>
-            {
-                o.pos = op.pos;
-                o.len_and_flags = (o.len_and_flags | BACKWARD) + len;
-                o.len()
-            }
-            _ => {
-                self.ops.push(op);
-                len
-            }
+        if !(follows && self.ops.last_mut().is_some_and(|last| last.join(op))) {
+            self.ops.push(op);
         }
     }
 
