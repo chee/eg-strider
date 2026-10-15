@@ -82,11 +82,11 @@ struct ResolvedOrigins {
     events: u32,
     /// Records, operation run by operation run in log order. An insert: its first character's
     /// left origin, then the right origin all its characters share. A delete: per group of
-    /// consecutive targets, the first and the count, with [`DESCENDING`] if they count down.
+    /// consecutive targets, the first and the count, with [`BACKWARD_TARGETS`] if they count down.
     resolved: Vec<RecordId>,
 }
 
-const DESCENDING: u32 = 1 << 31;
+const BACKWARD_TARGETS: u32 = 1 << 31;
 
 /// The document state with the first `events` events merged, which a replay of the rest starts
 /// from.
@@ -356,9 +356,9 @@ fn replay_concurrent_range(
                     let mut done = 0;
                     while done < op.len {
                         let (first, count) = (next(), next());
-                        let (n, descending) = ((count & !DESCENDING).min(op.len - done), count & DESCENDING != 0);
-                        let record = if descending { first + 1 - n } else { first };
-                        records.delete_with_known_targets(DeleteTargets { first_event: event + done, len: n, record, descending }, |pos, len| {
+                        let (n, backward) = ((count & !BACKWARD_TARGETS).min(op.len - done), count & BACKWARD_TARGETS != 0);
+                        let record = if backward { first + 1 - n } else { first };
+                        records.delete_with_known_targets(DeleteTargets { first_event: event + done, len: n, record, backward }, |pos, len| {
                             transformed.remove(pos, len)
                         });
                         done += n;
@@ -404,7 +404,7 @@ fn replay_concurrent_range(
                 let mut done = 0;
                 while done < op.len {
                     let targets = records.targets_of(event + done, event + op.len);
-                    resolved.resolved.extend([targets.first(), targets.len | if targets.descending { DESCENDING } else { 0 }]);
+                    resolved.resolved.extend([targets.first(), targets.len | if targets.backward { BACKWARD_TARGETS } else { 0 }]);
                     done += targets.len;
                 }
             }
@@ -428,7 +428,7 @@ fn apply(
             transformed.insert(pos, op.len);
         }
         OperationKind::Delete => {
-            records.delete(event, op.pos, op.len, op.forward, |pos, len| transformed.remove(pos, len));
+            records.delete(event, op.pos, op.len, op.backward, |pos, len| transformed.remove(pos, len));
             transformed.end_delete();
         }
     }

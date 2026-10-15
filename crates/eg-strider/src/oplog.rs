@@ -31,8 +31,9 @@ pub(crate) enum OperationKind {
 pub enum Operation {
     /// Inserts the next `len` characters of the run's text at `pos`.
     Insert { pos: u32, len: u32 },
-    /// Deletes the `len` characters at `pos`, the last of them first if `backspace`.
-    Delete { pos: u32, len: u32, backspace: bool },
+    /// Deletes the `len` characters at `pos`, the last of them first if `backward`, as backspace
+    /// does.
+    Delete { pos: u32, len: u32, backward: bool },
 }
 
 /// A run of consecutive events of one kind, in 16 bytes since a log holds so many.
@@ -66,14 +67,14 @@ impl OperationRun {
         first_event: EventIndex,
         len: u32,
         kind: OperationKind,
-        forward: bool,
+        backward: bool,
         deletes_end_of_previous_insert: bool,
         pos: u32,
         inserted_text_end: u32,
     ) -> OperationRun {
         assert!(len <= MAX_OP_LEN, "an edit longer than an op holds");
         let flags = if kind == OperationKind::Delete { DELETE } else { 0 }
-            | if forward { 0 } else { BACKWARD }
+            | if backward { BACKWARD } else { 0 }
             | if deletes_end_of_previous_insert { DELETES_END_OF_PREVIOUS_INSERT } else { 0 };
         OperationRun { first_event, len_and_flags: len | flags, pos, inserted_text_end }
     }
@@ -90,8 +91,8 @@ impl OperationRun {
         }
     }
 
-    fn forward(&self) -> bool {
-        self.len_and_flags & BACKWARD == 0
+    fn backward(&self) -> bool {
+        self.len_and_flags & BACKWARD != 0
     }
 
     fn deletes_end_of_previous_insert(&self) -> bool {
@@ -106,15 +107,15 @@ impl OperationRun {
             return false;
         }
         let carries_on = if kind == OperationKind::Insert { self.pos + self.len() == op.pos } else { self.pos == op.pos };
-        if self.forward() && op.forward() && !self.deletes_end_of_previous_insert() && carries_on {
+        if !self.backward() && !op.backward() && !self.deletes_end_of_previous_insert() && carries_on {
             // The flags are above the length, which stays in its bits.
             self.len_and_flags += len;
             self.inserted_text_end = op.inserted_text_end;
             true
         } else if kind == OperationKind::Delete
             && self.deletes_end_of_previous_insert() == op.deletes_end_of_previous_insert()
-            && (self.len() == 1 || !self.forward())
-            && (len == 1 || !op.forward())
+            && (self.len() == 1 || self.backward())
+            && (len == 1 || op.backward())
             && op.pos + len == self.pos
         {
             // Backspace: a delete that ends where the last began, each removing one character
@@ -142,7 +143,7 @@ pub(crate) struct OperationRunSlice {
     pub first_event: EventIndex,
     pub len: u32,
     pub kind: OperationKind,
-    pub forward: bool,
+    pub backward: bool,
     /// Whether this is a whole delete that trims the insert before it.
     pub deletes_end_of_previous_insert: bool,
     /// Inserts go at `pos`; deletes remove `pos..pos + len`.
@@ -290,27 +291,27 @@ impl OpLog {
     /// Inserts `text` at `pos` in the document as of the current frontier, which never needs
     /// saved history read back.
     pub fn add_insert(&mut self, replica: ReplicaId, pos: usize, text: &str) -> Range<EventIndex> {
-        self.append_events(replica, None, None, OperationKind::Insert, true, pos, text.chars().count(), text)
+        self.append_events(replica, None, None, OperationKind::Insert, false, pos, text.chars().count(), text)
     }
 
     /// Deletes `range` from the document as of the current frontier.
     pub fn add_delete(&mut self, replica: ReplicaId, range: Range<usize>) -> Range<EventIndex> {
-        self.append_events(replica, None, None, OperationKind::Delete, true, range.start, range.len(), "")
+        self.append_events(replica, None, None, OperationKind::Delete, false, range.start, range.len(), "")
     }
 
     /// Inserts `text` at `pos` in the document as of version `parents`, which must be ascending.
     /// Fails only if saved history that this needs read back is damaged.
     pub fn add_insert_at(&mut self, replica: ReplicaId, parents: &[EventIndex], pos: usize, text: &str) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
-        Ok(self.append_events(replica, None, Some(parents), OperationKind::Insert, true, pos, text.chars().count(), text))
+        Ok(self.append_events(replica, None, Some(parents), OperationKind::Insert, false, pos, text.chars().count(), text))
     }
 
     /// Deletes `range` from the document as of version `parents`, which must be ascending.
-    /// `forward` is false for backspace, which removes the last character first. Fails only if
+    /// `backward` is true for backspace, which removes the last character first. Fails only if
     /// saved history that this needs read back is damaged.
-    pub fn add_delete_at(&mut self, replica: ReplicaId, parents: &[EventIndex], range: Range<usize>, forward: bool) -> Result<Range<EventIndex>, Malformed> {
+    pub fn add_delete_at(&mut self, replica: ReplicaId, parents: &[EventIndex], range: Range<usize>, backward: bool) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
-        Ok(self.append_events(replica, None, Some(parents), OperationKind::Delete, forward, range.start, range.len(), ""))
+        Ok(self.append_events(replica, None, Some(parents), OperationKind::Delete, backward, range.start, range.len(), ""))
     }
 
     /// As [`add_insert_at`](Self::add_insert_at), for an event from elsewhere with a fixed
@@ -324,7 +325,7 @@ impl OpLog {
         text: &str,
     ) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
-        Ok(self.append_events(replica, Some(sequence_number), Some(parents), OperationKind::Insert, true, pos, text.chars().count(), text))
+        Ok(self.append_events(replica, Some(sequence_number), Some(parents), OperationKind::Insert, false, pos, text.chars().count(), text))
     }
 
     /// As [`add_delete_at`](Self::add_delete_at), for an event from elsewhere with a fixed
@@ -335,10 +336,10 @@ impl OpLog {
         sequence_number: SequenceNumber,
         parents: &[EventIndex],
         range: Range<usize>,
-        forward: bool,
+        backward: bool,
     ) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
-        Ok(self.append_events(replica, Some(sequence_number), Some(parents), OperationKind::Delete, forward, range.start, range.len(), ""))
+        Ok(self.append_events(replica, Some(sequence_number), Some(parents), OperationKind::Delete, backward, range.start, range.len(), ""))
     }
 
     /// Appends a run of ops by one replica from elsewhere: the first made at `parents`, which must
@@ -370,8 +371,8 @@ impl OpLog {
     #[inline(never)]
     fn append_operations(&mut self, event: EventIndex, parents: &[EventIndex], ops: &[Operation], text: &str) -> u32 {
         let parts = |edit: &Operation| match *edit {
-            Operation::Insert { pos, len } => (OperationKind::Insert, true, pos, len),
-            Operation::Delete { pos, len, backspace } => (OperationKind::Delete, !backspace, pos, len),
+            Operation::Insert { pos, len } => (OperationKind::Insert, false, pos, len),
+            Operation::Delete { pos, len, backward } => (OperationKind::Delete, backward, pos, len),
         };
         // The op being built, which each edit that carries it on is joined into. It is stored
         // once one does not, so that most edits change nothing in memory.
@@ -390,7 +391,7 @@ impl OpLog {
         let mut i = 0;
         while let Some(edit) = ops.get(i) {
             i += 1;
-            let (kind, mut forward, mut pos, mut len) = parts(edit);
+            let (kind, mut backward, mut pos, mut len) = parts(edit);
             if len == 0 {
                 continue;
             }
@@ -407,7 +408,7 @@ impl OpLog {
                 };
                 let held = held_backspaces(&ops[i..], pos, room - 1);
                 if held > 0 {
-                    (forward, pos, len) = (false, pos - held, len + held);
+                    (backward, pos, len) = (true, pos - held, len + held);
                     i += held as usize;
                 }
             }
@@ -421,7 +422,7 @@ impl OpLog {
                 }
             };
             let deletes_end_of_previous_insert = kind == OperationKind::Delete && open.is_some_and(|(end, left)| pos + len == end && len <= left);
-            let op = OperationRun::new(next, len, kind, forward, deletes_end_of_previous_insert, pos, at + bytes);
+            let op = OperationRun::new(next, len, kind, backward, deletes_end_of_previous_insert, pos, at + bytes);
             if kind == OperationKind::Insert {
                 inserted += len;
             }
@@ -451,7 +452,7 @@ impl OpLog {
         sequence_number: Option<SequenceNumber>,
         parents: Option<&[EventIndex]>,
         kind: OperationKind,
-        forward: bool,
+        backward: bool,
         pos: usize,
         len: usize,
         text: &str,
@@ -466,7 +467,7 @@ impl OpLog {
         self.assign_replica(replica, sequence_number, event, len);
         self.inserted_text.push_str(text);
         let end = u32::try_from(self.inserted_text.len()).expect("more inserted text than a u32 counts");
-        self.append_operation_run(continues, OperationRun::new(event, len, kind, forward, false, pos, end));
+        self.append_operation_run(continues, OperationRun::new(event, len, kind, backward, false, pos, end));
         events
     }
 
@@ -535,7 +536,7 @@ impl OpLog {
         let (start, end) = (op.first_event, op.first_event + op.len());
         let part = |events: Range<EventIndex>| {
             let part = self.slice(i, &events);
-            OperationRun::new(part.first_event, part.len, part.kind, part.forward, false, part.pos, part.text.1)
+            OperationRun::new(part.first_event, part.len, part.kind, part.backward, false, part.pos, part.text.1)
         };
         let parts = [part(start..at), part(at..end)];
         self.ops.splice(i..=i, parts);
@@ -662,7 +663,7 @@ impl OpLog {
     #[inline]
     fn slice(&self, i: usize, events: &Range<EventIndex>) -> OperationRunSlice {
         let op = &self.ops[i];
-        let (len, kind, forward) = (op.len(), op.kind(), op.forward());
+        let (len, kind, backward) = (op.len(), op.kind(), op.backward());
         let bytes = (if i == 0 { 0 } else { self.ops[i - 1].inserted_text_end }, op.inserted_text_end);
         let from = events.start.max(op.first_event) - op.first_event;
         let to = events.end.min(op.first_event + len) - op.first_event;
@@ -672,13 +673,13 @@ impl OpLog {
                 first_event: op.first_event,
                 len,
                 kind,
-                forward,
+                backward,
                 deletes_end_of_previous_insert: op.deletes_end_of_previous_insert(),
                 pos: op.pos,
                 text: bytes,
             };
         }
-        let (pos, text) = match (kind, forward) {
+        let (pos, text) = match (kind, backward) {
             (OperationKind::Insert, _) => {
                 let (start, end) = bytes;
                 // Characters and bytes coincide when the text is all ASCII.
@@ -687,9 +688,9 @@ impl OpLog {
             }
             // Each forward delete lands on the same position, so a later slice starts where
             // the op did.
-            (OperationKind::Delete, true) => (op.pos, bytes),
-            (OperationKind::Delete, false) => (op.pos + len - to, bytes),
+            (OperationKind::Delete, false) => (op.pos, bytes),
+            (OperationKind::Delete, true) => (op.pos + len - to, bytes),
         };
-        OperationRunSlice { first_event: op.first_event + from, len: to - from, kind, forward, deletes_end_of_previous_insert: false, pos, text }
+        OperationRunSlice { first_event: op.first_event + from, len: to - from, kind, backward, deletes_end_of_previous_insert: false, pos, text }
     }
 }

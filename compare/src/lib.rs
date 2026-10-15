@@ -159,7 +159,7 @@ impl History<TextOperation, usize> {
                     text.push_str(inserted(op));
                     ops.push(match op.kind {
                         ListOpKind::Ins => Operation::Insert { pos, len },
-                        ListOpKind::Del => Operation::Delete { pos, len, backspace: !op.loc.fwd },
+                        ListOpKind::Del => Operation::Delete { pos, len, backward: !op.loc.fwd },
                     });
                 }
                 Chunk { text: start..text.len() as u32, ..chunk.clone() }

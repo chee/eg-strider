@@ -7,10 +7,10 @@ fn concurrent_edits_that_keep_apart_are_merged_by_shifting() {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = [log.add_insert(a, 0, "one two three four").end - 1];
-    let x = log.add_delete_at(a, &base, 0..3, true).unwrap(); // " two three four"
+    let x = log.add_delete_at(a, &base, 0..3, false).unwrap(); // " two three four"
     let x = log.add_insert_at(a, &[x.end - 1], 0, "1").unwrap(); // "1 two three four"
     let y = log.add_insert_at(b, &base, 18, "!").unwrap(); // "one two three four!"
-    let y = log.add_delete_at(b, &[y.end - 1], 14..18, false).unwrap(); // "one two three !"
+    let y = log.add_delete_at(b, &[y.end - 1], 14..18, true).unwrap(); // "one two three !"
     let y = log.add_insert_at(b, &[y.end - 1], 14, "4").unwrap(); // "one two three 4!"
     log.add_insert_at(a, &[x.end - 1, y.end - 1], 1, "st").unwrap();
     assert_eq!(log.checkout(), "1st two three 4!");
@@ -49,8 +49,8 @@ fn paper_figure_4() {
     let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = log.add_insert(a, 0, "hi").end - 1;
     log.add_insert_at(a, &[base], 0, "H").unwrap();
-    let left = log.add_delete_at(a, &[base + 1], 1..2, true).unwrap().end - 1;
-    log.add_delete_at(b, &[base], 1..2, true).unwrap();
+    let left = log.add_delete_at(a, &[base + 1], 1..2, false).unwrap().end - 1;
+    log.add_delete_at(b, &[base], 1..2, false).unwrap();
     let right = log.add_insert(b, 1, "ey").end - 1;
     log.add_insert_at(a, &[left, right], 3, "!").unwrap();
     assert_eq!(log.checkout(), "Hey!");
@@ -70,8 +70,8 @@ fn concurrent_deletes_of_the_same_text() {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = log.add_insert(a, 0, "abcdef").end - 1;
-    let left = log.add_delete_at(a, &[base], 1..4, true).unwrap().end - 1;
-    let right = log.add_delete_at(b, &[base], 2..5, false).unwrap().end - 1;
+    let left = log.add_delete_at(a, &[base], 1..4, false).unwrap().end - 1;
+    let right = log.add_delete_at(b, &[base], 2..5, true).unwrap().end - 1;
     log.add_insert_at(a, &[left, right], 1, "X").unwrap();
     assert_eq!(log.checkout(), "aXf");
 }
@@ -82,7 +82,7 @@ fn checking_out_again_and_after_growing_gives_the_same_document() {
     let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = log.add_insert(a, 0, "0123456789").end - 1;
     let left = log.add_insert_at(a, &[base], 3, "aa").unwrap().end - 1;
-    let right = log.add_delete_at(b, &[base], 2..6, false).unwrap().end - 1;
+    let right = log.add_delete_at(b, &[base], 2..6, true).unwrap().end - 1;
     let merged = log.add_insert_at(b, &[left, right], 2, "!").unwrap().end - 1;
     assert_eq!(log.checkout(), "01!aa6789");
     assert_eq!(log.checkout(), "01!aa6789");
@@ -109,7 +109,7 @@ fn an_event_made_partway_through_a_run_of_backspaces() {
     let mut log = OpLog::new();
     let (a, b, c) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"), log.get_or_create_replica("c"));
     let base = log.add_insert(a, 0, "abcdef").end - 1;
-    let backspaces = log.add_delete_at(a, &[base], 2..6, false).unwrap(); // "ab", removing f, e, d, c in turn
+    let backspaces = log.add_delete_at(a, &[base], 2..6, true).unwrap(); // "ab", removing f, e, d, c in turn
     log.add_insert_at(c, &[base], 4, "Y").unwrap(); // "abcdYef"
     assert_eq!(log.checkout(), "abY");
     assert_eq!(log.ranges_using_crdt_records(), 1);
@@ -123,18 +123,18 @@ fn an_event_made_partway_through_a_run_of_backspaces() {
 fn corrected_typing() -> (Vec<Operation>, &'static str) {
     let ops = vec![
         Operation::Insert { pos: 0, len: 5 },
-        Operation::Delete { pos: 3, len: 2, backspace: true },
-        Operation::Delete { pos: 2, len: 1, backspace: true },
+        Operation::Delete { pos: 3, len: 2, backward: true },
+        Operation::Delete { pos: 2, len: 1, backward: true },
         Operation::Insert { pos: 2, len: 3 },
-        Operation::Delete { pos: 2, len: 3, backspace: false },
+        Operation::Delete { pos: 2, len: 3, backward: false },
         Operation::Insert { pos: 0, len: 1 },
-        Operation::Delete { pos: 1, len: 1, backspace: false },
+        Operation::Delete { pos: 1, len: 1, backward: false },
     ];
     (ops, "hélloy!🙂A")
 }
 
 /// Appends the same ops one call at a time, each following the one before.
-fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Operation], text: &str) {
+fn one_at_a_time(log: &mut OpLog, replica: u32, ops: &[Operation], text: &str) {
     let (mut sequence_number, mut rest) = (0, text);
     let mut parents = log.frontier();
     for op in ops {
@@ -143,10 +143,10 @@ fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Operation], text: &str) {
                 let bytes = rest.char_indices().nth(len as usize).map_or(rest.len(), |(at, _)| at);
                 let (inserted, after) = rest.split_at(bytes);
                 rest = after;
-                log.add_remote_insert(agent, sequence_number, &parents, pos as usize, inserted).unwrap()
+                log.add_remote_insert(replica, sequence_number, &parents, pos as usize, inserted).unwrap()
             }
-            Operation::Delete { pos, len, backspace } => {
-                log.add_remote_delete(agent, sequence_number, &parents, pos as usize..(pos + len) as usize, !backspace).unwrap()
+            Operation::Delete { pos, len, backward } => {
+                log.add_remote_delete(replica, sequence_number, &parents, pos as usize..(pos + len) as usize, backward).unwrap()
             }
         };
         sequence_number += events.end - events.start;
@@ -233,7 +233,7 @@ fn holding_backspace_is_stored_as_one_delete() {
         held.add_delete(a, at..at + 1);
     }
     let (a, tip) = (at_once.get_or_create_replica("a"), at_once.frontier());
-    at_once.add_delete_at(a, &tip, 6..11, false).unwrap();
+    at_once.add_delete_at(a, &tip, 6..11, true).unwrap();
     assert_eq!(held.checkout(), "hello ");
     assert_eq!(held.save(), at_once.save());
 }
@@ -243,7 +243,7 @@ fn holding_backspace_is_stored_as_one_delete() {
 /// that trims the insert before it, and one that does not.
 #[test]
 fn holding_backspace_in_a_run_is_stored_as_deletes_made_at_once() {
-    let backspace = |pos: u32, len: u32| Operation::Delete { pos, len, backspace: true };
+    let backspace = |pos: u32, len: u32| Operation::Delete { pos, len, backward: true };
     let held = [Operation::Insert { pos: 3, len: 3 }, backspace(5, 1), backspace(4, 1), backspace(3, 1), backspace(2, 1), backspace(1, 1)];
     let at_once = [Operation::Insert { pos: 3, len: 3 }, backspace(3, 3), backspace(1, 2)];
     let mut logs = [OpLog::new(), OpLog::new(), OpLog::new()];

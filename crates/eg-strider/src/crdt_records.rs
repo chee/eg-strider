@@ -43,7 +43,7 @@ struct RecordRun {
 }
 
 /// A stretch of delete events whose targets are consecutive records: the first event's is the
-/// lowest, or the highest if `descending`.
+/// lowest, or the highest if `backward`.
 #[derive(Clone, Copy)]
 pub(crate) struct DeleteTargets {
     /// The first of the events.
@@ -51,13 +51,13 @@ pub(crate) struct DeleteTargets {
     pub len: u32,
     /// The lowest record deleted.
     pub record: RecordId,
-    pub descending: bool,
+    pub backward: bool,
 }
 
 impl DeleteTargets {
     /// Returns the record that the first event deletes.
     pub fn first(&self) -> RecordId {
-        if self.descending {
+        if self.backward {
             self.record + self.len - 1
         } else {
             self.record
@@ -67,8 +67,8 @@ impl DeleteTargets {
     /// Returns the part of the stretch from `event`, at most `len` events long.
     fn from(&self, event: EventIndex, len: u32) -> DeleteTargets {
         let (skip, len) = (event - self.first_event, len.min(self.first_event + self.len - event));
-        let record = if self.descending { self.record + self.len - skip - len } else { self.record + skip };
-        DeleteTargets { first_event: event, len, record, descending: self.descending }
+        let record = if self.backward { self.record + self.len - skip - len } else { self.record + skip };
+        DeleteTargets { first_event: event, len, record, backward: self.backward }
     }
 }
 
@@ -458,9 +458,9 @@ impl CrdtRecords {
     // ---------------------------------------------------------------- deleting
 
     /// Merges a delete by events `event..event + len` of the range, of the prepare positions
-    /// `pos..pos + len`, removed first to last if `forward`. Calls `removed` with the effect index and
+    /// `pos..pos + len`, removed last to first if `backward`. Calls `removed` with the effect index and
     /// length of each run still there.
-    pub fn delete(&mut self, event: EventIndex, pos: u32, len: u32, forward: bool, mut removed: impl FnMut(u32, u32)) {
+    pub fn delete(&mut self, event: EventIndex, pos: u32, len: u32, backward: bool, mut removed: impl FnMut(u32, u32)) {
         let (mut at, mut offset, start) = self.tree.locate(View::Prepare, pos);
         // Where the characters to delete next are in the effect version, if they are still
         // there. Finding the first of them gave it; from there it only moves past what is in
@@ -474,8 +474,8 @@ impl CrdtRecords {
             debug_assert_eq!(self.record_run(at).prepare_state, INSERTED);
             // The events that deleted these characters: the next ones, or with a backspace
             // the ones before those already accounted for.
-            let first = if forward { event + done } else { event + len - done - n };
-            self.note_deleted(DeleteTargets { first_event: first, len: n, record: self.record_run(at).record, descending: !forward });
+            let first = if backward { event + len - done - n } else { event + done };
+            self.note_deleted(DeleteTargets { first_event: first, len: n, record: self.record_run(at).record, backward });
             if self.mark_deleted(at, Some(index)).is_some() {
                 removed(index, n);
             }
@@ -496,13 +496,13 @@ impl CrdtRecords {
     /// Records what a stretch of delete events deleted, joining the stretch before when it is
     /// the same delete carrying on.
     fn note_deleted(&mut self, targets: DeleteTargets) {
-        let DeleteTargets { first_event: event, len, record, descending } = targets;
+        let DeleteTargets { first_event: event, len, record, backward } = targets;
         match self.delete_targets.last_mut() {
             // A backspace reaches the next run with the events before those it has used.
             Some(last)
-                if last.descending == descending
+                if last.backward == backward
                     && last.record + last.len == record
-                    && (if descending { event + len == last.first_event } else { last.first_event + last.len == event }) =>
+                    && (if backward { event + len == last.first_event } else { last.first_event + last.len == event }) =>
             {
                 last.len += len;
                 last.first_event = last.first_event.min(event);

@@ -6,15 +6,15 @@ fn history() -> OpLog {
     let mut log = OpLog::new();
     let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = log.add_insert(a, 0, "one two thrée four").end - 1;
-    let left = log.add_delete_at(a, &[base], 2..7, false).unwrap();
+    let left = log.add_delete_at(a, &[base], 2..7, true).unwrap();
     log.add_insert_at(b, &[left.start + 1], 4, "🙂").unwrap();
     let right = log.add_insert_at(b, &[base], 18, "!").unwrap().end - 1;
     let merged = log.add_insert_at(a, &[left.end - 1, right], 0, "> ").unwrap().end - 1;
-    log.add_delete_at(b, &[merged], 0..1, true).unwrap();
+    log.add_delete_at(b, &[merged], 0..1, false).unwrap();
     log.add_insert(a, 0, "é");
     // A run that arrives together, with a correction of what it has just typed.
     let (c, tip) = (log.get_or_create_replica("c"), log.frontier());
-    let run = [Operation::Insert { pos: 1, len: 4 }, Operation::Delete { pos: 3, len: 2, backspace: true }, Operation::Insert { pos: 3, len: 1 }];
+    let run = [Operation::Insert { pos: 1, len: 4 }, Operation::Delete { pos: 3, len: 2, backward: true }, Operation::Insert { pos: 3, len: 1 }];
     log.add_remote_ops(c, 0, &tip, &run, "tÿpos").unwrap();
     log
 }

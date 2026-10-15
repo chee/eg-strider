@@ -247,7 +247,7 @@ impl OpLog {
         });
         column(&mut columns, |out| replica_runs().for_each(|(.., len)| number(out, len as usize)));
 
-        // The ops: `len << 4 | trims << 3 | wide << 2 | backspace << 1 | delete`, the position,
+        // The ops: `len << 4 | trims << 3 | wide << 2 | backward << 1 | delete`, the position,
         // and for a wide insert (one with characters longer than a byte) the length of its
         // text in bytes.
         let ops = || self.ops(self.op_containing(events.start)..self.op_containing(events.end), events.clone());
@@ -261,7 +261,7 @@ impl OpLog {
                 let trims = op.deletes_end_of_previous_insert && open;
                 open = op.kind == OperationKind::Insert || trims;
                 let flags =
-                    usize::from(trims) << 3 | usize::from(wide(&op)) << 2 | usize::from(!op.forward) << 1 | usize::from(op.kind == OperationKind::Delete);
+                    usize::from(trims) << 3 | usize::from(wide(&op)) << 2 | usize::from(op.backward) << 1 | usize::from(op.kind == OperationKind::Delete);
                 number(out, (op.len as usize) << 4 | flags);
             }
         });
@@ -337,7 +337,7 @@ impl OpLog {
             let header = op_headers.varint()?;
             let len = u32::try_from(header >> 4).ok().filter(|&len| len > 0 && len <= MAX_OP_LEN).ok_or(Malformed)?;
             let pos = u32::try_from(i64::from(cursor) + unzigzag(places.varint()?)).map_err(|_| Malformed)?;
-            let (kind, forward) = (if header & 1 == 1 { OperationKind::Delete } else { OperationKind::Insert }, header & 2 == 0);
+            let (kind, backward) = (if header & 1 == 1 { OperationKind::Delete } else { OperationKind::Insert }, header & 2 != 0);
             cursor = after(kind, pos, len);
             // Only a delete right after an insert, or after another such delete, can trim it.
             let trims = header & 8 != 0;
@@ -355,11 +355,11 @@ impl OpLog {
             let inserted = at.checked_add(bytes).and_then(|end| text.get(at..end)).ok_or(Malformed)?;
             match kind {
                 // A character is every byte that does not carry on from the one before.
-                OperationKind::Insert if forward && inserted.bytes().filter(|&byte| byte as i8 >= -0x40).count() == len as usize => self.totals.0 += len,
+                OperationKind::Insert if !backward && inserted.bytes().filter(|&byte| byte as i8 >= -0x40).count() == len as usize => self.totals.0 += len,
                 OperationKind::Insert => return Err(Malformed),
                 OperationKind::Delete => self.totals.1 += len,
             }
-            self.ops.push(OperationRun::new(event, len, kind, forward, trims, pos, base + (at + bytes) as u32));
+            self.ops.push(OperationRun::new(event, len, kind, backward, trims, pos, base + (at + bytes) as u32));
             at += bytes;
             event = event.checked_add(len).ok_or(Malformed)?;
         }
