@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
-use strider_graph::{BlockIndex, Graph, Move, Segment, Walker};
+use strider_graph::{walk, CausalGraph, EventRunIndex, HistoryRange, WalkScratch, WalkStep};
 
 /// What one of several replicas does next.
 #[derive(Clone, Debug)]
@@ -19,8 +19,8 @@ fn steps() -> impl Strategy<Value = Vec<Step>> {
     proptest::collection::vec(step, 1..120)
 }
 
-fn graph_of(replicas: usize, steps: &[Step]) -> Graph {
-    let mut graph = Graph::new();
+fn graph_of(replicas: usize, steps: &[Step]) -> CausalGraph {
+    let mut graph = CausalGraph::new();
     let mut versions: Vec<Vec<u32>> = vec![Vec::new(); replicas];
     for step in steps {
         match *step {
@@ -39,19 +39,19 @@ fn graph_of(replicas: usize, steps: &[Step]) -> Graph {
 }
 
 /// Every event in each event's history, by brute force.
-fn histories(graph: &Graph) -> Vec<Vec<bool>> {
-    let blocks = graph.blocks();
+fn histories(graph: &CausalGraph) -> Vec<Vec<bool>> {
+    let runs = graph.runs();
     let mut of_event: Vec<Vec<bool>> = Vec::new();
-    for block in 0..blocks.len() {
+    for run in 0..runs.len() {
         let mut seen = vec![false; graph.len() as usize];
-        for &p in blocks.parents(block) {
-            let last = blocks.events(p).end as usize - 1;
+        for &p in runs.parents(run) {
+            let last = runs.events(p).end as usize - 1;
             seen[last] = true;
             for (s, &a) in seen.iter_mut().zip(&of_event[last]) {
                 *s |= a;
             }
         }
-        for event in blocks.events(block) {
+        for event in runs.events(run) {
             of_event.push(seen.clone());
             seen[event as usize] = true;
         }
@@ -60,7 +60,7 @@ fn histories(graph: &Graph) -> Vec<Vec<bool>> {
 }
 
 /// Drops from a version the events that others in it already descend from.
-fn reduce(graph: &Graph, version: &[u32]) -> Vec<u32> {
+fn reduce(graph: &CausalGraph, version: &[u32]) -> Vec<u32> {
     let histories = histories(graph);
     let mut reduced: Vec<u32> = version.iter().copied().filter(|&e| !version.iter().any(|&other| histories[other as usize][e as usize])).collect();
     reduced.sort_unstable();
@@ -68,46 +68,46 @@ fn reduce(graph: &Graph, version: &[u32]) -> Vec<u32> {
     reduced
 }
 
-/// Follows the moves of a walk on plain sets, checking that every block is applied exactly
-/// once, that the working version is then exactly the block's history, and that the blocks
+/// Follows the steps of a walk on plain sets, checking that every run is applied exactly
+/// once, that the prepare version is then exactly the run's history, and that the runs
 /// to visit first are.
-fn check_walk(graph: &Graph, walker: &mut Walker, known_quarters: usize, first_quarters: usize) {
-    let blocks = graph.blocks();
+fn check_walk(graph: &CausalGraph, scratch: &mut WalkScratch, known_quarters: usize, first_quarters: usize) {
+    let runs = graph.runs();
     let histories = histories(graph);
-    let mut applied = vec![false; blocks.len() as usize];
-    for segment in graph.segments() {
-        let Segment::Region(region) = segment else { continue };
-        let known = region.len() * known_quarters / 4;
-        let first = region.len() * first_quarters / 4;
+    let mut applied = vec![false; runs.len() as usize];
+    for range in graph.split_at_critical_versions() {
+        let HistoryRange::Concurrent(range) = range else { continue };
+        let known = range.len() * known_quarters / 4;
+        let first = range.len() * first_quarters / 4;
         let mut visited = known;
-        let base = blocks.start(region.start) as usize;
+        let base = runs.start(range.start) as usize;
         let mut version = vec![false; graph.len() as usize];
-        version[..blocks.start(region.start + known as BlockIndex) as usize].fill(true);
-        applied[region.start as usize..region.start as usize + known].fill(true);
+        version[..runs.start(range.start + known as EventRunIndex) as usize].fill(true);
+        applied[range.start as usize..range.start as usize + known].fill(true);
 
-        walker.walk(blocks, &region, known, first, |step| match step {
-            Move::Retreat(stretch) => {
-                for e in blocks.start(stretch.start)..blocks.start(stretch.end) {
+        walk(scratch, runs, &range, known, first, |step| match step {
+            WalkStep::Retreat(moved) => {
+                for e in runs.start(moved.start)..runs.start(moved.end) {
                     assert!(std::mem::replace(&mut version[e as usize], false), "retreated an event that was not there");
                 }
             }
-            Move::Advance(stretch) => {
-                for e in blocks.start(stretch.start)..blocks.start(stretch.end) {
+            WalkStep::Advance(moved) => {
+                for e in runs.start(moved.start)..runs.start(moved.end) {
                     assert!(!std::mem::replace(&mut version[e as usize], true), "advanced an event that was there");
                 }
             }
-            Move::Apply(block) => {
-                assert!(!std::mem::replace(&mut applied[block as usize], true), "block applied twice");
-                assert!(visited >= first || block < region.start + first as BlockIndex, "block {block} applied before the first {first}");
+            WalkStep::Apply(run) => {
+                assert!(!std::mem::replace(&mut applied[run as usize], true), "run applied twice");
+                assert!(visited >= first || run < range.start + first as EventRunIndex, "run {run} applied before the first {first}");
                 visited += 1;
-                let first = blocks.events(block).start as usize;
-                assert_eq!(version[base..], histories[first][base..], "wrong version for block {block}");
-                for e in blocks.events(block) {
+                let first = runs.events(run).start as usize;
+                assert_eq!(version[base..], histories[first][base..], "wrong version for run {run}");
+                for e in runs.events(run) {
                     version[e as usize] = true;
                 }
             }
         });
-        assert!(applied[region.start as usize..region.end as usize].iter().all(|&a| a), "a block was never applied");
+        assert!(applied[range.start as usize..range.end as usize].iter().all(|&a| a), "a run was never applied");
     }
 }
 
@@ -115,6 +115,6 @@ proptest! {
     #[test]
     fn every_block_is_applied_at_its_parents_version(replicas in 2usize..6, steps in steps(), known_quarters in 0usize..4, first_quarters in 0usize..5) {
         let graph = graph_of(replicas, &steps);
-        check_walk(&graph, &mut Walker::new(), known_quarters, first_quarters);
+        check_walk(&graph, &mut WalkScratch::default(), known_quarters, first_quarters);
     }
 }

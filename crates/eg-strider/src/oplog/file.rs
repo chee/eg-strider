@@ -2,7 +2,7 @@ use super::{AgentRun, Op, OpKind, OpLog, OpSlice, MAX_OP_LEN};
 use crate::replay::Base;
 use std::borrow::Cow;
 use std::ops::Range;
-use strider_graph::{BlockIndex, EventIndex, Graph, Segment};
+use strider_graph::{CausalGraph, EventIndex, EventRunIndex, HistoryRange};
 
 const MAGIC: &[u8] = b"eg-strider\x05";
 
@@ -54,7 +54,7 @@ impl OpLog {
     /// each with a checksum.
     pub fn save(&mut self) -> Vec<u8> {
         self.checkout();
-        let (floor, len) = (self.graph.floor(), self.graph.len());
+        let (floor, len) = (self.graph.first_held_event(), self.graph.len());
         // History that was never read is written as it is; the rest is cut into blocks.
         let kept = self.packed.iter().flat_map(|packed| {
             packed.blocks.iter().zip(packed.starts.windows(2)).map(|(block, ends)| (Cow::from(&packed.bytes[block.clone()]), ends[1] - ends[0]))
@@ -128,7 +128,7 @@ impl OpLog {
             return Err(Malformed);
         }
 
-        log.graph = Graph::after(events, &frontier);
+        log.graph = CausalGraph::after(events, &frontier);
         log.base = Base { events, chars, text };
         log.packed = (events > 0).then_some(Packed { bytes, blocks, starts, frontier });
         Ok(log)
@@ -139,7 +139,7 @@ impl OpLog {
     pub(crate) fn unpack_from(&mut self, from: SavedBlockIndex) -> Result<(), Malformed> {
         let Some(packed) = &self.packed else { return Ok(()) };
         // The blocks are read into a log of their own, so that a damaged one leaves this one as it was.
-        let mut read = OpLog { agent_names: self.agent_names.clone(), graph: Graph::after(packed.starts[from], &[]), ..OpLog::default() };
+        let mut read = OpLog { agent_names: self.agent_names.clone(), graph: CausalGraph::after(packed.starts[from], &[]), ..OpLog::default() };
         // The first event of a block has the frontier of the history before it for parents.
         let mut frontier = Vec::new();
         for (i, block) in packed.blocks[from..].iter().enumerate() {
@@ -159,7 +159,7 @@ impl OpLog {
         self.ops.extend(later.ops.into_iter().map(|op| Op { content_end: op.content_end + shift, ..op }));
         self.agent_runs.extend(later.agent_runs);
         self.totals = (self.totals.0 + later.totals.0, self.totals.1 + later.totals.1);
-        let blocks = later.graph.blocks();
+        let blocks = later.graph.runs();
         for block in 0..blocks.len() {
             let parents: Vec<EventIndex> = blocks.parents(block).iter().map(|&parent| blocks.start(parent + 1) - 1).collect();
             // A block of the later events with no block for a parent followed the old frontier.
@@ -176,8 +176,8 @@ impl OpLog {
 
     /// Returns the parents of block `block`'s first event: for a chain with no block before it,
     /// the saved history's frontier.
-    fn parents_of(&self, block: BlockIndex) -> Vec<EventIndex> {
-        let blocks = self.graph.blocks();
+    fn parents_of(&self, block: EventRunIndex) -> Vec<EventIndex> {
+        let blocks = self.graph.runs();
         let parents: Vec<EventIndex> = blocks.parents(block).iter().map(|&parent| blocks.start(parent + 1) - 1).collect();
         match &self.packed {
             Some(packed) if parents.is_empty() => packed.frontier.clone(),
@@ -189,17 +189,17 @@ impl OpLog {
     /// [`BLOCK`] events before the end and twice as far apart each time. Returns `from`, then
     /// each block's end.
     fn cuts(&self, from: EventIndex, to: EventIndex) -> Vec<EventIndex> {
-        let blocks = self.graph.blocks();
+        let blocks = self.graph.runs();
         let (mut cuts, mut size) = (vec![to], BLOCK);
-        for segment in self.graph.segments().iter().rev() {
-            let stretch = segment.blocks();
+        for segment in self.graph.split_at_critical_versions().iter().rev() {
+            let stretch = segment.runs();
             let (start, end) = (blocks.start(stretch.start).max(from), blocks.start(stretch.end).min(to));
             if start >= end {
                 continue;
             }
             // Anywhere in a linear stretch is a critical version; a region has to stay whole.
             let mut last = *cuts.last().expect("the last cut");
-            while matches!(segment, Segment::Linear(_)) && last - start > size {
+            while matches!(segment, HistoryRange::Linear(_)) && last - start > size {
                 last -= size;
                 cuts.push(last);
                 size *= 2;
@@ -273,9 +273,9 @@ impl OpLog {
         // The graph, as chains of events: how long each is, and its first event's parents as
         // how far back they are. A chain cut off from its start by the block follows the event
         // before it, which is stored as one parent fewer than none.
-        let blocks = self.graph.blocks();
+        let blocks = self.graph.runs();
         let chains = || (blocks.containing(events.start)..blocks.len()).take_while(|&block| blocks.start(block) < events.end);
-        let whole = |block: &BlockIndex| blocks.start(*block) >= events.start;
+        let whole = |block: &EventRunIndex| blocks.start(*block) >= events.start;
         column(&mut columns, |out| {
             number(out, chains().count());
             for block in chains() {

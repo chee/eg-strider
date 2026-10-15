@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
 use std::ops::Range;
-use strider_graph::{BlockIndex, Graph, Segment};
+use strider_graph::{CausalGraph, EventRunIndex, HistoryRange};
 
 /// The analysis done in one go over the whole history, as it was before it became incremental.
 struct Batch {
@@ -26,10 +26,10 @@ impl Batch {
         self.entries.last().map_or(0, |entry| entry.end)
     }
 
-    fn blocks(&self) -> Cut {
+    fn runs(&self) -> Cut {
         let n = self.len();
 
-        // A block starts wherever an entry does, and just after every event that is some
+        // A run starts wherever an entry does, and just after every event that is some
         // other event's parent.
         let mut cut = vec![0u64; n as usize / 64 + 1];
         let mut mark = |event: u32| cut[event as usize / 64] |= 1 << (event % 64);
@@ -58,7 +58,7 @@ impl Batch {
         }
         start.push(n);
 
-        // The block containing an event: one less than the number of starts at or before it.
+        // The run containing an event: one less than the number of starts at or before it.
         let block_of = |event: u32| {
             let below = cut[event as usize / 64] & (u64::MAX >> (63 - event % 64));
             rank[event as usize / 64] + below.count_ones() - 1
@@ -66,17 +66,17 @@ impl Batch {
 
         let mut parent_start = Vec::with_capacity(count as usize + 1);
         let mut parents = Vec::with_capacity(self.parents.len() + count as usize);
-        let mut block = 0usize;
+        let mut run = 0usize;
         for e in &self.entries {
-            debug_assert_eq!(start[block], e.start);
+            debug_assert_eq!(start[run], e.start);
             parent_start.push(parents.len() as u32);
             parents.extend(self.parents[e.parents.0 as usize..e.parents.1 as usize].iter().map(|&p| block_of(p)));
-            block += 1;
+            run += 1;
             // Later pieces of the same entry each continue from the piece before.
-            while start[block] < e.end {
+            while start[run] < e.end {
                 parent_start.push(parents.len() as u32);
-                parents.push(block as u32 - 1);
-                block += 1;
+                parents.push(run as u32 - 1);
+                run += 1;
             }
         }
         parent_start.push(parents.len() as u32);
@@ -90,21 +90,21 @@ impl Cut {
         self.parent_start.len() - 1
     }
 
-    fn parents(&self, block: usize) -> &[u32] {
-        &self.parents[self.parent_start[block] as usize..self.parent_start[block + 1] as usize]
+    fn parents(&self, run: usize) -> &[u32] {
+        &self.parents[self.parent_start[run] as usize..self.parent_start[run + 1] as usize]
     }
 
-    fn segments(&self) -> Vec<Segment> {
-        let blocks = self.len();
+    fn ranges(&self) -> Vec<HistoryRange> {
+        let runs = self.len();
         let start = &self.start;
 
-        // seen[i]: a `q` such that block i's first event has all of events 0..q in its
-        // history. Exact when the block has seen everything before it (its parents are then
+        // seen[i]: a `q` such that run i's first event has all of events 0..q in its
+        // history. Exact when the run has seen everything before it (its parents are then
         // exactly the heads of the graph so far), otherwise a lower bound from its parents.
-        let mut seen = vec![0u32; blocks];
-        let mut is_head = vec![false; blocks];
+        let mut seen = vec![0u32; runs];
+        let mut is_head = vec![false; runs];
         let mut heads = 0usize;
-        for i in 0..blocks {
+        for i in 0..runs {
             let parents = self.parents(i);
             seen[i] = if parents.len() == heads && parents.iter().all(|&p| is_head[p as usize]) {
                 start[i]
@@ -121,35 +121,35 @@ impl Cut {
             heads += 1;
         }
 
-        // The version just before block i is critical when every block from i on has seen all
+        // The version just before run i is critical when every run from i on has seen all
         // of events 0..start[i].
-        let mut least_seen = vec![u32::MAX; blocks + 1];
-        for i in (0..blocks).rev() {
+        let mut least_seen = vec![u32::MAX; runs + 1];
+        for i in (0..runs).rev() {
             least_seen[i] = least_seen[i + 1].min(seen[i]);
         }
         let critical = |i: usize| least_seen[i] >= start[i];
 
-        let mut segments = Vec::new();
+        let mut ranges = Vec::new();
         let mut i = 0;
-        while i < blocks {
+        while i < runs {
             debug_assert!(critical(i));
             let mut end = i + 1;
             if critical(end) {
-                // Critical on both sides: nothing is concurrent with this block. Take every
-                // block that follows in the same way.
-                while end < blocks && critical(end + 1) {
+                // Critical on both sides: nothing is concurrent with this run. Take every
+                // run that follows in the same way.
+                while end < runs && critical(end + 1) {
                     end += 1;
                 }
-                segments.push(Segment::Linear(i as BlockIndex..end as BlockIndex));
+                ranges.push(HistoryRange::Linear(i as EventRunIndex..end as EventRunIndex));
             } else {
                 while !critical(end) {
                     end += 1;
                 }
-                segments.push(Segment::Region(i as BlockIndex..end as BlockIndex));
+                ranges.push(HistoryRange::Concurrent(i as EventRunIndex..end as EventRunIndex));
             }
             i = end;
         }
-        segments
+        ranges
     }
 }
 
@@ -161,7 +161,7 @@ proptest! {
     /// linear stretches, forks partway along and merges.
     #[test]
     fn running_analysis_matches_a_fresh_one(steps in proptest::collection::vec((any::<[Index; 2]>(), 0u8..10, 1u32..5), 1..120)) {
-        let mut graph = Graph::new();
+        let mut graph = CausalGraph::new();
         let mut batch = Batch { entries: Vec::new(), parents: Vec::new() };
         for ([a, b], kind, len) in steps {
             let total = graph.len();
@@ -177,7 +177,7 @@ proptest! {
             if kind == 9 {
                 parents = graph.frontier().to_vec();
             }
-            let continues = graph.continues(&parents);
+            let continues = graph.extends_last_event(&parents);
             let events: Range<u32> = graph.push(&parents, len);
             if continues {
                 batch.entries.last_mut().unwrap().end = events.end;
@@ -187,13 +187,13 @@ proptest! {
                 batch.entries.push(Entry { start: events.start, end: events.end, parents: (at, batch.parents.len() as u32) });
             }
 
-            let (cut, blocks) = (batch.blocks(), graph.blocks());
-            prop_assert_eq!(blocks.len() as usize, cut.len());
-            for block in 0..cut.len() {
-                prop_assert_eq!(blocks.events(block as BlockIndex), cut.start[block]..cut.start[block + 1]);
-                prop_assert_eq!(blocks.parents(block as BlockIndex), cut.parents(block));
+            let (cut, runs) = (batch.runs(), graph.runs());
+            prop_assert_eq!(runs.len() as usize, cut.len());
+            for run in 0..cut.len() {
+                prop_assert_eq!(runs.events(run as EventRunIndex), cut.start[run]..cut.start[run + 1]);
+                prop_assert_eq!(runs.parents(run as EventRunIndex), cut.parents(run));
             }
-            prop_assert_eq!(graph.segments(), cut.segments());
+            prop_assert_eq!(graph.split_at_critical_versions(), cut.ranges());
         }
     }
 }

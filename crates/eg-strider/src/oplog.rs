@@ -5,7 +5,7 @@ pub use file::Malformed;
 use crate::replay::{self, Base, Memo};
 use std::cmp::Ordering;
 use std::ops::Range;
-use strider_graph::{EventIndex, Graph};
+use strider_graph::{CausalGraph, EventIndex};
 
 /// How many events an agent made before this one. With the agent, it names an event on every
 /// replica.
@@ -155,7 +155,7 @@ pub(crate) struct OpSlice {
 /// its inserts put in. None of this is checked.
 #[derive(Default)]
 pub struct OpLog {
-    pub(crate) graph: Graph,
+    pub(crate) graph: CausalGraph,
     ops: Vec<Op>,
     content: String,
     agent_names: Vec<String>,
@@ -237,7 +237,7 @@ impl OpLog {
         if self.base.events != len && self.latest.as_ref().is_none_or(|latest| latest.events != len) {
             // An event made without all that the base holds is concurrent with some of it.
             // The merge then has to tell what the base holds from the rest.
-            if self.graph.cut(self.base.events) {
+            if self.graph.start_run_at(self.base.events) {
                 self.split_op(self.base.events);
                 self.memo.outdate();
             }
@@ -261,7 +261,7 @@ impl OpLog {
 
     /// Returns how many events of a loaded log's history are still unread.
     pub fn unread(&self) -> usize {
-        self.graph.floor() as usize
+        self.graph.first_held_event() as usize
     }
 
     /// Returns how many regions the last checkout could not merge by shifting alone.
@@ -466,7 +466,7 @@ impl OpLog {
     /// block holding its latest parent.
     fn read_back(&mut self, parents: &[EventIndex]) -> Result<(), Malformed> {
         if let Some(packed) = &self.packed {
-            let floor = self.graph.floor();
+            let floor = self.graph.first_held_event();
             if !parents.iter().any(|&parent| parent >= floor) && !packed.frontier.iter().all(|event| parents.contains(event)) {
                 let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent));
                 self.unpack_from(block)?;
