@@ -282,8 +282,14 @@ impl EventRuns {
 
     /// Finds the run holding an event.
     pub fn containing(&self, event: EventIndex) -> EventRunIndex {
-        // Parents are mostly recent events, so the search widens backwards from the last run.
-        let (mut end, mut step) = (self.len() as usize, 1);
+        // Parents are mostly recent events: the last few runs are tried one by one, and from
+        // there the search widens backwards.
+        let len = self.len() as usize;
+        let near = len.saturating_sub(4);
+        if let Some(run) = (near..len).rev().find(|&run| self.start[run] <= event) {
+            return run as EventRunIndex;
+        }
+        let (mut end, mut step) = (near, 1);
         while step < end && self.start[end - step] > event {
             end -= step;
             step *= 2;
