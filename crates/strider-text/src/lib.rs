@@ -13,9 +13,14 @@ pub struct PieceTable<'a> {
     /// Length of the document as taken back so far.
     len: u32,
     /// The final text as it is placed: a byte per character, then [`SHORT`] spare bytes. A
-    /// character that is not ASCII is [`NON_ASCII_MARK`] here and kept in `non_ascii`.
+    /// character that is not ASCII is [`NON_ASCII_MARK`] here and kept in `non_ascii_chars`.
     final_text_bytes: Vec<u8>,
-    non_ascii: NonAsciiChars,
+    /// Per page of [`NON_ASCII_PAGE`] positions, where its characters start in
+    /// `non_ascii_chars`, if it has any that are not ASCII.
+    non_ascii_pages: Vec<Option<u32>>,
+    /// The final text's characters that are not ASCII, by position, with room only for pages
+    /// that have some.
+    non_ascii_chars: Vec<char>,
 }
 
 /// Stands in for a character that does not fit in a byte.
@@ -43,45 +48,54 @@ fn copy(to: &mut [u8], at: usize, from: &[u8], skip: usize, n: usize) {
     }
 }
 
-/// Positions per page of [`NonAsciiChars`]. Tiny in debug builds, so that tests use several
-/// pages.
+/// Positions per page of the characters that are not ASCII. Tiny in debug builds, so that tests
+/// use several pages.
 const NON_ASCII_PAGE: usize = if cfg!(debug_assertions) { 4 } else { 256 };
 
-/// The final text's characters that are not ASCII, by position, with room only for pages that
-/// have some.
-#[derive(Default)]
-struct NonAsciiChars {
-    /// Per page, where its characters start in `chars`, if it has any.
-    pages: Vec<Option<u32>>,
-    chars: Vec<char>,
+/// Places character `ch` at position `at` of the final text: as its byte if it is ASCII, else
+/// as [`NON_ASCII_MARK`], with the character in its page of `non_ascii_chars`.
+#[inline]
+fn place_char(final_text_bytes: &mut [u8], non_ascii_pages: &mut Vec<Option<u32>>, non_ascii_chars: &mut Vec<char>, at: usize, ch: char) {
+    if ch.is_ascii() {
+        final_text_bytes[at] = ch as u8;
+    } else {
+        final_text_bytes[at] = NON_ASCII_MARK;
+        place_non_ascii(non_ascii_pages, non_ascii_chars, at, ch);
+    }
 }
 
-impl NonAsciiChars {
-    /// Records the character at position `at`.
-    #[cold]
-    fn set(&mut self, at: usize, ch: char) {
-        if self.pages.len() <= at / NON_ASCII_PAGE {
-            self.pages.resize(at / NON_ASCII_PAGE + 1, None);
-        }
-        let start = *self.pages[at / NON_ASCII_PAGE].get_or_insert_with(|| {
-            self.chars.resize(self.chars.len() + NON_ASCII_PAGE, '\0');
-            (self.chars.len() - NON_ASCII_PAGE) as u32
-        });
-        self.chars[start as usize + at % NON_ASCII_PAGE] = ch;
+/// Records a character that is not ASCII at position `at`, making room for its page if it has
+/// none yet.
+#[cold]
+fn place_non_ascii(non_ascii_pages: &mut Vec<Option<u32>>, non_ascii_chars: &mut Vec<char>, at: usize, ch: char) {
+    if non_ascii_pages.len() <= at / NON_ASCII_PAGE {
+        non_ascii_pages.resize(at / NON_ASCII_PAGE + 1, None);
     }
+    let start = *non_ascii_pages[at / NON_ASCII_PAGE].get_or_insert_with(|| {
+        non_ascii_chars.resize(non_ascii_chars.len() + NON_ASCII_PAGE, '\0');
+        (non_ascii_chars.len() - NON_ASCII_PAGE) as u32
+    });
+    non_ascii_chars[start as usize + at % NON_ASCII_PAGE] = ch;
+}
 
-    /// Returns the character recorded at position `at`.
-    fn get(&self, at: usize) -> char {
-        let start = self.pages[at / NON_ASCII_PAGE].expect("a character was recorded on this page");
-        self.chars[start as usize + at % NON_ASCII_PAGE]
-    }
+/// Returns the character that is not ASCII recorded at position `at`.
+fn non_ascii_at(non_ascii_pages: &[Option<u32>], non_ascii_chars: &[char], at: usize) -> char {
+    let start = non_ascii_pages[at / NON_ASCII_PAGE].expect("a character was recorded on this page");
+    non_ascii_chars[start as usize + at % NON_ASCII_PAGE]
 }
 
 impl<'a> PieceTable<'a> {
     /// Starts from the final document, `len` characters long. `inserted_text` holds the text of
     /// every insert.
     pub fn new(len: u32, inserted_text: &'a str) -> Self {
-        PieceTable { inserted_text, pieces: PieceList::new(len), len, final_text_bytes: vec![0; len as usize + SHORT], non_ascii: NonAsciiChars::default() }
+        PieceTable {
+            inserted_text,
+            pieces: PieceList::new(len),
+            len,
+            final_text_bytes: vec![0; len as usize + SHORT],
+            non_ascii_pages: Vec::new(),
+            non_ascii_chars: Vec::new(),
+        }
     }
 
     /// Takes back an insert of the `len` characters at `text` in `inserted_text`, at `pos`.
@@ -95,7 +109,7 @@ impl<'a> PieceTable<'a> {
             return;
         }
         self.len -= len;
-        let (final_text_bytes, non_ascii) = (&mut self.final_text_bytes, &mut self.non_ascii);
+        let (final_text_bytes, pages, chars) = (&mut self.final_text_bytes, &mut self.non_ascii_pages, &mut self.non_ascii_chars);
         if text.len() == len as usize {
             // All ASCII: characters and bytes coincide.
             self.pieces.remove(pos, len, |at, skip, n| copy(final_text_bytes, at as usize, inserted_text, start + skip as usize, n as usize));
@@ -108,10 +122,7 @@ impl<'a> PieceTable<'a> {
                     rest.nth((skip - passed - 1) as usize);
                 }
                 for (at, ch) in (at as usize..).zip(rest.by_ref().take(n as usize)) {
-                    final_text_bytes[at] = if ch.is_ascii() { ch as u8 } else { NON_ASCII_MARK };
-                    if !ch.is_ascii() {
-                        non_ascii.set(at, ch);
-                    }
+                    place_char(final_text_bytes, pages, chars, at, ch);
                 }
                 passed = skip + n;
             });
@@ -131,7 +142,7 @@ impl<'a> PieceTable<'a> {
     /// Takes back all remaining edits at once, given the text they made. What survives of
     /// `text` goes straight to its final place.
     pub fn undo_rest(&mut self, text: &str) {
-        let (final_text_bytes, non_ascii) = (&mut self.final_text_bytes, &mut self.non_ascii);
+        let (final_text_bytes, pages, chars) = (&mut self.final_text_bytes, &mut self.non_ascii_pages, &mut self.non_ascii_chars);
         if text.len() == self.len as usize {
             // All ASCII: characters and bytes coincide.
             let mut from = 0;
@@ -149,10 +160,7 @@ impl<'a> PieceTable<'a> {
                     continue;
                 };
                 for (at, ch) in (at as usize..).zip(rest.by_ref().take(len as usize)) {
-                    final_text_bytes[at] = if ch.is_ascii() { ch as u8 } else { NON_ASCII_MARK };
-                    if !ch.is_ascii() {
-                        non_ascii.set(at, ch);
-                    }
+                    place_char(final_text_bytes, pages, chars, at, ch);
                 }
             }
             assert!(rest.next().is_none(), "the text is not the document as it stands");
@@ -164,17 +172,17 @@ impl<'a> PieceTable<'a> {
     pub fn into_string(mut self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");
         self.final_text_bytes.truncate(self.final_text_bytes.len() - SHORT);
-        if self.non_ascii.chars.is_empty() {
+        if self.non_ascii_chars.is_empty() {
             return String::from_utf8(self.final_text_bytes).expect("ASCII");
         }
         // Mostly ASCII in practice: whole stretches of it are copied at once.
-        let mut bytes = Vec::with_capacity(self.final_text_bytes.len() + self.non_ascii.chars.len());
+        let mut bytes = Vec::with_capacity(self.final_text_bytes.len() + self.non_ascii_chars.len());
         for (i, stretch) in self.final_text_bytes.chunks(16).enumerate() {
             if stretch.is_ascii() {
                 bytes.extend_from_slice(stretch);
             } else {
                 for (at, &byte) in (i * 16..).zip(stretch) {
-                    let ch = if byte == NON_ASCII_MARK { self.non_ascii.get(at) } else { byte as char };
+                    let ch = if byte == NON_ASCII_MARK { non_ascii_at(&self.non_ascii_pages, &self.non_ascii_chars, at) } else { byte as char };
                     bytes.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
                 }
             }
