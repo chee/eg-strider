@@ -237,3 +237,28 @@ fn holding_backspace_is_stored_as_one_delete() {
     assert_eq!(held.checkout(), "hello ");
     assert_eq!(held.save(), at_once.save());
 }
+
+/// The same, with the backspaces arriving in one run: they take back what was just typed, and
+/// then go on into earlier text. They are stored as the two deletes made at once would be: one
+/// that trims the insert before it, and one that does not.
+#[test]
+fn holding_backspace_in_a_run_is_stored_as_deletes_made_at_once() {
+    let backspace = |pos: u32, len: u32| Edit::Delete { pos, len, backspace: true };
+    let held = [Edit::Insert { pos: 3, len: 3 }, backspace(5, 1), backspace(4, 1), backspace(3, 1), backspace(2, 1), backspace(1, 1)];
+    let at_once = [Edit::Insert { pos: 3, len: 3 }, backspace(3, 3), backspace(1, 2)];
+    let mut logs = [OpLog::new(), OpLog::new(), OpLog::new()];
+    for log in &mut logs {
+        let a = log.get_or_create_agent("a");
+        log.add_insert(a, 0, "xyz");
+    }
+    let [run, apart, made_at_once] = &mut logs;
+    let (b, tip) = (run.get_or_create_agent("b"), run.frontier());
+    run.add_remote_ops(b, 0, &tip, &held, "abc").unwrap();
+    let b = apart.get_or_create_agent("b");
+    one_at_a_time(apart, b, &held, "abc");
+    let b = made_at_once.get_or_create_agent("b");
+    made_at_once.add_remote_ops(b, 0, &tip, &at_once, "abc").unwrap();
+    assert_eq!(run.checkout(), "x");
+    assert_eq!(apart.checkout(), "x");
+    assert_eq!(run.save(), made_at_once.save());
+}

@@ -175,6 +175,17 @@ pub struct OpLog {
     totals: (u32, u32),
 }
 
+/// Counts the edits at the start of `edits`, up to `room`, that go on holding backspace from a
+/// delete at `pos`: each removing the one character before the one before.
+#[inline(never)]
+fn held_backspaces(edits: &[Edit], pos: u32, room: u32) -> u32 {
+    let mut held = 0;
+    while held < room && matches!(edits.get(held as usize), Some(&Edit::Delete { pos: at, len: 1, .. }) if at + held + 1 == pos) {
+        held += 1;
+    }
+    held
+}
+
 /// Returns how many bytes of `text` come before the first that is not ASCII.
 fn ascii_prefix(text: &[u8]) -> usize {
     // Whole blocks are checked a word at a time; only the block that fails is searched.
@@ -355,7 +366,7 @@ impl OpLog {
         // The op being built, which each edit that carries it on is joined into. It is stored
         // once one does not, so that most edits change nothing in memory.
         let mut last = if event > 0 && parents == [event - 1] { self.ops.pop() } else { None };
-        let (mut inserted, mut removed) = (0, 0);
+        let mut inserted = 0;
         let mut at = self.content.len() as u32;
         self.content.push_str(text);
         let end = u32::try_from(self.content.len()).expect("more inserted text than a u32 counts");
@@ -366,7 +377,30 @@ impl OpLog {
         // The insert just before, if only deletes of its end have followed: where what is
         // left of it ends, and how much is left.
         let (mut next, mut open) = (event, None::<(u32, u32)>);
-        for (kind, forward, pos, len) in ops.iter().map(parts).filter(|&(.., len)| len > 0) {
+        let mut i = 0;
+        while let Some(edit) = ops.get(i) {
+            i += 1;
+            let (kind, mut forward, mut pos, mut len) = parts(edit);
+            if len == 0 {
+                continue;
+            }
+            // Holding backspace: deletes of one character, each just before the one before,
+            // often hundreds in a row. They are taken as one delete that runs backwards, no
+            // longer than what is left of the insert before if the first trims it.
+            if kind == OpKind::Del && len == 1 && matches!(ops.get(i), Some(&Edit::Delete { pos: at, len: 1, .. }) if at + 1 == pos) {
+                // Rare in most histories, and laid out away from the rest so that it costs
+                // them nothing much; where it is common, a whole run is taken at once.
+                std::hint::cold_path();
+                let room = match open {
+                    Some((end, left)) if pos + 1 == end && left >= 1 => left,
+                    _ => MAX_OP_LEN,
+                };
+                let held = held_backspaces(&ops[i..], pos, room - 1);
+                if held > 0 {
+                    (forward, pos, len) = (false, pos - held, len + held);
+                    i += held as usize;
+                }
+            }
             let bytes = match kind {
                 OpKind::Del => 0,
                 OpKind::Ins if len <= plain.saturating_sub(at) => len,
@@ -378,9 +412,8 @@ impl OpLog {
             };
             let trims = kind == OpKind::Del && open.is_some_and(|(end, left)| pos + len == end && len <= left);
             let op = Op::new(next, len, kind, forward, trims, pos, at + bytes);
-            match kind {
-                OpKind::Ins => inserted += len,
-                OpKind::Del => removed += len,
+            if kind == OpKind::Ins {
+                inserted += len;
             }
             if !last.as_mut().is_some_and(|last| last.join(op)) {
                 self.ops.extend(last.replace(op));
@@ -394,7 +427,8 @@ impl OpLog {
             (at, next) = (at + bytes, next.checked_add(len).expect("more events than a u32 counts"));
         }
         self.ops.extend(last);
-        self.totals = (self.totals.0 + inserted, self.totals.1 + removed);
+        // Every event either inserts or removes a character.
+        self.totals = (self.totals.0 + inserted, self.totals.1 + (next - event - inserted));
         debug_assert_eq!(at, end, "the text is not what the inserts put in");
         next - event
     }
