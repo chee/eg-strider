@@ -1,5 +1,5 @@
 use super::{OpLog, OperationKind, OperationRun, OperationRunSlice, ReplicaRun, MAX_OP_LEN};
-use crate::replay::DocumentState;
+use crate::replay::{DocumentState, ReplayPlan};
 use std::borrow::Cow;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex, EventRunIndex, HistoryRange};
@@ -152,9 +152,9 @@ impl OpLog {
 
         let mut unread = self.unread_history.take().expect("the saved history was just read");
         let later = std::mem::replace(self, read);
-        (self.next_sequence_numbers, self.replay_cache) = (later.next_sequence_numbers, later.replay_cache);
+        (self.next_sequence_numbers, self.replay_plan) = (later.next_sequence_numbers, later.replay_plan);
         (self.base, self.latest_document_state) = (later.base, later.latest_document_state);
-        self.replay_cache.outdate();
+        self.replay_plan.iter_mut().for_each(ReplayPlan::outdate);
         let shift = self.inserted_text.len() as u32;
         self.inserted_text.push_str(&later.inserted_text);
         self.ops.extend(later.ops.into_iter().map(|op| OperationRun { inserted_text_end: op.inserted_text_end + shift, ..op }));

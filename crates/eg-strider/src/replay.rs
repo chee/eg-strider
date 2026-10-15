@@ -98,15 +98,6 @@ pub(crate) struct DocumentState {
     pub text: String,
 }
 
-/// What earlier replays of a log worked out.
-#[derive(Default)]
-pub(crate) struct ReplayCache {
-    plan: Option<ReplayPlan>,
-    /// How many ranges of runs and positions the concurrent ranges took last time, to reserve
-    /// next time.
-    room: (usize, usize),
-}
-
 /// Space for merging concurrent ranges, reused across ranges.
 #[derive(Default)]
 struct MergeScratch {
@@ -115,8 +106,9 @@ struct MergeScratch {
     transform: Transform,
 }
 
-/// The history's shape, valid while the log has the same number of events.
-struct ReplayPlan {
+/// The history's shape, and what earlier replays of a log worked out, valid while the log has
+/// the same number of events.
+pub(crate) struct ReplayPlan {
     events: usize,
     /// The first event of each range.
     range_starts: Vec<EventIndex>,
@@ -127,12 +119,16 @@ struct ReplayPlan {
     /// Per range, what its starting critical version keeps: nothing unless it is a concurrent
     /// range that went through the CRDT records.
     resolved: Vec<ResolvedOrigins>,
+    /// How many ranges of runs and positions the concurrent ranges took last time, to reserve
+    /// next time.
+    room: (usize, usize),
 }
 
 impl ReplayPlan {
     /// Analyses the log, taking over what the `previous` plan resolved for concurrent ranges that
     /// start at the same event.
     fn new(log: &OpLog, mut previous: Option<ReplayPlan>) -> Self {
+        let room = previous.as_ref().map_or((0, 0), |previous| previous.room);
         let runs = log.graph.runs();
         let ranges = log.graph.split_at_critical_versions();
         let range_starts = ranges.iter().map(|range| runs.start(range.runs().start)).collect();
@@ -144,7 +140,7 @@ impl ReplayPlan {
                 _ => ResolvedOrigins::default(),
             })
             .collect();
-        ReplayPlan { events: log.len(), range_starts, ranges, first_op_of_run, resolved }
+        ReplayPlan { events: log.len(), range_starts, ranges, first_op_of_run, resolved, room }
     }
 
     /// Takes what was resolved for the concurrent range starting at `start`, if anything.
@@ -176,40 +172,31 @@ impl ReplayPlan {
         }
     }
 
-    /// Counts the concurrent ranges that have been through the CRDT records.
-    fn ranges_using_crdt_records(&self) -> usize {
-        self.resolved.iter().filter(|resolved| resolved.events > 0).count()
-    }
-}
-
-impl ReplayCache {
-    /// Returns how many concurrent ranges the last replay could not merge by transforming alone.
+    /// Counts the concurrent ranges that the last replay could not merge by transforming alone.
     pub(crate) fn ranges_using_crdt_records(&self) -> usize {
-        self.plan.as_ref().map_or(0, ReplayPlan::ranges_using_crdt_records)
+        self.resolved.iter().filter(|resolved| resolved.events > 0).count()
     }
 
     /// Notes that the log's event runs changed though its events did not.
     pub(crate) fn outdate(&mut self) {
-        if let Some(plan) = &mut self.plan {
-            plan.events = usize::MAX;
-        }
+        self.events = usize::MAX;
     }
 }
 
 /// Replays the log's events after `base` into the document state `base` holds, reusing and
-/// updating `cache`. Returns the text and its length in characters.
+/// updating the `plan` that earlier replays made. Returns the text and its length in characters.
 ///
 /// Linear ranges apply as recorded. A concurrent range is merged by transforming if it can be,
 /// else with the CRDT records, whose results are cached at the range's critical version. Merging
 /// only works out where each operation goes; the text is then built by taking the operations
 /// back, last to first. If `base` ends inside a concurrent range, an event run and an operation
 /// run must start there: the range's events that `base` holds are walked first and not recorded.
-pub(crate) fn replay(log: &OpLog, cache: &mut ReplayCache, base: &DocumentState) -> (String, u32) {
+pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &DocumentState) -> (String, u32) {
     // The log only ever grows, so the same length means the same events.
-    if cache.plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
-        cache.plan = Some(ReplayPlan::new(log, cache.plan.take()));
+    if plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
+        *plan = Some(ReplayPlan::new(log, plan.take()));
     }
-    let plan = cache.plan.as_mut().expect("a plan was just made");
+    let plan = plan.as_mut().expect("a plan was just made");
     let mut resolved = std::mem::take(&mut plan.resolved);
 
     // Forwards: merge the concurrent ranges. The events of a linear range are operations already,
@@ -219,8 +206,8 @@ pub(crate) fn replay(log: &OpLog, cache: &mut ReplayCache, base: &DocumentState)
     debug_assert!((log.graph.first_held_event()..log.graph.len()).contains(&base.events), "a base the log does not reach back to");
     let first_new_run = runs.containing(base.events);
     let mut transformed = TransformedOperations {
-        merge_order: Vec::with_capacity(cache.room.0),
-        positions: Vec::with_capacity(cache.room.1),
+        merge_order: Vec::with_capacity(plan.room.0),
+        positions: Vec::with_capacity(plan.room.1),
         removed_pieces: 0,
         len: base.chars,
         first_new_run,
@@ -247,7 +234,7 @@ pub(crate) fn replay(log: &OpLog, cache: &mut ReplayCache, base: &DocumentState)
     // The text is built without the room that merging took.
     drop(scratch);
     plan.resolved = resolved;
-    cache.room = (transformed.merge_order.len(), transformed.positions.len());
+    plan.room = (transformed.merge_order.len(), transformed.positions.len());
 
     // Backwards: take every operation back, starting from the final document.
     let mut text = PieceTable::new(transformed.len, log.inserted_text());

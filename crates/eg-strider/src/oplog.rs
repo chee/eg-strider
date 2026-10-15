@@ -2,7 +2,7 @@ mod file;
 
 pub use file::Malformed;
 
-use crate::replay::{self, DocumentState, ReplayCache};
+use crate::replay::{self, DocumentState, ReplayPlan};
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex};
@@ -172,7 +172,8 @@ pub struct OpLog {
     replica_names: Vec<String>,
     next_sequence_numbers: Vec<SequenceNumber>,
     replica_runs: Vec<ReplicaRun>,
-    replay_cache: ReplayCache,
+    /// What earlier replays worked out, while the log has as many events.
+    replay_plan: Option<ReplayPlan>,
     /// The document as of some first events, which the next merge starts from.
     base: DocumentState,
     /// The fully merged document, when the log ends with concurrent events. The base stays put
@@ -250,11 +251,11 @@ impl OpLog {
             // The merge then has to tell what the base holds from the rest.
             if self.graph.start_run_at(self.base.events) {
                 self.split_op(self.base.events);
-                self.replay_cache.outdate();
+                self.replay_plan.iter_mut().for_each(ReplayPlan::outdate);
             }
-            let mut cache = std::mem::take(&mut self.replay_cache);
-            let (text, chars) = replay::replay(self, &mut cache, &self.base);
-            self.replay_cache = cache;
+            let mut plan = self.replay_plan.take();
+            let (text, chars) = replay::replay(self, &mut plan, &self.base);
+            self.replay_plan = plan;
             let merged = DocumentState { events: len, chars, text };
             if self.graph.frontier().len() == 1 {
                 (self.base, self.latest_document_state) = (merged, None);
@@ -277,14 +278,14 @@ impl OpLog {
 
     /// Returns how many concurrent ranges the last checkout could not merge by transforming alone.
     pub fn ranges_using_crdt_records(&self) -> usize {
-        self.replay_cache.ranges_using_crdt_records()
+        self.replay_plan.as_ref().map_or(0, ReplayPlan::ranges_using_crdt_records)
     }
 
     /// Drops what earlier checkouts worked out, so that the next one starts from scratch. This
     /// reads back all saved history, which fails if it is damaged.
     pub fn clear_replay_cache(&mut self) -> Result<(), Malformed> {
         self.unpack_from(0)?;
-        (self.replay_cache, self.base, self.latest_document_state) = (ReplayCache::default(), DocumentState::default(), None);
+        (self.replay_plan, self.base, self.latest_document_state) = (None, DocumentState::default(), None);
         Ok(())
     }
 
