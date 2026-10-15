@@ -17,7 +17,11 @@ diamond-types = { git = "https://github.com/josephg/diamond-types", rev = "89ae3
 jumprope = "1.1"
 zstd = "0.13"
 loro = "1.16.2"
-automerge = "0.6.1"
+automerge = "0.12.0"
+# Makes the Automerge changes that the benchmark applies with the version above. From 0.7 on,
+# applying a few changes walks every op in the document, so making the concurrent traces,
+# each writer taking in the others' changes as it goes, does not finish.
+automerge_replay = { package = "automerge", version = "0.6.1" }
 yrs = "0.28.0"
 # Reads the paper's editing traces, which are JSON.
 serde_json = "1"

@@ -213,13 +213,13 @@ pub fn replay<R: Replica>(history: &History<TextOperation, usize>, limit: Durati
 }
 
 pub struct Automerge {
-    document: automerge::AutoCommit,
-    text: automerge::ObjId,
+    document: automerge_replay::AutoCommit,
+    text: automerge_replay::ObjId,
 }
 
 /// The document every Automerge replica starts from, which holds the text object.
 fn automerge_base() -> &'static [u8] {
-    use automerge::{transaction::Transactable, ActorId, AutoCommit, ObjType, ROOT};
+    use automerge_replay::{transaction::Transactable, ActorId, AutoCommit, ObjType, ROOT};
     static BASE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     BASE.get_or_init(|| {
         let mut document = AutoCommit::new().with_actor(ActorId::from(vec![0u8; 8]));
@@ -229,21 +229,21 @@ fn automerge_base() -> &'static [u8] {
 }
 
 impl Replica for Automerge {
-    type Update = automerge::Change;
+    type Update = automerge_replay::Change;
 
     fn new(peer: u64, _: bool) -> Self {
-        use automerge::{ActorId, AutoCommit, ReadDoc, ROOT};
+        use automerge_replay::{ActorId, AutoCommit, ReadDoc, ROOT};
         let document = AutoCommit::load(automerge_base()).unwrap().with_actor(ActorId::from(peer.to_be_bytes().to_vec()));
         let (_, text) = document.get(ROOT, "text").unwrap().unwrap();
         Automerge { document, text }
     }
 
     fn start() -> Vec<Self::Update> {
-        automerge::AutoCommit::load(automerge_base()).unwrap().get_changes(&[]).into_iter().cloned().collect()
+        automerge_replay::AutoCommit::load(automerge_base()).unwrap().get_changes(&[]).into_iter().cloned().collect()
     }
 
     fn fork(&mut self, peer: u64) -> Self {
-        let document = self.document.fork().with_actor(automerge::ActorId::from(peer.to_be_bytes().to_vec()));
+        let document = self.document.fork().with_actor(automerge_replay::ActorId::from(peer.to_be_bytes().to_vec()));
         Automerge { document, text: self.text.clone() }
     }
 
@@ -252,7 +252,7 @@ impl Replica for Automerge {
     }
 
     fn edit(&mut self, edits: &[Edit]) -> (Option<Self::Update>, usize) {
-        use automerge::{transaction::Transactable, ReadDoc};
+        use automerge_replay::{transaction::Transactable, ReadDoc};
         let (mut moved, mut made) = (0, false);
         for edit in edits {
             let len = self.document.length(&self.text);
