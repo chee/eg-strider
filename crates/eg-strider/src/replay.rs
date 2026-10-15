@@ -1,6 +1,6 @@
 use crate::crdt_records::{CrdtRecords, DeleteTargets, RecordId};
 use crate::oplog::{ByteRange, OpLog, OperationKind, OperationRunIndex, OperationRunSlice};
-use crate::transform::Transform;
+use crate::transform::merge_by_transforming;
 use std::ops::Range;
 use strider_graph::{walk, EventIndex, EventRunIndex, HistoryRange, WalkStep};
 use strider_text::PieceTable;
@@ -205,7 +205,9 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
         first_new_run,
         in_base: false,
     };
-    let mut transform = Transform::default();
+    // Space that transforming reuses from one concurrent range to the next, since a merge can
+    // transform thousands.
+    let (mut versions, mut stable, mut edited, mut spare) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     // The ranges that have events after the base, and for each the first of those.
     let after = |range: &HistoryRange| Some(events(range.runs())).filter(|events| events.end > base.events).map(|events| events.start.max(base.events));
     for (range, resolved) in plan.ranges.iter().zip(&mut resolved) {
@@ -219,12 +221,28 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
             }
             HistoryRange::Concurrent(concurrent) => {
                 debug_assert_eq!(from, runs.start(first_new_run.max(concurrent.start)), "a base partway through a run of a concurrent range");
-                replay_concurrent_range(log, plan, concurrent, resolved, &mut transform, &mut transformed)
+                // Nothing resolved: the range has not needed the CRDT records so far. See whether
+                // it does now.
+                let merged = resolved.events == 0
+                    && merge_by_transforming(
+                        log,
+                        runs,
+                        &plan.first_op_of_run,
+                        concurrent,
+                        &mut transformed,
+                        &mut versions,
+                        &mut stable,
+                        &mut edited,
+                        &mut spare,
+                    );
+                if !merged {
+                    replay_concurrent_range(log, plan, concurrent, resolved, &mut transformed)
+                }
             }
         }
     }
     // The text is built without the room that merging took.
-    drop(transform);
+    drop((versions, stable, edited, spare));
     plan.resolved = resolved;
     plan.room = (transformed.merge_order.len(), transformed.positions.len());
 
@@ -289,19 +307,15 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
     (text.into_string(), transformed.len)
 }
 
-/// Replays one concurrent range, recording in `transformed` where its operations go.
+/// Replays one concurrent range with the CRDT records, recording in `transformed` where its
+/// operations go.
 fn replay_concurrent_range(
     log: &OpLog,
     plan: &ReplayPlan,
     range: &Range<EventRunIndex>,
     resolved: &mut ResolvedOrigins,
-    transform: &mut Transform,
     transformed: &mut TransformedOperations,
 ) {
-    // Nothing resolved: the range has not needed the CRDT records so far. See whether it does now.
-    if resolved.events == 0 && transform.try_merge(log, log.graph.runs(), &plan.first_op_of_run, range, transformed) {
-        return;
-    }
     let runs = log.graph.runs();
     let (start, end) = (runs.start(range.start), runs.start(range.end));
     let goes_before = |a: EventIndex, b: EventIndex| log.inserts_before(start + a, start + b);
