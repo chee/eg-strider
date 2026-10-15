@@ -38,7 +38,7 @@ impl Piece {
 struct Chunk {
     len: usize,
     /// The piece found last, and the characters before it in the chunk. The next lookup usually
-    /// lands at or after it.
+    /// lands near it, on either side.
     last: (usize, u32),
     pieces: [Piece; CHUNK],
 }
@@ -72,7 +72,11 @@ impl Chunk {
     /// Finds the piece holding character `offset` of the chunk, and the offset into it. One
     /// past the last piece at the chunk's end.
     fn find(&mut self, offset: u32) -> (usize, u32) {
-        let (mut i, mut start) = if offset < self.last.1 { (0, 0) } else { self.last };
+        let (mut i, mut start) = self.last;
+        while offset < start {
+            i -= 1;
+            start -= self.pieces[i].len;
+        }
         while i < self.len && offset >= start + self.pieces[i].len {
             start += self.pieces[i].len;
             i += 1;
