@@ -1,7 +1,7 @@
-/// In place of a final position: these characters do not survive.
+/// A piece's `at` when its characters do not survive into the final text.
 const DELETED: u32 = u32::MAX;
 
-/// Pieces per node. Tiny in debug builds, so that tests split and empty nodes often.
+/// Tiny in debug builds, so that tests split and empty nodes often.
 const PIECES_PER_NODE: usize = if cfg!(debug_assertions) { 4 } else { 32 };
 
 #[derive(Clone, Copy)]
@@ -12,18 +12,16 @@ struct Piece {
 }
 
 impl Piece {
-    /// Returns the piece with its length changed to `len`.
     fn with_len(self, len: u32) -> Piece {
         Piece { len, ..self }
     }
 
-    /// Returns the piece without its first `skip` characters.
     fn after(self, skip: u32) -> Piece {
         Piece { len: self.len - skip, at: if self.at == DELETED { DELETED } else { self.at + skip } }
     }
 
-    /// Tells whether `next`, which follows this piece, shares its fate: both deleted, or both
-    /// surviving side by side.
+    /// Whether `next`, which follows this piece, can join it: both deleted, or adjacent in the
+    /// final text.
     fn continues_into(self, next: Piece) -> bool {
         if self.at == DELETED || next.at == DELETED {
             self.at == next.at
@@ -33,12 +31,10 @@ impl Piece {
     }
 }
 
-/// Up to [`PIECES_PER_NODE`] pieces, in document order.
 #[derive(Clone, Copy)]
 struct PieceListNode {
     len: usize,
-    /// The finger: the piece found last, and the characters before it in the node. The next
-    /// lookup usually lands near it, on either side.
+    /// The piece found last, and its offset in the node.
     finger: (usize, u32),
     pieces: [Piece; PIECES_PER_NODE],
 }
@@ -46,31 +42,28 @@ struct PieceListNode {
 impl PieceListNode {
     const EMPTY: PieceListNode = PieceListNode { len: 0, finger: (0, 0), pieces: [Piece { len: 0, at: 0 }; PIECES_PER_NODE] };
 
-    /// Returns the number of pieces.
     fn len(&self) -> usize {
         self.len
     }
 
-    /// Returns piece `i`.
     fn piece(&self, i: usize) -> Piece {
         self.pieces[i]
     }
 
-    /// Notes that piece `i` is changing, which moves any remembered piece after it.
+    /// Drops the finger if it is after piece `i`, which is changing.
     fn touch(&mut self, i: usize) {
         if i < self.finger.0 {
             self.finger = (0, 0);
         }
     }
 
-    /// Replaces piece `i`.
     fn set(&mut self, i: usize, piece: Piece) {
         self.touch(i);
         self.pieces[i] = piece;
     }
 
-    /// Finds the piece holding character `offset` of the node, and the offset into it. One
-    /// past the last piece at the node's end.
+    /// The piece holding `offset`, and the offset into it; one past the last piece at the node's
+    /// end.
     fn find(&mut self, offset: u32) -> (usize, u32) {
         let (mut i, mut start) = self.finger;
         while offset < start {
@@ -85,7 +78,7 @@ impl PieceListNode {
         (i, offset - start)
     }
 
-    /// Inserts a piece at `i`. There must be room.
+    /// Inserts a piece at `i`. The node must not be full.
     fn insert(&mut self, i: usize, piece: Piece) {
         self.touch(i);
         self.pieces.copy_within(i..self.len, i + 1);
@@ -93,7 +86,6 @@ impl PieceListNode {
         self.len += 1;
     }
 
-    /// Removes piece `i`.
     fn remove(&mut self, i: usize) {
         self.touch(i);
         self.pieces.copy_within(i + 1..self.len, i);
@@ -101,22 +93,21 @@ impl PieceListNode {
     }
 }
 
-/// The pieces of a [`PieceTable`](crate::PieceTable), in order: stretches of the document that
-/// either sit at a known place in the final text or are deleted later. They are kept in an
-/// unrolled linked list of nodes, and the node and piece used last are tried first.
+/// The document as an unrolled linked list of pieces: stretches that survive at a known place in
+/// the final text, or are deleted later.
 pub(crate) struct PieceList {
     nodes: Vec<PieceListNode>,
-    /// Nodes no longer in use.
+    /// Freed nodes, for reuse.
     spare: Vec<u32>,
-    /// The nodes in document order, and how many characters each holds.
+    /// The nodes in document order, with each one's characters in `totals`.
     order: Vec<u32>,
     totals: Vec<u32>,
-    /// The finger: the node used last, its place in `order`, and its start.
+    /// The node used last: its place in `order`, and its start.
     finger: (usize, u32),
 }
 
 impl PieceList {
-    /// Creates a document of `len` characters that all survive: the final text.
+    /// The final document: `len` characters that all survive.
     pub fn new(len: u32) -> Self {
         let mut first = PieceListNode::EMPTY;
         if len > 0 {
@@ -161,8 +152,8 @@ impl PieceList {
     }
 
     /// Takes the `len` characters at `pos` out of the document, calling `survivor` for each
-    /// surviving stretch with its final position, its offset into the removed characters, and
-    /// its length.
+    /// surviving stretch with its final position, its offset into the removed characters, and its
+    /// length.
     pub fn remove(&mut self, pos: u32, len: u32, mut survivor: impl FnMut(u32, u32, u32)) {
         let mut done = 0;
         while done < len {
@@ -222,8 +213,7 @@ impl PieceList {
         }
     }
 
-    /// Iterates over the pieces in order: each one's length, and its final position if it
-    /// survives.
+    /// Each piece's length, and its final position if it survives, in order.
     pub fn iter(&self) -> impl Iterator<Item = (u32, Option<u32>)> + '_ {
         let pieces = self.order.iter().flat_map(|&id| {
             let node = &self.nodes[id as usize];
@@ -232,8 +222,7 @@ impl PieceList {
         pieces.map(|piece| (piece.len, Some(piece.at).filter(|&at| at != DELETED)))
     }
 
-    /// Finds the node that `pos` is in or at either end of: its place in `order`, and its
-    /// start.
+    /// The node that `pos` is in or at either end of: its place in `order`, and its start.
     fn node_at(&mut self, pos: u32) -> (usize, u32) {
         let (mut place, mut start) = self.finger;
         while pos < start {
@@ -248,7 +237,6 @@ impl PieceList {
         (place, start)
     }
 
-    /// Moves the second half of a node's pieces into a new node after it.
     fn split(&mut self, place: usize) {
         let left = &mut self.nodes[self.order[place] as usize];
         let half = left.len / 2;

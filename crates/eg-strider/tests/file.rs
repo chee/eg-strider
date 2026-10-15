@@ -69,8 +69,8 @@ fn a_loaded_log_carries_on_as_the_original_does() {
     }
 }
 
-/// A long history is saved in several blocks. An event made a little way back needs the
-/// last of them and no more.
+/// A long history is saved in several parts. An event made a little way back needs the last of them
+/// and no more.
 #[test]
 fn an_event_at_an_old_version_reads_only_the_history_since() {
     const EVENTS: EventIndex = 100_000;

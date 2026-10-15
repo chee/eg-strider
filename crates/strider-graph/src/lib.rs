@@ -4,67 +4,61 @@ pub use walk::{walk, WalkStep};
 
 use std::ops::Range;
 
-/// An event's number on this replica, in the order it was learned of.
+/// An event's replica-local index, in the order this replica learned of it.
 pub type EventIndex = u32;
 
-/// Index of an event run among those the graph holds, in order of their first events. Shifts by
-/// one when an earlier run splits.
+/// An event run's position among the graph's runs, which shifts when an earlier run splits.
 pub type EventRunIndex = u32;
 
-/// The causal graph of a document's history: which events each event's author had seen, without
-/// their operations. Merging is only needed where history is concurrent, so the graph is stored
-/// as event runs, with the critical versions that every path passes through kept up to date.
+/// A document's event graph: each event's parents, without its operation.
 #[derive(Default)]
 pub struct CausalGraph {
     runs: EventRuns,
-    /// Events nothing descends from yet, ascending.
+    /// Ascending.
     frontier: Vec<EventIndex>,
-    /// Per run, how many events from the start of history it has seen: exact if it has seen
-    /// all before it, else a lower bound.
+    /// Per run, how long a prefix of history its first event has seen: exact if that is every event
+    /// before it, else a lower bound.
     seen_prefix_len: Vec<EventIndex>,
     /// Runs that start at a critical version, ascending.
     critical_versions: Vec<EventRunIndex>,
 }
 
 impl CausalGraph {
-    /// Creates an empty graph.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Creates a graph of only the events after the first `events`. Every later event must have
-    /// seen `frontier`, the frontier of those first events.
+    /// Creates a graph of the events after the first `events`, which every later event has seen and
+    /// whose frontier is `frontier`.
     pub fn after(events: EventIndex, frontier: &[EventIndex]) -> Self {
         CausalGraph { runs: EventRuns { start: vec![events], ..EventRuns::default() }, frontier: frontier.to_vec(), ..Self::default() }
     }
 
-    /// Returns the first event the graph holds.
     pub fn first_held_event(&self) -> EventIndex {
         self.runs.start[0]
     }
 
-    /// Returns the number of events.
+    /// The number of events, including those before the first held one.
     pub fn len(&self) -> EventIndex {
         self.runs.start(self.runs.len())
     }
 
-    /// Tells whether the graph has no events, held or before its first held event.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Returns the events nothing descends from yet, ascending.
+    /// The frontier, ascending.
     pub fn frontier(&self) -> &[EventIndex] {
         &self.frontier
     }
 
-    /// Tells whether an event with these parents just extends the last event.
+    /// Whether an event with `parents` extends the last event's run.
     pub fn extends_last_event(&self, parents: &[EventIndex]) -> bool {
         !self.runs.is_empty() && parents == [self.len() - 1]
     }
 
-    /// If some later event has not seen every event before `at`, starts a run at `at` and
-    /// returns true.
+    /// Returns whether some later event has not seen everything before `at`, and if so makes a run
+    /// start at `at`.
     pub fn start_run_at(&mut self, at: EventIndex) -> bool {
         if at <= self.first_held_event() || at >= self.len() {
             return false;
@@ -86,14 +80,12 @@ impl CausalGraph {
         true
     }
 
-    /// Returns the graph's event runs.
     pub fn runs(&self) -> &EventRuns {
         &self.runs
     }
 
-    /// Appends a chain of `len` events, the first with `parents`. Returns their ids. `len` must
-    /// not be 0, so that there are never more runs than events, and `parents` must be known
-    /// events in ascending order.
+    /// Appends a chain of `len` > 0 events whose first has `parents`, known events in ascending
+    /// order, and returns their indexes.
     pub fn push(&mut self, parents: &[EventIndex], len: u32) -> Range<EventIndex> {
         let start = self.len();
         debug_assert!(len > 0, "a run of no events");
@@ -149,7 +141,8 @@ impl CausalGraph {
         start..end
     }
 
-    /// Returns how many events from the start of history a run's last event has seen.
+    /// How long a prefix of history a run's last event has seen, exact or a lower bound as
+    /// `seen_prefix_len` is.
     fn seen_prefix_len_after(&self, run: EventRunIndex) -> EventIndex {
         let i = run as usize;
         if self.seen_prefix_len[i] == self.runs.start[i] {
@@ -183,7 +176,7 @@ impl CausalGraph {
         }
     }
 
-    /// Splits the history at its critical versions.
+    /// Cuts the history at its critical versions, joining consecutive linear runs into one range.
     pub fn split_at_critical_versions(&self) -> Vec<HistoryRange> {
         let runs = self.runs.len();
         let critical = &self.critical_versions;
@@ -208,9 +201,7 @@ impl CausalGraph {
     }
 }
 
-/// Inserts `item` into `list` at `at`, adding `grow(old)` to each item after it as it moves along
-/// one. Splits land near the end, so one pass from there costs less than moving the rest and then
-/// passing over it again.
+/// Inserts `item` at `at`, adding `grow(old)` to each later item as it shifts, in one pass.
 fn insert_and_grow(list: &mut Vec<u32>, at: usize, item: u32, grow: impl Fn(u32) -> u32) {
     list.push(item);
     for i in (at + 1..list.len()).rev() {
@@ -219,13 +210,13 @@ fn insert_and_grow(list: &mut Vec<u32>, at: usize, item: u32, grow: impl Fn(u32)
     list[at] = item;
 }
 
-/// The graph cut into event runs: maximal chains of events that nothing branches off partway,
-/// so a version holds a run whole or not at all.
+/// The graph's events grouped into runs of consecutive events, each the only parent of the next,
+/// that nothing branches off partway.
 pub struct EventRuns {
-    /// Run `i` covers events `start[i]..start[i + 1]`.
+    /// Run `i` is events `start[i]..start[i + 1]`.
     start: Vec<EventIndex>,
     parent_start: Vec<u32>,
-    /// Each run's parent runs: those its first event's parents end.
+    /// Run `i`'s parent runs are `parents[parent_start[i]..parent_start[i + 1]]`.
     parents: Vec<EventRunIndex>,
 }
 
@@ -235,17 +226,16 @@ impl Default for EventRuns {
     }
 }
 
-/// A stretch of history between two critical versions.
+/// A range of event runs between two critical versions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoryRange {
-    /// Runs nothing is concurrent with: their events apply as recorded.
+    /// Runs with nothing concurrent, whose operations apply as recorded.
     Linear(Range<EventRunIndex>),
-    /// Runs with concurrency among them, which have to be merged.
+    /// Runs with concurrent events among them.
     Concurrent(Range<EventRunIndex>),
 }
 
 impl HistoryRange {
-    /// Returns the runs in the range.
     pub fn runs(&self) -> &Range<EventRunIndex> {
         match self {
             HistoryRange::Linear(runs) | HistoryRange::Concurrent(runs) => runs,
@@ -254,33 +244,29 @@ impl HistoryRange {
 }
 
 impl EventRuns {
-    /// Returns the number of runs.
     pub fn len(&self) -> EventRunIndex {
         (self.parent_start.len() - 1) as EventRunIndex
     }
 
-    /// Tells whether there are no runs.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Returns a run's first event. One past the last run gives the number of events.
+    /// A run's first event; for one past the last run, the number of events.
     pub fn start(&self, run: EventRunIndex) -> EventIndex {
         self.start[run as usize]
     }
 
-    /// Returns the events in a run.
     pub fn events(&self, run: EventRunIndex) -> Range<EventIndex> {
         self.start(run)..self.start(run + 1)
     }
 
-    /// Returns the runs that a run's first event has as parents.
+    /// The runs whose last events are the parents of `run`'s first event.
     pub fn parents(&self, run: EventRunIndex) -> &[EventRunIndex] {
         let i = run as usize;
         &self.parents[self.parent_start[i] as usize..self.parent_start[i + 1] as usize]
     }
 
-    /// Finds the run holding an event.
     pub fn containing(&self, event: EventIndex) -> EventRunIndex {
         // Parents are mostly recent events: the last few runs are tried one by one, and from
         // there the search widens backwards.

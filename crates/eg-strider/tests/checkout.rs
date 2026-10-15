@@ -1,7 +1,7 @@
 use eg_strider::{EventIndex, OpLog, Operation};
 
-/// Two replicas rewrite different ends of a shared text at once. Nothing either does lands
-/// among what the other did, so the tracker is never needed.
+/// Two replicas rewrite different ends of a shared text at once. Neither lands among what the other
+/// did, so merging needs no CRDT records.
 #[test]
 fn concurrent_edits_that_keep_apart_are_merged_by_shifting() {
     let mut log = OpLog::new();

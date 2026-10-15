@@ -8,15 +8,16 @@ use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex};
 
-/// How many events a replica made before this one. With the replica, it names an event on every
+/// An event's index among its replica's events; with the replica, it names the event on every
 /// replica.
 pub type SequenceNumber = u32;
+/// A replica's index in this log, in the order the log registered it.
 pub type ReplicaId = u32;
 
-/// Index of an op in the log.
+/// An operation run's position in the log.
 pub(crate) type OperationRunIndex = u32;
 
-/// A run of consecutive events by one replica.
+/// Consecutive events by one replica with consecutive sequence numbers.
 struct ReplicaRun {
     first_event: EventIndex,
     len: u32,
@@ -24,18 +25,11 @@ struct ReplicaRun {
     sequence_number: SequenceNumber,
 }
 
-/// The operation log: every insert and delete this replica knows of, in the order it learned of
-/// them, with each event's parents, replica and position. Consecutive events are run-length
-/// encoded into operation runs, and inserted text lives in one append-only buffer. A checkout
-/// replays the events in the style of Eg-walker (Gentle and Kleppmann, 2024), building CRDT
-/// records only where history is concurrent; on top of that, concurrent ranges whose operations
-/// do not touch are merged by transforming positions, what the CRDT records work out is cached
-/// at critical versions, and the text is built backwards without a rope.
+/// An Eg-walker (Gentle and Kleppmann, 2024) operation log: every event a replica knows of, with
+/// its parents, replica and operation.
 ///
-/// Events must be valid as the Eg-walker paper defines it (Definition C.1): each is added once,
-/// its parents are events the log already has, and each position exists in the document at its
-/// parents. The paper's replicas are not Byzantine, so a run of operations also carries exactly
-/// the text its inserts put in. None of this is checked.
+/// Events must be valid as the paper's Definition C.1 defines, and a chain of operations must carry
+/// exactly its inserts' text; neither is checked.
 #[derive(Default)]
 pub struct OpLog {
     pub(crate) graph: CausalGraph,
@@ -44,23 +38,22 @@ pub struct OpLog {
     replica_names: Vec<String>,
     next_sequence_numbers: Vec<SequenceNumber>,
     replica_runs: Vec<ReplicaRun>,
-    /// What earlier replays worked out, while the log has as many events.
     replay_plan: Option<ReplayPlan>,
-    /// The document as of some first events, which the next merge starts from.
+    /// The document as of a prefix of history, which the next checkout replays from.
     base: DocumentState,
-    /// The fully merged document, when the log ends with concurrent events. The base stays put
-    /// then, since moving it into events still being added would cut them up at every merge.
+    /// The latest checkout, while the frontier has more than one event; the base then stays put, so
+    /// that runs still being appended to are not split at every checkout.
     latest_document_state: Option<DocumentState>,
-    /// History from before the first event held here, from a loaded file, still unread.
+    /// The loaded file's history from before the first held event, not yet read back.
     unread_history: Option<file::UnreadHistory>,
-    /// Scratch for the frontier, as a local event's parents.
+    /// Reused buffer for the frontier as a local event's parents.
     parents: Vec<EventIndex>,
-    /// The characters the inserts put in, and the characters the deletes take out.
+    /// Characters inserted and deleted over all events.
     totals: (u32, u32),
 }
 
-/// Counts the edits at the start of `edits`, up to `room`, that go on holding backspace from a
-/// delete at `pos`: each removing the one character before the one before.
+/// How many of the first `room` of `edits` continue a backspace run from a delete at `pos`, each
+/// deleting the character before the last.
 #[inline(never)]
 fn held_backspaces(edits: &[Operation], pos: u32, room: u32) -> u32 {
     let mut held = 0;
@@ -70,7 +63,7 @@ fn held_backspaces(edits: &[Operation], pos: u32, room: u32) -> u32 {
     held
 }
 
-/// Returns how many bytes of `text` come before the first that is not ASCII.
+/// The length of `text`'s ASCII prefix.
 fn ascii_prefix(text: &[u8]) -> usize {
     // Whole 256-byte chunks are checked a word at a time; only the chunk that fails is searched.
     let chunks = text.chunks(256).take_while(|chunk| chunk.is_ascii()).count();
@@ -79,22 +72,19 @@ fn ascii_prefix(text: &[u8]) -> usize {
 }
 
 impl OpLog {
-    /// Creates an empty log.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the number of events: characters inserted plus characters deleted.
+    /// The number of events: characters inserted plus characters deleted.
     pub fn len(&self) -> usize {
         self.graph.len() as usize
     }
 
-    /// Tells whether the log has no events.
     pub fn is_empty(&self) -> bool {
         self.graph.is_empty()
     }
 
-    /// Returns the id of the replica called `name`, registering it if it is new.
     pub fn get_or_create_replica(&mut self, name: &str) -> ReplicaId {
         if let Some(i) = self.replica_names.iter().position(|n| n == name) {
             return i as ReplicaId;
@@ -104,18 +94,16 @@ impl OpLog {
         (self.replica_names.len() - 1) as ReplicaId
     }
 
-    /// Returns a replica's name, if the log has the replica.
     pub fn replica_name(&self, replica: ReplicaId) -> Option<&str> {
         self.replica_names.get(replica as usize).map(String::as_str)
     }
 
-    /// Returns the events with no children: the version a local edit builds on.
+    /// The frontier: the version a local edit is made at.
     pub fn frontier(&self) -> Vec<EventIndex> {
         self.graph.frontier().to_vec()
     }
 
-    /// Merges every event and returns the document, going through only the events since the
-    /// last merge where history allows.
+    /// Merges every event and returns the document.
     pub fn checkout(&mut self) -> &str {
         let len = self.graph.len();
         if self.base.events != len && self.latest_document_state.as_ref().is_none_or(|latest| latest.events != len) {
@@ -138,57 +126,54 @@ impl OpLog {
         &self.merged().text
     }
 
-    /// Returns the document as of the last merge.
+    /// The document as of the last checkout.
     fn merged(&self) -> &DocumentState {
         self.latest_document_state.as_ref().unwrap_or(&self.base)
     }
 
-    /// Returns how many events of a loaded log's history are still unread.
+    /// How many events of a loaded file's history have not been read back.
     pub fn unread_events(&self) -> usize {
         self.graph.first_held_event() as usize
     }
 
-    /// Returns how many concurrent ranges the last checkout could not merge by transforming alone.
+    /// How many concurrent ranges have needed CRDT records rather than transforming alone.
     pub fn ranges_using_crdt_records(&self) -> usize {
         self.replay_plan.as_ref().map_or(0, ReplayPlan::ranges_using_crdt_records)
     }
 
-    /// Drops what earlier checkouts worked out, so that the next one starts from scratch. This
-    /// reads back all saved history, which fails if it is damaged.
+    /// Forgets every cached replay result, reading back all saved history, so that the next
+    /// checkout replays from the start.
     pub fn clear_replay_cache(&mut self) -> Result<(), Malformed> {
         self.unpack_from(0)?;
         (self.replay_plan, self.base, self.latest_document_state) = (None, DocumentState::default(), None);
         Ok(())
     }
 
-    /// Inserts `text` at `pos` in the document as of the current frontier, which never needs
-    /// saved history read back.
+    /// Inserts `text` at `pos` in the document at the frontier.
     pub fn add_insert(&mut self, replica: ReplicaId, pos: usize, text: &str) -> Range<EventIndex> {
         self.append_events(replica, None, None, OperationKind::Insert, false, pos, text.chars().count(), text)
     }
 
-    /// Deletes `range` from the document as of the current frontier.
+    /// Deletes `range` from the document at the frontier.
     pub fn add_delete(&mut self, replica: ReplicaId, range: Range<usize>) -> Range<EventIndex> {
         self.append_events(replica, None, None, OperationKind::Delete, false, range.start, range.len(), "")
     }
 
-    /// Inserts `text` at `pos` in the document as of version `parents`, which must be ascending.
-    /// Fails only if saved history that this needs read back is damaged.
+    /// Inserts `text` at `pos` in the document at version `parents` (ascending), reading back saved
+    /// history if needed.
     pub fn add_insert_at(&mut self, replica: ReplicaId, parents: &[EventIndex], pos: usize, text: &str) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
         Ok(self.append_events(replica, None, Some(parents), OperationKind::Insert, false, pos, text.chars().count(), text))
     }
 
-    /// Deletes `range` from the document as of version `parents`, which must be ascending.
-    /// `backward` is true for backspace, which removes the last character first. Fails only if
-    /// saved history that this needs read back is damaged.
+    /// Deletes `range` from the document at version `parents` (ascending), the last character first
+    /// if `backward`, reading back saved history if needed.
     pub fn add_delete_at(&mut self, replica: ReplicaId, parents: &[EventIndex], range: Range<usize>, backward: bool) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
         Ok(self.append_events(replica, None, Some(parents), OperationKind::Delete, backward, range.start, range.len(), ""))
     }
 
-    /// As [`add_insert_at`](Self::add_insert_at), for an event from elsewhere with a fixed
-    /// sequence number.
+    /// As [`add_insert_at`](Self::add_insert_at), for a remote event with its own sequence number.
     pub fn add_remote_insert(
         &mut self,
         replica: ReplicaId,
@@ -201,8 +186,7 @@ impl OpLog {
         Ok(self.append_events(replica, Some(sequence_number), Some(parents), OperationKind::Insert, false, pos, text.chars().count(), text))
     }
 
-    /// As [`add_delete_at`](Self::add_delete_at), for an event from elsewhere with a fixed
-    /// sequence number.
+    /// As [`add_delete_at`](Self::add_delete_at), for a remote event with its own sequence number.
     pub fn add_remote_delete(
         &mut self,
         replica: ReplicaId,
@@ -215,9 +199,8 @@ impl OpLog {
         Ok(self.append_events(replica, Some(sequence_number), Some(parents), OperationKind::Delete, backward, range.start, range.len(), ""))
     }
 
-    /// Appends a run of ops by one replica from elsewhere: the first made at `parents`, which must
-    /// be ascending, each other following the one before. `text` holds the inserts' text, in
-    /// order. Fails only if saved history that this needs read back is damaged.
+    /// Appends a remote replica's chain of operations, the first at version `parents` (ascending),
+    /// with `text` holding their inserts' text, reading back saved history if needed.
     pub fn add_remote_ops(
         &mut self,
         replica: ReplicaId,
@@ -237,10 +220,8 @@ impl OpLog {
         Ok(events)
     }
 
-    /// Stores a run's ops and text, and returns the number of events. The graph and the replica's
-    /// numbering are left to the caller. Never inlined: with its callers' values also live, its
-    /// loop runs out of registers and keeps the op being built in memory, which costs a tenth
-    /// more on a run of many edits.
+    /// Stores a chain's operations and text, returning the number of events; the caller updates the
+    /// graph and replica runs. Not inlined, so that its loop keeps the op being built in registers.
     #[inline(never)]
     fn append_operations(&mut self, event: EventIndex, parents: &[EventIndex], ops: &[Operation], text: &str) -> u32 {
         let parts = |edit: &Operation| match *edit {
@@ -317,7 +298,7 @@ impl OpLog {
         next - event
     }
 
-    /// Appends a run of events of one kind, extending the last op when it simply carries on.
+    /// Appends events forming one operation run.
     #[allow(clippy::too_many_arguments)]
     fn append_events(
         &mut self,
@@ -344,10 +325,8 @@ impl OpLog {
         events
     }
 
-    /// Reads back the saved history that an event made at `parents` needs, if it was made
-    /// without all of it: with no parent held here, and not all of the old frontier for parents.
-    /// A saved part starts at a critical version, so the event has all that comes before the
-    /// part holding its latest parent.
+    /// Reads back saved history if an event at `parents` has not seen all of it, from the part
+    /// holding its latest parent: parts start at critical versions.
     fn unpack_needed_history(&mut self, parents: &[EventIndex]) -> Result<(), Malformed> {
         if let Some(unread) = &self.unread_history {
             let first_held = self.graph.first_held_event();
@@ -359,8 +338,8 @@ impl OpLog {
         Ok(())
     }
 
-    /// Adds a chain of `len` events to the graph, the first at `parents` or else the frontier.
-    /// Returns whether they follow the last event, and their ids.
+    /// Adds a chain of `len` events at `parents`, or the frontier for `None`, returning whether
+    /// they follow the last event and their indexes.
     fn add_to_causal_graph(&mut self, parents: Option<&[EventIndex]>, len: u32) -> (bool, Range<EventIndex>) {
         let event = self.graph.len();
         // Most events follow the last one, whose number is then all the graph needs.
@@ -395,7 +374,7 @@ impl OpLog {
         }
     }
 
-    /// Stores an op, joining it into the last op when it follows and carries it on.
+    /// Stores an op, joining it onto the last when it `follows` it and continues it.
     fn append_operation_run(&mut self, follows: bool, op: OperationRun) {
         match op.kind() {
             OperationKind::Insert => self.totals.0 += op.len(),
@@ -423,7 +402,7 @@ impl OpLog {
         }
     }
 
-    /// Returns how many bytes the first `len` characters of the text at `bytes` take.
+    /// The byte length of the first `len` characters of the text at `bytes`.
     #[cold]
     fn prefix(&self, bytes: ByteRange, len: u32) -> u32 {
         let text = self.text(bytes);
@@ -436,8 +415,8 @@ impl OpLog {
         }
     }
 
-    /// Returns the text at `bytes` without its last `cut` characters: what a
-    /// [trimming](OperationRun::deletes_end_of_previous_insert) delete leaves of the insert.
+    /// What is left of the insert text at `bytes`, `len` characters long, after a
+    /// [trimming](OperationRun::deletes_end_of_previous_insert) delete of its last `cut`.
     pub(crate) fn trimmed(&self, bytes: ByteRange, len: u32, cut: u32) -> ByteRange {
         if bytes.1 - bytes.0 == len {
             return (bytes.0, bytes.1 - cut);
@@ -445,14 +424,14 @@ impl OpLog {
         (bytes.0, bytes.0 + self.prefix(bytes, len - cut))
     }
 
-    /// Returns the replica that made `event`, and its sequence number.
+    /// The replica and sequence number of `event`.
     fn replica_at(&self, event: EventIndex) -> (ReplicaId, SequenceNumber) {
         let run = &self.replica_runs[self.replica_runs.partition_point(|r| r.first_event <= event) - 1];
         (run.replica, run.sequence_number + (event - run.first_event))
     }
 
-    /// Breaks a tie between concurrent inserts at the same place: does the insert from `a` go
-    /// before the one from `b`?
+    /// The tie-break between concurrent inserts at one position: whether `a`'s goes first, by
+    /// replica name and then sequence number.
     pub(crate) fn inserts_before(&self, a: EventIndex, b: EventIndex) -> bool {
         let (replica_a, sequence_number_a) = self.replica_at(a);
         let (replica_b, sequence_number_b) = self.replica_at(b);
@@ -463,8 +442,8 @@ impl OpLog {
         }
     }
 
-    /// Returns, for each event in ascending `starts`, the index of the op holding it, or the
-    /// number of ops for the event after the last.
+    /// For each of the ascending `starts`, the op holding it, or the number of ops past the last
+    /// event.
     pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = EventIndex>) -> Vec<OperationRunIndex> {
         let mut op = 0;
         starts
@@ -487,28 +466,26 @@ impl OpLog {
         (ops.start as usize..ops.start as usize + count).map(move |op| self.slice(op, &events))
     }
 
-    /// Returns the index of the op holding `event`.
     pub(crate) fn op_containing(&self, event: EventIndex) -> OperationRunIndex {
         self.ops.partition_point(|op| op.first_event + op.len() <= event) as OperationRunIndex
     }
 
-    /// Returns all inserted text, which [`OperationRunSlice`] ranges point into.
+    /// All inserted text, which [`OperationRunSlice::text`] points into.
     pub(crate) fn inserted_text(&self) -> &str {
         &self.inserted_text
     }
 
-    /// Returns the inserted text at a range.
     fn text(&self, (start, end): ByteRange) -> &str {
         &self.inserted_text[start as usize..end as usize]
     }
 
-    /// Returns what [`lengths`](Self::lengths) would count over every event.
+    /// [`lengths`](Self::lengths) over every event.
     pub(crate) fn total_lengths(&self) -> (u32, u32) {
         self.totals
     }
 
-    /// Counts the characters `events` insert and remove, applied as recorded. `first_op` is the
-    /// op holding the first of them.
+    /// Counts the characters `events` insert and remove, applied as recorded. `first_op` is the op
+    /// holding the first of them.
     pub(crate) fn lengths(&self, first_op: OperationRunIndex, events: Range<EventIndex>) -> (u32, u32) {
         let (mut inserted, mut removed) = (0, 0);
         for op in &self.ops[first_op as usize..] {
@@ -525,7 +502,7 @@ impl OpLog {
         (inserted, removed)
     }
 
-    /// Returns the bytes of characters `from..to` of the text at `bytes`.
+    /// The byte range of characters `from..to` of the text at `bytes`.
     #[cold]
     fn char_bytes(&self, bytes: ByteRange, from: u32, to: u32) -> ByteRange {
         let text = self.text(bytes);
@@ -536,7 +513,7 @@ impl OpLog {
         (bytes.0 + first, bytes.0 + last)
     }
 
-    /// Cuts out the part of op `i` inside `events`.
+    /// The part of op `i` inside `events`.
     #[inline]
     fn slice(&self, i: usize, events: &Range<EventIndex>) -> OperationRunSlice {
         let op = &self.ops[i];

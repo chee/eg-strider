@@ -13,38 +13,40 @@ pub struct Patch {
     pub text: String,
 }
 
-/// One peer's document in some library.
+/// One peer's document in another library, as [`replay`] drives it.
 pub trait Replica {
-    /// What a batch of patches turns into, to pass to other replicas.
+    /// What a batch of patches produces for other replicas.
     type Update;
 
-    /// Creates an empty replica for `peer`. `ascii` says whether all the text to come is ASCII.
+    /// An empty replica for `peer`; `ascii` tells whether all text to come is ASCII.
     fn new(peer: u64, ascii: bool) -> Self;
 
-    /// Copies this replica, for another peer to carry on from.
+    /// A copy of this replica for `peer` to continue from.
     fn fork(&mut self, peer: u64) -> Self;
 
-    /// Takes in what other replicas made.
+    /// Applies other replicas' updates.
     fn apply(&mut self, updates: &[&Self::Update]);
 
-    /// Makes the patches. Returns what they made, if anything, and how many were moved to the end
+    /// Makes the patches, returning their update, if any, and how many had to be moved to the end
     /// or cut short.
     fn edit(&mut self, patches: &[Patch]) -> (Option<Self::Update>, usize);
 
-    /// Returns an update as the library sends it.
+    /// An update as the library encodes it for sending.
     fn bytes(update: &Self::Update) -> Vec<u8>;
 
-    /// Returns what every replica starts from, as updates that a document merging the history
-    /// needs first. Nothing, unless the library has the text made by an update of its own.
+    /// Updates every replica starts from, which a merging document needs first: none unless the
+    /// library's text object is itself made by an update.
     fn start() -> Vec<Self::Update> {
         Vec::new()
     }
 }
 
+/// A history replayed into another library.
 pub struct Replayed {
     /// What each writer's replica sent, batch by batch in the order made, each after its length.
     pub batches: Vec<u8>,
     pub peers: usize,
+    /// Patches that had to be moved to the end or cut short.
     pub moved: usize,
 }
 
@@ -104,10 +106,8 @@ struct WriterAssignment {
     seen: Vec<usize>,
 }
 
-/// Replays a history into replicas of another library (Loro, Automerge, Yjs), so that all are
-/// measured on the same history. Each peer has a replica, sent exactly what the author
-/// of its next patches had seen. An agent with concurrent events becomes several peers, and a new
-/// peer starts as a copy of an existing replica. `None` if `limit` runs out.
+/// Replays a history into replicas of another library, each sent exactly what the author of its
+/// next patches had seen; `None` if `limit` runs out.
 pub fn replay<R: Replica>(history: &History<TextOperation, usize>, limit: Duration) -> Option<Replayed> {
     let began = Instant::now();
     let batches = batches(history);

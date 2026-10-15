@@ -4,22 +4,21 @@ use crate::replay::TransformedOperations;
 use std::ops::Range;
 use strider_graph::{EventRunIndex, EventRuns};
 
-/// Concurrent ranges with more runs go straight to the CRDT records. The sets kept per run grow
-/// with its square: 256 KB here.
+/// Concurrent ranges with more runs go to the CRDT records, since the run sets grow with the square
+/// of the count: 256 KB here.
 const MAX_RUNS: usize = 1024;
 
 /// Beyond this many edited ranges, scanning them for every operation costs more than the CRDT
 /// records would.
 const MAX_EDITED_RANGES: usize = 64;
 
-/// A run's place among its concurrent range's runs, counting from 0.
+/// A run's index within its concurrent range.
 pub(crate) type RunInRange = u32;
 
-/// A set of a concurrent range's runs, one bit each, 64 to a word.
+/// A bitset of a concurrent range's runs.
 type RunSet = [u64];
 
-/// A part of the document that the range's runs have edited, measured in the document as merged
-/// so far.
+/// A part of the merged document that the range's runs have edited.
 pub(crate) struct EditedRange {
     start: i64,
     len: i64,
@@ -37,21 +36,16 @@ impl EditedRange {
     }
 }
 
-/// Tells whether `run` is in `set`.
 fn has(set: &RunSet, run: RunInRange) -> bool {
     set[run as usize / 64] >> (run % 64) & 1 == 1
 }
 
-/// Merges a concurrent range without the CRDT records when its concurrent operations do not
-/// touch: the simple case of operational transformation, moving each operation by the net length
-/// of the concurrent operations before it. The places edited are kept as edited ranges, in
-/// document order, and an operation landing in an edited range that holds operations it has not
-/// seen sends the range to the CRDT records. A run is stable once every later run has seen it.
+/// Merges a concurrent range by operational transformation, shifting each operation by the net
+/// length of the unseen operations before it, unless one lands in an edited range holding
+/// operations it has not seen.
 ///
-/// Records in `transformed` where the range's operations go. Returns false, leaving
-/// `transformed` as it was, if the range needs the CRDT records. `versions`, `stable`, `edited`
-/// and `spare` are space reused from one concurrent range to the next, since a merge can
-/// transform thousands.
+/// Records in `transformed` where the operations go, or returns false and leaves it as it was.
+/// `versions`, `stable`, `edited` and `spare` are scratch space reused across ranges.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn merge_by_transforming(
     log: &OpLog,
@@ -143,9 +137,9 @@ fn fill_versions(runs: &EventRuns, range: &Range<EventRunIndex>, versions: &mut 
     words
 }
 
-/// Returns how much longer edited range `i` is than run `run` knows, with `version` and `stable`
-/// its sets, and whether any run it has not seen edited there. Stable runs are forgotten first;
-/// an edited range left empty is dropped and `None` returned, with `i` then naming the next one.
+/// How much longer edited range `i` is than the run with sets `version` and `stable` knows, and
+/// whether a run it has not seen edited there. Stable runs are dropped from the range first; if
+/// that empties it, it is removed and `None` returned, `i` then naming the next one.
 fn unseen(edited: &mut Vec<EditedRange>, spare: &mut Vec<Vec<(RunInRange, i64)>>, i: usize, version: &RunSet, stable: &RunSet) -> Option<(i64, bool)> {
     let (mut longer, mut any, mut stale) = (0, false, false);
     for &(run, grew) in &edited[i].members {
@@ -178,8 +172,8 @@ fn open(edited: &mut Vec<EditedRange>, spare: &mut Vec<Vec<(RunInRange, i64)>>, 
     Some(())
 }
 
-/// Places an insert of `len` characters at `pos`, in the document as run `run` knows it, in the
-/// document as merged so far.
+/// Transforms an insert of `len` characters at `pos` in `run`'s version into a position in the
+/// merged document; `None` if it lands in an edited range with operations `run` has not seen.
 fn place_insert(
     edited: &mut Vec<EditedRange>,
     spare: &mut Vec<Vec<(RunInRange, i64)>>,
@@ -227,8 +221,8 @@ fn place_insert(
     Some(at)
 }
 
-/// Places a removal of the `len` characters at `pos`, in the document as run `run` knows it, in
-/// the document as merged so far.
+/// Transforms a removal of the `len` characters at `pos` in `run`'s version into a position in the
+/// merged document; `None` if it touches an edited range with operations `run` has not seen.
 fn place_removal(
     edited: &mut Vec<EditedRange>,
     spare: &mut Vec<Vec<(RunInRange, i64)>>,

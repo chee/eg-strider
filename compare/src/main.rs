@@ -15,13 +15,11 @@ use std::time::Instant;
 /// How long replaying a history into another library may take before it is given up.
 const LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Where histories replayed into other libraries are kept, as the batches each writer sent,
-/// apart from the downloaded traces.
+/// Where replays into other libraries are kept, as the batches each writer sent.
 const REPLAYED: &str = "traces/batches";
 
-/// Loads a history as the batches each writer's replica of another library sent it as, with how
-/// many peers it took and how many edits had to be moved. Replayed on first use and kept in
-/// [`REPLAYED`]. Nothing for a library in `left_out`.
+/// A history's replay into another library, as the batches each writer's replica sent and notes on
+/// peers and moved edits, replayed on first use and kept in [`REPLAYED`]; or why there is none.
 fn replayed<R: compare::replicas::Replica>(
     name: &str,
     kind: &str,
@@ -79,9 +77,8 @@ fn dt_merge(history: &History<TextOperation, usize>) -> (ListOpLog, ListBranch) 
     (oplog, branch)
 }
 
-/// Puts together a saved diamond-types document: its history file's length, the file, and the
-/// document's text, compressed as eg-strider's is. The paper keeps the text beside the history
-/// so as not to merge again.
+/// A saved diamond-types document: the lengths, its encoded oplog, and its text compressed as
+/// eg-strider's is, which the paper keeps beside the history so that opening needs no merge.
 fn dt_save(oplog: &ListOpLog, text: &str) -> Vec<u8> {
     let file = oplog.encode(&EncodeOptions::default());
     let lens = [file.len() as u64, text.len() as u64].map(u64::to_le_bytes).concat();
@@ -112,7 +109,6 @@ fn automerge_decode(bytes: &[u8]) -> Vec<automerge::Change> {
     batches(bytes).map(|raw| automerge::Change::try_from(raw).unwrap()).collect()
 }
 
-/// Returns an Automerge document with its text.
 fn automerge_text(document: &automerge::AutoCommit) -> String {
     use automerge::ReadDoc;
     let (_, text) = document.get(automerge::ROOT, "text").unwrap().unwrap();
@@ -126,7 +122,6 @@ fn automerge_apply(changes: Vec<automerge::Change>) -> automerge::AutoCommit {
     document
 }
 
-/// Loads a saved Automerge document.
 fn automerge_open(saved: &[u8]) -> automerge::AutoCommit {
     automerge::AutoCommit::load(saved).unwrap()
 }
@@ -143,8 +138,8 @@ fn yjs_decode_batches(bytes: &[u8]) -> Vec<yrs::Update> {
     batches(bytes).map(|update| yrs::Update::decode_v1(update).unwrap()).collect()
 }
 
-/// Applies an update to a new Yjs document and returns it with its text. Garbage collection is
-/// off, so that it keeps the text of deleted characters as every other library does.
+/// Applies an update to a new Yjs document, with garbage collection off so that it keeps deleted
+/// text as every other library does.
 fn yjs_apply(update: yrs::Update) -> yrs::Doc {
     use yrs::Transact;
     let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
@@ -153,8 +148,8 @@ fn yjs_apply(update: yrs::Update) -> yrs::Doc {
     document
 }
 
-/// Applies updates to a new Yjs document, each in a transaction of its own: yrs's quickest way
-/// to take many. Combining them first with its own call for that takes seconds on C1 and C2.
+/// Applies updates to a new Yjs document, each in a transaction of its own, which yrs takes
+/// fastest; combining them first takes seconds on C1 and C2.
 fn yjs_merge(updates: Vec<yrs::Update>) -> yrs::Doc {
     use yrs::Transact;
     let document = yrs::Doc::with_options(yrs::Options { skip_gc: true, ..Default::default() });
@@ -165,7 +160,6 @@ fn yjs_merge(updates: Vec<yrs::Update>) -> yrs::Doc {
     document
 }
 
-/// Returns a Yjs document's text.
 fn yjs_text(document: &yrs::Doc) -> String {
     use yrs::{GetString, Transact};
     document.get_or_insert_text("text").get_string(&document.transact())
@@ -177,14 +171,13 @@ fn yjs_save(document: &mut yrs::Doc) -> Vec<u8> {
     document.transact().encode_state_as_update_v2(&yrs::StateVector::default())
 }
 
-/// Imports a snapshot into a new Loro document and returns it with its text.
+/// Imports a snapshot into a new Loro document.
 fn loro_import(bytes: &[u8]) -> LoroDoc {
     let document = LoroDoc::new();
     document.import(bytes).unwrap();
     document
 }
 
-/// Returns a Loro document's text.
 fn loro_text(document: &LoroDoc) -> String {
     document.get_text(TEXT).to_string()
 }
@@ -205,7 +198,6 @@ fn loro_apply(ops: loro::JsonSchema) -> LoroDoc {
     document
 }
 
-/// Formats a byte count in megabytes.
 fn mb(bytes: usize) -> String {
     format!("{:.2} MB", bytes as f64 / (1 << 20) as f64)
 }
@@ -357,14 +349,12 @@ fn others(loaded: &Loaded) -> [Option<(Measured, Turns<'_>)>; 3] {
     ]
 }
 
-/// Measures eg-strider beside diamond-types, yrs, Loro and Automerge on each of the paper's
-/// editing traces, and checks that each ends with diamond-types' text, and whether that is the
-/// trace's. The two tasks are merging a history whose ops are in memory, through each library's
-/// own calls, and reopening a saved document from its bytes until it is ready for more edits.
-/// The other libraries take every batch each writer's replica sent, all at once, through their
-/// own calls for that. Each library is timed on every trace in turns. The paper's own Yjs and
-/// Automerge files for a trace, when beside it, are opened too, to check the replays' saved
-/// documents against.
+/// Measures eg-strider beside diamond-types, yrs, Loro and Automerge on the paper's editing traces,
+/// merging a history whose ops are in memory and reopening a saved document, and checks each result
+/// against diamond-types' text.
+///
+/// The paper's own Yjs and Automerge files for a trace, when beside it, are opened to check the
+/// replays' saved documents against.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let replay = args.iter().any(|a| a == "--replay");

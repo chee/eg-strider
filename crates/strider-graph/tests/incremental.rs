@@ -3,7 +3,7 @@ use proptest::sample::Index;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventRunIndex, HistoryRange};
 
-/// The analysis done in one go over the whole history, as it was before it became incremental.
+/// The analysis done in one pass over the whole history, to check the incremental one against.
 struct Batch {
     entries: Vec<Entry>,
     parents: Vec<u32>,

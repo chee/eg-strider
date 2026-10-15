@@ -1,13 +1,12 @@
 use strider_graph::EventIndex;
 
-/// One op of a run handed to [`OpLog::add_remote_ops`](crate::OpLog::add_remote_ops).
-/// Positions and lengths count characters.
+/// An insert or delete handed to [`OpLog::add_remote_ops`](crate::OpLog::add_remote_ops), with
+/// positions in characters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
-    /// Inserts the next `len` characters of the run's text at `pos`.
+    /// Inserts the next `len` characters of the chain's text at `pos`.
     Insert { pos: u32, len: u32 },
-    /// Deletes the `len` characters at `pos`, the last of them first if `backward`, as backspace
-    /// does.
+    /// Deletes the `len` characters at `pos`, the last first if `backward`.
     Delete { pos: u32, len: u32, backward: bool },
 }
 
@@ -17,12 +16,12 @@ pub(crate) enum OperationKind {
     Delete,
 }
 
-/// A run of consecutive events of one kind, in 16 bytes since a log holds so many.
+/// Consecutive events forming one insert or delete, packed into 16 bytes.
 #[derive(Clone, Copy)]
 pub(crate) struct OperationRun {
     pub(crate) first_event: EventIndex,
-    /// The number of events, up to [`MAX_OP_LEN`], with [`DELETE`], [`BACKWARD`] and [`DELETES_END_OF_PREVIOUS_INSERT`]
-    /// above it.
+    /// The number of events, up to [`MAX_OP_LEN`], with [`DELETE`], [`BACKWARD`] and
+    /// [`DELETES_END_OF_PREVIOUS_INSERT`] above it.
     pub(crate) len_and_flags: u32,
     /// The positions `pos..pos + len` that the run touches, before its first event.
     pub(crate) pos: u32,
@@ -34,12 +33,10 @@ pub(crate) struct OperationRun {
 
 const _: () = assert!(std::mem::size_of::<OperationRun>() == 16);
 
-/// Marks an op that deletes.
 const DELETE: u32 = 1 << 31;
-/// Deletes only: marks backspace, whose first event removes the last position.
+/// Deletes only: the first event removes the last position, as backspace does.
 const BACKWARD: u32 = 1 << 30;
-/// Deletes only: marks a delete that removes the end of what the insert before it put in. Found
-/// when a run of ops arrives together.
+/// Deletes only: the delete removes the end of the text that the insert before it put in.
 pub(crate) const DELETES_END_OF_PREVIOUS_INSERT: u32 = 1 << 29;
 /// The most events one op holds.
 pub(crate) const MAX_OP_LEN: u32 = DELETES_END_OF_PREVIOUS_INSERT - 1;
@@ -81,8 +78,8 @@ impl OperationRun {
         self.len_and_flags & DELETES_END_OF_PREVIOUS_INSERT != 0
     }
 
-    /// Takes in `op`, which follows this op, if it carries it on, as typing, holding delete or
-    /// holding backspace does. Returns whether it did.
+    /// Joins `op`, which follows this op, onto it if it continues it as typing, delete or backspace
+    /// would, returning whether it did.
     pub(crate) fn append(&mut self, op: OperationRun) -> bool {
         let (len, kind) = (op.len(), op.kind());
         if self.kind() != kind || self.len() + len > MAX_OP_LEN {
@@ -111,7 +108,7 @@ impl OperationRun {
     }
 }
 
-/// Part of an op, as the replay sees it.
+/// A part of an operation run, unpacked.
 #[derive(Clone, Copy)]
 pub(crate) struct OperationRunSlice {
     pub first_event: EventIndex,
@@ -126,6 +123,5 @@ pub(crate) struct OperationRunSlice {
     pub text: ByteRange,
 }
 
-/// Where some inserted text is in [`OpLog::inserted_text`](crate::OpLog::inserted_text): its
-/// first byte, and the byte after its last.
+/// A byte range of [`OpLog::inserted_text`](crate::OpLog::inserted_text).
 pub(crate) type ByteRange = (u32, u32);

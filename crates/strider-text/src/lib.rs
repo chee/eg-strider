@@ -3,27 +3,24 @@ mod pieces;
 use pieces::PieceList;
 use std::ops::Range;
 
-/// Builds a document's final text by taking its edits back, last to first, over a piece table
-/// of the final text. Taking back an insert copies its surviving characters straight to their
-/// final place, so no rope is needed. Positions and lengths count characters.
+/// Builds a document's final text by undoing its operations last to first, counting positions in
+/// characters.
 pub struct PieceTable<'a> {
-    /// The text of every insert.
     inserted_text: &'a str,
     pieces: PieceList,
-    /// Length of the document as taken back so far.
+    /// Length of the document as undone so far.
     len: u32,
-    /// The final text as it is placed: a byte per character, then [`SHORT`] spare bytes. A
-    /// character that is not ASCII is [`NON_ASCII_MARK`] here and kept in `non_ascii_chars`.
+    /// The final text, a byte per character with non-ASCII characters as [`NON_ASCII_MARK`], then
+    /// [`SHORT`] spare bytes.
     final_text_bytes: Vec<u8>,
-    /// Per page of [`NON_ASCII_PAGE`] positions, where its characters start in
-    /// `non_ascii_chars`, if it has any that are not ASCII.
+    /// Per page of [`NON_ASCII_PAGE`] positions, where its non-ASCII characters start in
+    /// `non_ascii_chars`, if it has any.
     non_ascii_pages: Vec<Option<u32>>,
-    /// The final text's characters that are not ASCII, by position, with room only for pages
-    /// that have some.
+    /// The final text's non-ASCII characters, by position within their page.
     non_ascii_chars: Vec<char>,
 }
 
-/// Stands in for a character that does not fit in a byte.
+/// Stands for a non-ASCII character in `final_text_bytes`.
 const NON_ASCII_MARK: u8 = 0x80;
 
 /// The longest copy done as two 16-byte words.
@@ -48,12 +45,10 @@ fn copy(to: &mut [u8], at: usize, from: &[u8], skip: usize, n: usize) {
     }
 }
 
-/// Positions per page of the characters that are not ASCII. Tiny in debug builds, so that tests
-/// use several pages.
+/// Positions per page of non-ASCII characters; tiny in debug builds so that tests cross pages.
 const NON_ASCII_PAGE: usize = if cfg!(debug_assertions) { 4 } else { 256 };
 
-/// Places character `ch` at position `at` of the final text: as its byte if it is ASCII, else
-/// as [`NON_ASCII_MARK`], with the character in its page of `non_ascii_chars`.
+/// Places `ch` at position `at` of the final text.
 #[inline]
 fn place_char(final_text_bytes: &mut [u8], non_ascii_pages: &mut Vec<Option<u32>>, non_ascii_chars: &mut Vec<char>, at: usize, ch: char) {
     if ch.is_ascii() {
@@ -64,8 +59,7 @@ fn place_char(final_text_bytes: &mut [u8], non_ascii_pages: &mut Vec<Option<u32>
     }
 }
 
-/// Records a character that is not ASCII at position `at`, making room for its page if it has
-/// none yet.
+/// Records non-ASCII `ch` at position `at`, allocating its page if it has none.
 #[cold]
 fn place_non_ascii(non_ascii_pages: &mut Vec<Option<u32>>, non_ascii_chars: &mut Vec<char>, at: usize, ch: char) {
     if non_ascii_pages.len() <= at / NON_ASCII_PAGE {
@@ -78,15 +72,14 @@ fn place_non_ascii(non_ascii_pages: &mut Vec<Option<u32>>, non_ascii_chars: &mut
     non_ascii_chars[start as usize + at % NON_ASCII_PAGE] = ch;
 }
 
-/// Returns the character that is not ASCII recorded at position `at`.
 fn non_ascii_at(non_ascii_pages: &[Option<u32>], non_ascii_chars: &[char], at: usize) -> char {
     let start = non_ascii_pages[at / NON_ASCII_PAGE].expect("a character was recorded on this page");
     non_ascii_chars[start as usize + at % NON_ASCII_PAGE]
 }
 
 impl<'a> PieceTable<'a> {
-    /// Starts from the final document, `len` characters long. `inserted_text` holds the text of
-    /// every insert.
+    /// Starts from the final document of `len` characters, with `inserted_text` holding every
+    /// insert's text.
     pub fn new(len: u32, inserted_text: &'a str) -> Self {
         PieceTable {
             inserted_text,
@@ -98,7 +91,7 @@ impl<'a> PieceTable<'a> {
         }
     }
 
-    /// Takes back an insert of the `len` characters at `text` in `inserted_text`, at `pos`.
+    /// Undoes an insert at `pos` of the `len` characters at `text` in `inserted_text`.
     pub fn undo_insert(&mut self, pos: u32, text: Range<usize>, len: u32) {
         assert!(pos.checked_add(len).is_some_and(|end| end <= self.len), "insert was not within the document");
         let (inserted_text, start) = (self.inserted_text.as_bytes(), text.start);
@@ -129,7 +122,7 @@ impl<'a> PieceTable<'a> {
         }
     }
 
-    /// Takes back a removal of `len` characters at `pos`.
+    /// Undoes a removal of `len` characters at `pos`.
     pub fn undo_remove(&mut self, pos: u32, len: u32) {
         assert!(pos <= self.len, "removal was not within the document");
         if len == 0 {
@@ -139,8 +132,7 @@ impl<'a> PieceTable<'a> {
         self.pieces.insert_deleted(pos, len);
     }
 
-    /// Takes back all remaining edits at once, given the text they made. What survives of
-    /// `text` goes straight to its final place.
+    /// Undoes all remaining operations at once, given the text they produced.
     pub fn undo_rest(&mut self, text: &str) {
         let (final_text_bytes, pages, chars) = (&mut self.final_text_bytes, &mut self.non_ascii_pages, &mut self.non_ascii_chars);
         if text.len() == self.len as usize {
@@ -168,7 +160,7 @@ impl<'a> PieceTable<'a> {
         self.len = 0;
     }
 
-    /// Returns the final text. Every edit must be taken back.
+    /// The final text, once every operation is undone.
     pub fn into_string(mut self) -> String {
         assert_eq!(self.len, 0, "edits left to take back");
         self.final_text_bytes.truncate(self.final_text_bytes.len() - SHORT);

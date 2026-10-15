@@ -6,22 +6,21 @@ use std::ops::Range;
 use strider_graph::{walk, EventIndex, EventRunIndex, HistoryRange, WalkStep};
 use strider_text::PieceTable;
 
-/// Where merging put each operation of the concurrent ranges: the paper's transformed
-/// operations, as positions in the effect version. The rest of each operation is the operation
-/// run itself.
+/// The paper's transformed operations for the concurrent ranges, stored as their positions in the
+/// effect version; the rest of each is its operation run.
 #[derive(Default)]
 pub(crate) struct TransformedOperations {
-    /// Ranges of event runs, in merge order. An operation run that goes from one event run into
-    /// the next is one operation run.
+    /// Ranges of event runs, in merge order. Within a range, an operation run spanning several
+    /// event runs is one operation.
     merge_order: Vec<Range<EventRunIndex>>,
     /// Per operation run of those ranges. An insert: the index it went in at. A delete: the index
     /// and length of each piece it removed, then the number of pieces.
     positions: Vec<u32>,
     /// Pieces the current delete has removed so far.
     removed_pieces: u32,
-    /// Length of the document so far.
+    /// Length of the effect version so far.
     len: u32,
-    /// The first run whose events the document does not hold. Operations of earlier runs are not
+    /// The first run whose events the base does not hold; earlier runs' operations are not
     /// recorded.
     first_new_run: EventRunIndex,
     /// Whether the current range of runs is of those earlier runs.
@@ -29,7 +28,7 @@ pub(crate) struct TransformedOperations {
 }
 
 impl TransformedOperations {
-    /// Starts on a range of runs, which the document holds all of or none of.
+    /// Starts a range of runs, all or none of which the base holds.
     pub(crate) fn begin(&mut self, run_range: Range<EventRunIndex>) {
         self.in_base = run_range.end <= self.first_new_run;
         debug_assert!(self.in_base || run_range.start >= self.first_new_run, "runs with events on both sides of the base");
@@ -55,7 +54,7 @@ impl TransformedOperations {
         }
     }
 
-    /// Ends a delete once all it removed is recorded.
+    /// Ends the current delete.
     pub(crate) fn end_delete(&mut self) {
         if !self.in_base {
             self.positions.push(std::mem::take(&mut self.removed_pieces));
@@ -75,22 +74,22 @@ impl TransformedOperations {
     }
 }
 
-/// What a concurrent range's critical version keeps once the range has been through the CRDT
-/// records, so that a later replay can place its events by record.
+/// The CRDT records' result for a concurrent range, cached at its critical version so that a later
+/// replay places its events without walking them.
 #[derive(Default)]
 struct ResolvedOrigins {
     /// How many of the range's events, from its start, `resolved` covers.
     events: u32,
-    /// Records, operation run by operation run in log order. An insert: its first character's
-    /// left origin, then the right origin all its characters share. A delete: per group of
-    /// consecutive targets, the first and the count, with [`BACKWARD_TARGETS`] if they count down.
+    /// Records, operation run by operation run in log order. An insert: its first character's left
+    /// origin, then the right origin all its characters share. A delete: per group of consecutive
+    /// targets, the first and the count, with [`BACKWARD_TARGETS`] if they count down.
     resolved: Vec<RecordId>,
 }
 
+/// Flags a count of delete targets whose records count down.
 const BACKWARD_TARGETS: u32 = 1 << 31;
 
-/// The document state with the first `events` events merged, which a replay of the rest starts
-/// from.
+/// The document as of the first `events` events.
 #[derive(Default)]
 pub(crate) struct DocumentState {
     pub events: EventIndex,
@@ -99,18 +98,17 @@ pub(crate) struct DocumentState {
     pub text: String,
 }
 
-/// The history's shape, and what earlier replays of a log worked out, valid while the log has
-/// the same number of events.
+/// What replays of a log keep between checkouts while its events stay the same: its ranges, and the
+/// CRDT records' cached results.
 pub(crate) struct ReplayPlan {
+    /// The number of events the plan was made for.
     events: usize,
     /// The first event of each range.
     range_starts: Vec<EventIndex>,
     ranges: Vec<HistoryRange>,
-    /// Per event run, the operation run holding its first event; then the number of operation
-    /// runs.
+    /// Per event run, the operation run holding its first event; then the number of operation runs.
     first_op_of_run: Vec<OperationRunIndex>,
-    /// Per range, what its starting critical version keeps: nothing unless it is a concurrent
-    /// range that went through the CRDT records.
+    /// Per range, the cached CRDT result: empty for linear ranges and those merged by transforming.
     resolved: Vec<ResolvedOrigins>,
     /// How many positions the concurrent ranges took last time, to reserve next time.
     room: usize,
@@ -135,7 +133,7 @@ impl ReplayPlan {
         ReplayPlan { events: log.len(), range_starts, ranges, first_op_of_run, resolved, room }
     }
 
-    /// Takes what was resolved for the concurrent range starting at `start`, if anything.
+    /// Takes the cached result for the concurrent range starting at `start`, if any.
     fn take_resolved(&mut self, start: EventIndex) -> ResolvedOrigins {
         match self.range_starts.binary_search(&start) {
             Ok(at) => std::mem::take(&mut self.resolved[at]),
@@ -155,7 +153,7 @@ impl ReplayPlan {
         log.ops(self.op_at(log, run_range, from)..self.first_op_of_run[run_range.end as usize], from..log.graph.runs().start(run_range.end))
     }
 
-    /// Returns the operation run holding event `from` of a range of runs.
+    /// The operation run holding event `from` of `run_range`.
     fn op_at(&self, log: &OpLog, run_range: &Range<EventRunIndex>, from: EventIndex) -> OperationRunIndex {
         if from == log.graph.runs().start(run_range.start) {
             self.first_op_of_run[run_range.start as usize]
@@ -164,7 +162,7 @@ impl ReplayPlan {
         }
     }
 
-    /// Counts the concurrent ranges that the last replay could not merge by transforming alone.
+    /// How many concurrent ranges have a cached CRDT result.
     pub(crate) fn ranges_using_crdt_records(&self) -> usize {
         self.resolved.iter().filter(|resolved| resolved.events > 0).count()
     }
@@ -175,14 +173,12 @@ impl ReplayPlan {
     }
 }
 
-/// Replays the log's events after `base` into the document state `base` holds, reusing and
-/// updating the `plan` that earlier replays made. Returns the text and its length in characters.
+/// Replays the events after `base` onto it, returning the text and its length in characters.
 ///
-/// Linear ranges apply as recorded. A concurrent range is merged by transforming if it can be,
-/// else with the CRDT records, whose results are cached at the range's critical version. Merging
-/// only works out where each operation goes; the text is then built by taking the operations
-/// back, last to first. If `base` ends inside a concurrent range, an event run and an operation
-/// run must start there: the range's events that `base` holds are walked first and not recorded.
+/// Linear ranges apply as recorded; a concurrent range is merged by transforming if it can be, else
+/// with the CRDT records, whose result `plan` caches. The text is then built by undoing every
+/// operation last to first. If `base` ends inside a concurrent range, an event run and an operation
+/// run must start there.
 pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &DocumentState) -> (String, u32) {
     // The log only ever grows, so the same length means the same events.
     if plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
@@ -313,8 +309,8 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
     (text.into_string(), transformed.len)
 }
 
-/// Replays one concurrent range with the CRDT records, recording in `transformed` where its
-/// operations go.
+/// Merges a concurrent range with the CRDT records, recording in `transformed` where its operations
+/// go.
 fn replay_concurrent_range(
     log: &OpLog,
     plan: &ReplayPlan,
@@ -411,7 +407,7 @@ fn replay_concurrent_range(
     resolved.resolved.shrink_to_fit();
 }
 
-/// Applies one operation run at the CRDT records' prepare version.
+/// Applies an operation run at the CRDT records' prepare version.
 fn apply(
     start: EventIndex,
     op: OperationRunSlice,

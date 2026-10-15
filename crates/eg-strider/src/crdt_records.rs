@@ -4,49 +4,44 @@ use std::ops::Range;
 use strider_graph::EventIndex;
 use strider_tree::{Cursor, EntryId, Lengths, PrepareEffectTree, View};
 
-/// A character the CRDT records know: the event of the concurrent range that inserted it, or one
-/// of the document as the range began.
+/// A character in the CRDT records: the range-relative event that inserted it, or [`PLACEHOLDER`]
+/// with its position in the document as the range began.
 pub(crate) type RecordId = u32;
 
 /// No record: the start of the document as a left origin, the end as a right origin.
 pub(crate) const NO_RECORD: RecordId = u32::MAX;
 
-/// Marks a character of the document as the concurrent range began, which the placeholder record
-/// stands for: `PLACEHOLDER | position`.
+/// Marks a character of the placeholder record, as `PLACEHOLDER | position`.
 const PLACEHOLDER: RecordId = 1 << 31;
-/// The length of the placeholder record. Its real length is not needed.
+/// The placeholder record's length, longer than any document so that its real length is not needed.
 const PLACEHOLDER_LEN: u32 = 0x7fff_0000;
 
 // A record run's state in the prepare version. Each delete of an inserted character adds one.
 const NOT_INSERTED_YET: u32 = 0;
 const INSERTED: u32 = 1;
 
-/// Characters of the document as the range began per entry of the index into the placeholder.
-/// Tiny in debug builds, so that tests cross entries.
+/// Placeholder characters per entry of `placeholder_index`; tiny in debug builds so that tests
+/// cross entries.
 const PLACEHOLDER_INDEX_STRIDE: u32 = if cfg!(debug_assertions) { 4 } else { 64 };
 
-/// Tree node size. Tiny in debug builds, so that tests split nodes.
+/// Tiny in debug builds, so that tests split nodes.
 const NODE: usize = if cfg!(debug_assertions) { 4 } else { 32 };
 
+/// Consecutive records, each the left origin of the next, sharing a right origin and state.
 #[derive(Clone, Copy)]
 struct RecordRun {
-    /// The first character; the rest follow consecutively.
     record: RecordId,
     len: u32,
-    /// The record left of the first character when it was inserted. Each later character's left
-    /// origin is the one before it.
     origin_left: RecordId,
-    /// The first record to the right that existed when these were inserted.
     origin_right: RecordId,
     prepare_state: u32,
     deleted_in_effect: bool,
 }
 
-/// A stretch of delete events whose targets are consecutive records: the first event's is the
-/// lowest, or the highest if `backward`.
+/// Delete events whose targets are consecutive records: the first event's is the lowest, or the
+/// highest if `backward`.
 #[derive(Clone, Copy)]
 pub(crate) struct DeleteTargets {
-    /// The first of the events.
     pub first_event: EventIndex,
     pub len: u32,
     /// The lowest record deleted.
@@ -55,7 +50,7 @@ pub(crate) struct DeleteTargets {
 }
 
 impl DeleteTargets {
-    /// Returns the record that the first event deletes.
+    /// The record the first event deletes.
     pub fn first(&self) -> RecordId {
         if self.backward {
             self.record + self.len - 1
@@ -64,7 +59,7 @@ impl DeleteTargets {
         }
     }
 
-    /// Returns the part of the stretch from `event`, at most `len` events long.
+    /// The part from `event`, at most `len` events long.
     fn from(&self, event: EventIndex, len: u32) -> DeleteTargets {
         let (skip, len) = (event - self.first_event, len.min(self.first_event + self.len - event));
         let record = if self.backward { self.record + self.len - skip - len } else { self.record + skip };
@@ -73,7 +68,6 @@ impl DeleteTargets {
 }
 
 impl RecordRun {
-    /// Returns the run's lengths in the prepare and effect versions.
     fn lengths(&self) -> Lengths {
         Lengths { prepare: if self.prepare_state == INSERTED { self.len } else { 0 }, effect: if self.deleted_in_effect { 0 } else { self.len } }
     }
@@ -87,12 +81,9 @@ enum Position {
     End,
 }
 
-/// The records of the CRDT for merging one concurrent range, as in Eg-walker: the range's
-/// characters as record runs with left and right origins, as in Yjs or Fugue, in a B+ tree
-/// measured in the prepare and effect versions. Merging an event finds its position in the
-/// prepare version and reads it off in the effect version.
+/// The paper's CRDT records for merging one concurrent range: record runs with left and right
+/// origins, as in Yjs and Fugue, kept in a [`PrepareEffectTree`].
 pub(crate) struct CrdtRecords {
-    /// The record runs in document order, measured in both versions.
     tree: PrepareEffectTree<NODE>,
     /// By tree entry id.
     record_runs: Vec<RecordRun>,
@@ -101,7 +92,7 @@ pub(crate) struct CrdtRecords {
     record_of_event: Vec<u32>,
     /// What the delete events deleted, a stretch of consecutive records at a time.
     delete_targets: Vec<DeleteTargets>,
-    /// Per entry of that index, the placeholder run holding its first character.
+    /// Per [`PLACEHOLDER_INDEX_STRIDE`] placeholder characters, the run holding the first.
     placeholder_index: Vec<EntryId>,
     /// Per run, the `integrate_scan_stamp` of the last `integrate` scan over it.
     integrate_scan_marks: Vec<u32>,
@@ -109,8 +100,8 @@ pub(crate) struct CrdtRecords {
 }
 
 impl CrdtRecords {
-    /// Starts the records of a concurrent range of `events` events with one placeholder record,
-    /// for the document as the range began, `len` characters long.
+    /// Records for a concurrent range of `events` events, starting from the placeholder record for
+    /// the `len` characters of the document as the range began.
     pub fn new(events: usize, len: u32) -> Self {
         let placeholder = RecordRun {
             record: PLACEHOLDER,
@@ -133,19 +124,17 @@ impl CrdtRecords {
 
     // ---------------------------------------------------------------- finding things
 
-    /// Returns the run stored at a tree entry.
     fn record_run(&self, at: Cursor) -> &RecordRun {
         &self.record_runs[self.tree.id(at) as usize]
     }
 
-    /// Finds the run holding `record`, and the offset into it.
+    /// The run holding `record`, and the offset into it.
     fn locate(&self, record: RecordId) -> (EntryId, u32) {
         let run = if record & PLACEHOLDER != 0 { self.placeholder(record) } else { self.record_of_event[record as usize] };
         (run, record - self.record_runs[run as usize].record)
     }
 
-    /// Finds the run holding a placeholder record, starting from the run that holds its index
-    /// entry's first character.
+    /// The run holding a placeholder record, scanning on from its index entry's run.
     fn placeholder(&self, record: RecordId) -> EntryId {
         let holds = |id: u32| {
             let run = &self.record_runs[id as usize];
@@ -165,8 +154,8 @@ impl CrdtRecords {
         }
     }
 
-    /// Returns the position `offset` characters into the run at `at`. The run's full length is
-    /// the start of the next run.
+    /// The position `offset` characters into the run at `at`, where its full length is the next
+    /// run's start.
     fn position_in(&self, at: Cursor, offset: u32) -> Position {
         if offset < self.record_run(at).len {
             Position::In(at, offset)
@@ -175,8 +164,8 @@ impl CrdtRecords {
         }
     }
 
-    /// Finds the entry holding `record` and the position just after it; for `NO_RECORD`, nothing
-    /// and the start of the document.
+    /// The entry holding `record` and the position just after it; for `NO_RECORD`, nothing and the
+    /// start of the document.
     fn after(&self, record: RecordId) -> (Option<Cursor>, Position) {
         if record == NO_RECORD {
             return (None, Position::In(self.tree.first(), 0));
@@ -186,7 +175,7 @@ impl CrdtRecords {
         (Some(at), self.position_in(at, offset + 1))
     }
 
-    /// Returns the position just before `record`, or the end of the document for `NO_RECORD`.
+    /// The position just before `record`, or the end of the document for `NO_RECORD`.
     fn position_before(&self, record: RecordId) -> Position {
         if record == NO_RECORD {
             return Position::End;
@@ -195,7 +184,6 @@ impl CrdtRecords {
         Position::In(self.tree.cursor(run), offset)
     }
 
-    /// Compares where two positions are in the document.
     fn cmp(&self, a: Position, b: Position) -> Ordering {
         match (a, b) {
             (Position::End, Position::End) => Ordering::Equal,
@@ -207,8 +195,8 @@ impl CrdtRecords {
 
     // ---------------------------------------------------------------- splitting runs
 
-    /// Splits the run at `at` after `offset` characters. Returns both parts; one keeps the
-    /// run's id.
+    /// Splits the run at `at` after `offset` characters, returning both parts; one keeps the run's
+    /// id.
     fn split(&mut self, at: Cursor, offset: u32) -> [Cursor; 2] {
         let run = self.tree.id(at);
         let whole = self.record_runs[run as usize];
@@ -245,8 +233,8 @@ impl CrdtRecords {
         }
     }
 
-    /// Splits the run at `at` so that one run covers exactly `len` characters from `offset`,
-    /// and returns it.
+    /// Splits the run at `at` so that one run covers exactly `len` characters from `offset`, and
+    /// returns it.
     fn isolate(&mut self, mut at: Cursor, offset: u32, len: u32) -> Cursor {
         if offset > 0 {
             at = self.split(at, offset)[1];
@@ -259,8 +247,8 @@ impl CrdtRecords {
 
     // ---------------------------------------------------------------- inserting
 
-    /// Merges an insert of `len` characters at prepare index `pos`, made by events of the range
-    /// `event..event + len`. Returns its effect index.
+    /// Merges an insert by events `event..event + len` at prepare position `pos`, returning its
+    /// effect position.
     pub fn insert(&mut self, event: EventIndex, len: u32, pos: u32, goes_before: impl Fn(EventIndex, EventIndex) -> bool) -> u32 {
         // `index`: where the position just after the left origin is in the effect version, which
         // finding the origin gives. The origin's own character is there unless it was deleted.
@@ -296,7 +284,7 @@ impl CrdtRecords {
         self.insert_record_run(position, left.filter(|_| position == after_left), event, len, origin_left, origin_right, (!concurrent).then_some(index))
     }
 
-    /// Merges an insert whose origins are known from [`origins_of`](Self::origins_of), needing no
+    /// Merges an insert whose origins are known from [`origins_of`](Self::origins_of), without the
     /// prepare version.
     pub fn insert_with_known_origins(
         &mut self,
@@ -316,8 +304,8 @@ impl CrdtRecords {
         self.insert_record_run(position, left.filter(|_| position == after_left), event, len, origin_left, origin_right, None)
     }
 
-    /// Finds where a new insert goes among the concurrent inserts starting at `start`, just
-    /// after its left origin.
+    /// The paper's integrate: where a new insert goes among the concurrent inserts from `start`,
+    /// just after its left origin.
     fn integrate(
         &mut self,
         start: Position,
@@ -385,9 +373,9 @@ impl CrdtRecords {
         fallback.unwrap_or(landed)
     }
 
-    /// Adds the characters of events `event..event + len` at `position`, returning their effect
-    /// index: `index` if given, else found by climbing the tree. `left` is the entry holding
-    /// the left origin, given only while `position` is right after it.
+    /// Adds the records of events `event..event + len` at `position`, returning their effect
+    /// position: `index` if given, else found by climbing the tree. `left` is the entry holding the
+    /// left origin, given only while `position` is right after it.
     #[allow(clippy::too_many_arguments)]
     fn insert_record_run(
         &mut self,
@@ -434,7 +422,7 @@ impl CrdtRecords {
         index
     }
 
-    /// Returns the left and right origins of the character inserted by event `event` of the range.
+    /// The left and right origins of the character `event` inserted.
     pub fn origins_of(&self, event: EventIndex) -> [RecordId; 2] {
         let run = &self.record_runs[self.record_of_event[event as usize] as usize];
         [if event == run.record { run.origin_left } else { event - 1 }, run.origin_right]
@@ -442,9 +430,9 @@ impl CrdtRecords {
 
     // ---------------------------------------------------------------- deleting
 
-    /// Merges a delete by events `event..event + len` of the range, of the prepare positions
-    /// `pos..pos + len`, removed last to first if `backward`. Calls `removed` with the effect index and
-    /// length of each run still there.
+    /// Merges a delete by events `event..event + len` of the prepare positions `pos..pos + len`,
+    /// last to first if `backward`, calling `removed` with the effect position and length of each
+    /// run still there.
     pub fn delete(&mut self, event: EventIndex, pos: u32, len: u32, backward: bool, mut removed: impl FnMut(u32, u32)) {
         let (mut at, mut offset, start) = self.tree.locate(View::Prepare, pos);
         // Where the characters to delete next are in the effect version, if they are still
@@ -478,8 +466,8 @@ impl CrdtRecords {
         }
     }
 
-    /// Records what a stretch of delete events deleted, joining the stretch before when it is
-    /// the same delete carrying on.
+    /// Records what delete events deleted, joining the last targets when the same delete carries
+    /// on.
     fn note_deleted(&mut self, targets: DeleteTargets) {
         let DeleteTargets { first_event: event, len, record, backward } = targets;
         match self.delete_targets.last_mut() {
@@ -512,7 +500,7 @@ impl CrdtRecords {
         }
     }
 
-    /// Counts one more delete of the run at `at`. Returns its effect index if this is the
+    /// Counts one more delete of the run at `at`, returning its effect position if this is the
     /// first: `index` if given, else found by climbing the tree.
     fn mark_deleted(&mut self, at: Cursor, index: Option<u32>) -> Option<u32> {
         let run = &mut self.record_runs[self.tree.id(at) as usize];
@@ -528,25 +516,25 @@ impl CrdtRecords {
         index.filter(|_| first)
     }
 
-    /// Returns what the delete events from `event` deleted, up to `end` or until the targets
-    /// stop being consecutive.
+    /// What the delete events from `event` deleted, up to `end` or until the targets stop being
+    /// consecutive.
     pub fn targets_of(&self, event: EventIndex, end: EventIndex) -> DeleteTargets {
         self.delete_targets[self.record_of_event[event as usize] as usize].from(event, end - event)
     }
 
     // ---------------------------------------------------------------- moving the prepare version
 
-    /// Takes events of the range, all inserts or all deletes, out of the prepare version.
+    /// Retreats `events`, all of one `kind`.
     pub fn retreat(&mut self, kind: OperationKind, events: Range<EventIndex>) {
         self.shift(kind, events, 1u32.wrapping_neg());
     }
 
-    /// Puts events of the range, all inserts or all deletes, back into the prepare version.
+    /// Advances `events`, all of one `kind`.
     pub fn advance(&mut self, kind: OperationKind, events: Range<EventIndex>) {
         self.shift(kind, events, 1);
     }
 
-    /// Moves events of the range into or out of the prepare version, run by run.
+    /// Retreats or advances `events` by changing their records' prepare state by `delta`.
     fn shift(&mut self, kind: OperationKind, events: Range<EventIndex>, delta: u32) {
         let mut event = events.start;
         while event < events.end {
@@ -576,7 +564,7 @@ impl CrdtRecords {
         }
     }
 
-    /// Changes the state of the run at `at` by `delta`, updating its lengths.
+    /// Changes the prepare state of the run at `at` by `delta`, updating its lengths.
     fn shift_record_run(&mut self, at: Cursor, delta: u32) {
         let run = &mut self.record_runs[self.tree.id(at) as usize];
         let before = run.lengths();

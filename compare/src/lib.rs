@@ -5,21 +5,18 @@ use diamond_types::list::ListOpLog;
 use eg_strider::{EventIndex, OpLog, Operation, SequenceNumber};
 use std::ops::Range;
 
-/// A history with its ops in memory, as one peer would hand it to another, for testing
-/// eg-strider against diamond-types and measuring every library on the same histories. Each
-/// library gets the ops in the form its calls take: diamond-types its [`TextOperation`]s with
-/// `usize` parents, and eg-strider its [`Operation`]s beside their text, with [`EventIndex`] parents.
+/// A trace's history in memory, its operations and parents in the form one library's calls take.
 pub struct History<OperationRun = Operation, Parent = EventIndex> {
     pub agents: Vec<String>,
     pub txns: Vec<Txn>,
     parents: Vec<Parent>,
     ops: Vec<OperationRun>,
-    /// The text of every inserting [`Operation`], in order.
+    /// The text of every insert, in order, in eg-strider's form; diamond-types' operations carry
+    /// their own.
     text: String,
 }
 
-/// A transaction of the trace: a run of events by one agent, the first with the transaction's
-/// parents, each other following the one before.
+/// A transaction of the trace: a chain of events by one agent.
 #[derive(Clone)]
 pub struct Txn {
     pub events: Range<usize>,
@@ -28,39 +25,33 @@ pub struct Txn {
     pub sequence_number: usize,
     parents: Range<u32>,
     ops: Range<u32>,
-    /// Where the txn's inserted text is in the history's.
+    /// Where the transaction's inserted text is in the history's.
     text: Range<u32>,
 }
 
 impl<OperationRun, Parent> History<OperationRun, Parent> {
-    /// Returns a txn's parents.
     pub fn parents(&self, txn: &Txn) -> &[Parent] {
         &self.parents[txn.parents.start as usize..txn.parents.end as usize]
     }
 
-    /// Returns a txn's ops.
     pub fn ops(&self, txn: &Txn) -> &[OperationRun] {
         &self.ops[txn.ops.start as usize..txn.ops.end as usize]
     }
 
-    /// Returns how many events the history has.
     pub fn events(&self) -> usize {
         self.txns.last().map_or(0, |txn| txn.events.end)
     }
 }
 
-/// An editing trace from the paper's datasets: its history, and the text it should end with.
+/// An editing trace from the paper's datasets, with the text it should end with.
 pub struct Trace {
     pub history: History<TextOperation, usize>,
     pub end_content: String,
 }
 
 impl Trace {
-    /// Reads a trace in the `editing-traces` JSON format: transactions, each by an agent, with
-    /// parents as indexes into the list of transactions and patches applied in order. A patch
-    /// deletes characters at a position and then inserts text there, counting Unicode
-    /// characters. Agents are numbers, so they are named by them, zero-padded so that names
-    /// sort as the numbers do.
+    /// Reads a trace in the `editing-traces` JSON format, naming agents by their zero-padded
+    /// numbers so that names sort as the numbers do.
     pub fn of_json(json: &[u8]) -> Result<Trace, String> {
         let trace: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
         let field = |name: &str| trace.get(name).ok_or(format!("no {name}"));
@@ -108,7 +99,7 @@ impl Trace {
 }
 
 impl History<TextOperation, usize> {
-    /// Lists the ops of a diamond-types oplog, event for event.
+    /// The history of a diamond-types oplog.
     pub fn of(dt: &ListOpLog) -> Self {
         let entries = dt.as_chunked_operation_vec();
         let (mut agents, mut ids) = (Vec::new(), Vec::new());
@@ -137,7 +128,7 @@ impl History<TextOperation, usize> {
         History { agents, txns, parents, ops, text: String::new() }
     }
 
-    /// Returns the history with its ops in eg-strider's form.
+    /// The history in eg-strider's form.
     pub fn edits(&self) -> History {
         fn inserted(op: &TextOperation) -> &str {
             if op.kind == ListOpKind::Ins {

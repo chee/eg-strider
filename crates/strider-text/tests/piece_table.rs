@@ -32,7 +32,7 @@ fn steps(text: &'static str, max: usize) -> impl Strategy<Value = Vec<Step>> {
     proptest::collection::vec(step, 0..max)
 }
 
-/// Makes the edits to a plain list of characters, then takes them back from there.
+/// Makes the edits to a plain list of characters, then undoes them from there.
 fn check(steps: &[Step]) -> Result<(), TestCaseError> {
     let mut plain: Vec<char> = Vec::new();
     // Every step comes down to removing `removed` characters at `pos`, then inserting

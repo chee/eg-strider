@@ -5,17 +5,18 @@ use std::borrow::Cow;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex, EventRunIndex, HistoryRange};
 
+/// Starts a saved file, which then holds the replicas, the merged text, and the history in parts
+/// that each start at a critical version.
 const MAGIC: &[u8] = b"eg-strider\x05";
 
-/// About how many events the last part of saved history holds. Each earlier part is twice the
-/// size of the one after, so that recent history reads alone and the rest packs well. Tiny in
-/// debug builds, so that tests save several.
+/// Roughly how many events the last part of saved history holds. Each earlier part holds twice as
+/// many as the next, so that recent history reads back alone and older history compresses well;
+/// tiny in debug builds, so that tests save several.
 const EVENTS_PER_PART: u32 = if cfg!(debug_assertions) { 8 } else { 1 << 15 };
 
-/// Index of a part of saved history.
 pub(crate) type HistoryPartIndex = usize;
 
-/// A file that is not a saved document, or is damaged.
+/// The error for bytes that are not an intact saved document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Malformed;
 
@@ -27,32 +28,26 @@ impl std::fmt::Display for Malformed {
 
 impl std::error::Error for Malformed {}
 
-/// History still as saved, in parts: the events before the first that the log holds.
+/// The saved history before the log's first held event, still packed in parts.
 pub(crate) struct UnreadHistory {
     /// The file the log was loaded from.
     bytes: Vec<u8>,
-    /// Where each part is in `bytes`.
     parts: Vec<Range<usize>>,
     /// Each part's first event, then the total number of events.
     starts: Vec<EventIndex>,
-    /// That history's frontier.
+    /// The unread history's frontier.
     pub frontier: Vec<EventIndex>,
 }
 
 impl UnreadHistory {
-    /// Finds the part holding an event.
     pub fn part_holding(&self, event: EventIndex) -> HistoryPartIndex {
         self.starts.partition_point(|&start| start <= event) - 1
     }
 }
 
 impl OpLog {
-    /// Writes the log as a file that [`load`](Self::load) opens without merging: a header, the
-    /// merged text, then the history in parts that each start at a critical version, so that a
-    /// part and those after it read alone. A part stores each field as a column of LEB128
-    /// varints, run-length encoded where values repeat, with positions relative to the op
-    /// before and parents as distances back. Columns and text are compressed with Zstandard,
-    /// each with a checksum.
+    /// Saves the document and its history as a file that [`load`](Self::load) opens without
+    /// replaying.
     pub fn save(&mut self) -> Vec<u8> {
         self.checkout();
         let (first_held, len) = (self.graph.first_held_event(), self.graph.len());
@@ -91,9 +86,8 @@ impl OpLog {
         out
     }
 
-    /// Opens a file that [`save`](Self::save) wrote, ready for more events. The history is
-    /// checked only when an event made at an older version has it read; reading a damaged part
-    /// panics.
+    /// Opens a file that [`save`](Self::save) wrote, reading back its history only once an event
+    /// needs it.
     pub fn load(bytes: Vec<u8>) -> Result<OpLog, Malformed> {
         let mut file = Reader(bytes.strip_prefix(MAGIC).ok_or(Malformed)?);
         let mut log = OpLog::new();
@@ -136,8 +130,7 @@ impl OpLog {
         Ok(log)
     }
 
-    /// Reads the saved history from part `from` on, so that the log holds every event from that
-    /// part's first.
+    /// Reads back saved history from part `from` on.
     pub(crate) fn unpack_from(&mut self, from: HistoryPartIndex) -> Result<(), Malformed> {
         let Some(unread) = &self.unread_history else { return Ok(()) };
         // The parts are read into a log of their own, so that a damaged one leaves this one as it was.
@@ -176,8 +169,8 @@ impl OpLog {
         Ok(())
     }
 
-    /// Returns the parents of run `run`'s first event: for a chain with no run before it, the
-    /// saved history's frontier.
+    /// The parents of `run`'s first event: the unread history's frontier for a run with no parent
+    /// run.
     fn parents_of(&self, run: EventRunIndex) -> Vec<EventIndex> {
         let runs = self.graph.runs();
         let parents: Vec<EventIndex> = runs.parents(run).iter().map(|&parent| runs.start(parent + 1) - 1).collect();
@@ -187,7 +180,7 @@ impl OpLog {
         }
     }
 
-    /// Chooses where to cut the held events `from..to` into parts: at critical versions, about
+    /// Where to cut the held events `from..to` into parts: at critical versions, about
     /// [`EVENTS_PER_PART`] events before the end and twice as far apart each time. Returns `from`,
     /// then each part's end.
     fn part_bounds(&self, from: EventIndex, to: EventIndex) -> Vec<EventIndex> {
@@ -219,7 +212,9 @@ impl OpLog {
         bounds
     }
 
-    /// Packs the held events `events` as a part.
+    /// Packs `events` as a part: columns of LEB128 varints, run-length encoded where values repeat,
+    /// with positions relative to the op before and parents as distances back, then the inserted
+    /// text, each compressed by Zstandard with a checksum.
     fn pack(&self, events: Range<EventIndex>) -> Vec<u8> {
         let mut columns = Vec::new();
 
@@ -304,8 +299,8 @@ impl OpLog {
         out
     }
 
-    /// Reads a part that [`pack`](Self::pack) wrote, whose events follow those held, and adds
-    /// them. Returns the first event's parents.
+    /// Adds the events of a part that [`pack`](Self::pack) wrote, which follow those held,
+    /// returning the first event's parents.
     fn unpack(&mut self, part: &[u8]) -> Result<Vec<EventIndex>, Malformed> {
         let mut file = Reader(part);
         let columns = file.compressed()?;
@@ -393,8 +388,7 @@ impl OpLog {
     }
 }
 
-/// Returns where an op leaves off: after what it inserted, or where it deleted. The next op is
-/// usually there or just before.
+/// Where an op leaves off, which the next op's position is stored relative to.
 fn after(kind: OperationKind, pos: u32, len: u32) -> u32 {
     match kind {
         OperationKind::Insert => pos.saturating_add(len),
@@ -402,7 +396,7 @@ fn after(kind: OperationKind, pos: u32, len: u32) -> u32 {
     }
 }
 
-/// Appends a number.
+/// Appends `n` as an LEB128 varint.
 fn number(out: &mut Vec<u8>, mut n: usize) {
     while n >= 0x80 {
         out.push(n as u8 | 0x80);
@@ -419,7 +413,7 @@ fn column(out: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>)) {
     out.extend_from_slice(&values);
 }
 
-/// Appends values as runs: each value, then how many times it repeats.
+/// Appends values run-length encoded: each value, then how many times it repeats.
 fn runs(out: &mut Vec<u8>, values: impl Iterator<Item = u64>) {
     let mut run: Option<(u64, usize)> = None;
     for value in values {
@@ -439,7 +433,6 @@ fn runs(out: &mut Vec<u8>, values: impl Iterator<Item = u64>) {
     }
 }
 
-/// Folds a signed number into an unsigned one that is small when near zero.
 fn zigzag(n: i64) -> u64 {
     (n << 1 ^ n >> 63) as u64
 }
@@ -448,15 +441,13 @@ fn unzigzag(n: u64) -> i64 {
     (n >> 1) as i64 ^ -((n & 1) as i64)
 }
 
-/// Compresses bytes, with a checksum that decompressing checks, so that damage is found when a
-/// part is read rather than when what it holds is used.
 fn compress_with_checksum(bytes: &[u8]) -> Vec<u8> {
     let mut compressor = zstd::bulk::Compressor::new(3).expect("a compression level zstd has");
     compressor.include_checksum(true).expect("zstd takes a checksum");
     compressor.compress(bytes).expect("compressing into memory")
 }
 
-/// Decompresses `len` bytes that [`compress_with_checksum`] compressed.
+/// Decompresses what [`compress_with_checksum`] made of `len` bytes.
 fn decompress_checked(compressed: &[u8], len: usize) -> Result<Vec<u8>, Malformed> {
     // The compressed bytes say for themselves how long they decompress to, so room is only ever
     // made for a length that both agree on.
@@ -466,7 +457,7 @@ fn decompress_checked(compressed: &[u8], len: usize) -> Result<Vec<u8>, Malforme
     zstd::bulk::decompress(compressed, len).ok().filter(|bytes| bytes.len() == len).ok_or(Malformed)
 }
 
-/// What is left to read of a file or a column.
+/// The unread rest of a file or column.
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
@@ -494,7 +485,7 @@ impl<'a> Reader<'a> {
         u32::try_from(self.varint()?).map_err(|_| Malformed)
     }
 
-    /// Reads a count of things at least a byte each.
+    /// Reads a count of items of at least a byte each, which must fit in what is left.
     fn count(&mut self) -> Result<usize, Malformed> {
         let items = self.number()? as usize;
         (items <= self.0.len()).then_some(items).ok_or(Malformed)

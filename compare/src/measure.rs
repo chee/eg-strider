@@ -49,7 +49,7 @@ pub(crate) struct Memory {
     pub(crate) kept: usize,
 }
 
-/// Runs `f` and reports what it did to the memory in use.
+/// Runs `f`, measuring its memory use.
 pub(crate) fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
     let before = IN_USE.load(Relaxed);
     MOST.store(before, Relaxed);
@@ -60,11 +60,11 @@ pub(crate) fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
 /// How long each trace's merges run before any is timed.
 const WARM_UP: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// What a system took on the two tasks.
+/// A library's time and memory on the two tasks.
 #[derive(Clone, Copy)]
 pub(crate) struct Measured {
     pub(crate) merge_ms: f64,
-    /// Memory the history's ops take, in the form the system gets them.
+    /// Memory the history's ops take, in the form the library gets them.
     pub(crate) ops: usize,
     /// While merging: peak memory, ops included, and what the merged document holds.
     pub(crate) merging: Memory,
@@ -128,12 +128,9 @@ pub(crate) fn prepare<'a, O: 'a, D: 'a>(
     (measured, turns)
 }
 
-/// Runs one library's task on every trace in turns, round after round, until each has `reps`
-/// runs that count. The library's code stays warm, as in an application that merges often,
-/// but no run follows one on the same trace, whose branches the processor would have learnt:
-/// that makes some libraries twice as fast. The first runs of a short task are up to twice as
-/// slow as the rest, until the processor has sped up, so only rounds begun once some time has
-/// gone by count.
+/// Runs one library's task on each trace in turn, round after round, until each has `reps` runs
+/// counted. Rotating keeps the library's code warm without letting the branch predictor learn one
+/// trace, and rounds begun within [`WARM_UP`] are not counted, while the processor speeds up.
 pub(crate) fn in_turns<T>(reps: u32, tasks: &mut [&mut dyn FnMut() -> T]) -> Vec<Vec<T>> {
     let mut runs: Vec<Vec<T>> = tasks.iter().map(|_| Vec::with_capacity(reps as usize)).collect();
     let started = Instant::now();
@@ -149,20 +146,19 @@ pub(crate) fn in_turns<T>(reps: u32, tasks: &mut [&mut dyn FnMut() -> T]) -> Vec
     runs
 }
 
-/// Returns the milliseconds since `start`.
+/// Milliseconds since `start`.
 pub(crate) fn since(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1e3
 }
 
-/// Returns the median: the middle time, or the mean of the middle two.
 pub(crate) fn median(mut times: Vec<f64>) -> f64 {
     times.sort_by(f64::total_cmp);
     let (below, above) = (times.len().saturating_sub(1) / 2, times.len() / 2);
     times.get(below).map_or(f64::NAN, |low| (low + times[above]) / 2.0)
 }
 
-/// Returns the median milliseconds of `reps` runs of `f`, each on what an untimed `setup`
-/// makes, and the last result.
+/// The median milliseconds of `reps` runs of `f`, each on what an untimed `setup` makes, and the
+/// last result.
 pub(crate) fn median_of<S, T>(reps: u32, mut setup: impl FnMut() -> S, mut f: impl FnMut(S) -> T) -> (f64, T) {
     let mut times = Vec::with_capacity(reps as usize);
     loop {
