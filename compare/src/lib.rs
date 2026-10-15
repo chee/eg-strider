@@ -11,41 +11,41 @@ use std::ops::Range;
 /// `usize` parents, and eg-strider its [`Operation`]s beside their text, with [`EventIndex`] parents.
 pub struct History<OperationRun = Operation, Parent = EventIndex> {
     pub agents: Vec<String>,
-    pub chunks: Vec<Chunk>,
+    pub txns: Vec<Txn>,
     parents: Vec<Parent>,
     ops: Vec<OperationRun>,
     /// The text of every inserting [`Operation`], in order.
     text: String,
 }
 
-/// A run of events by one agent: the first with the chunk's parents, each other following the
-/// one before.
+/// A transaction of the trace: a run of events by one agent, the first with the transaction's
+/// parents, each other following the one before.
 #[derive(Clone)]
-pub struct Chunk {
+pub struct Txn {
     pub events: Range<usize>,
     /// The agent's index in [`History::agents`].
     pub agent: usize,
     pub sequence_number: usize,
     parents: Range<u32>,
     ops: Range<u32>,
-    /// Where the chunk's inserted text is in the history's.
+    /// Where the txn's inserted text is in the history's.
     text: Range<u32>,
 }
 
 impl<OperationRun, Parent> History<OperationRun, Parent> {
-    /// Returns a chunk's parents.
-    pub fn parents(&self, chunk: &Chunk) -> &[Parent] {
-        &self.parents[chunk.parents.start as usize..chunk.parents.end as usize]
+    /// Returns a txn's parents.
+    pub fn parents(&self, txn: &Txn) -> &[Parent] {
+        &self.parents[txn.parents.start as usize..txn.parents.end as usize]
     }
 
-    /// Returns a chunk's ops.
-    pub fn ops(&self, chunk: &Chunk) -> &[OperationRun] {
-        &self.ops[chunk.ops.start as usize..chunk.ops.end as usize]
+    /// Returns a txn's ops.
+    pub fn ops(&self, txn: &Txn) -> &[OperationRun] {
+        &self.ops[txn.ops.start as usize..txn.ops.end as usize]
     }
 
     /// Returns how many events the history has.
     pub fn events(&self) -> usize {
-        self.chunks.last().map_or(0, |chunk| chunk.events.end)
+        self.txns.last().map_or(0, |txn| txn.events.end)
     }
 }
 
@@ -64,22 +64,22 @@ impl Trace {
     pub fn of_json(json: &[u8]) -> Result<Trace, String> {
         let trace: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
         let field = |name: &str| trace.get(name).ok_or(format!("no {name}"));
-        let txns = field("txns")?.as_array().ok_or("txns is not a list")?;
+        let json_txns = field("txns")?.as_array().ok_or("txns is not a list")?;
         let agents = field("numAgents")?.as_u64().ok_or("numAgents is not a number")? as usize;
         let end_content = field("endContent")?.as_str().ok_or("endContent is not text")?.to_string();
         let number = |value: &serde_json::Value| value.as_u64().map(|n| n as usize).ok_or("a number expected");
 
-        let (mut chunks, mut parents, mut ops) = (Vec::with_capacity(txns.len()), Vec::new(), Vec::new());
-        let (mut ends, mut next_sequence) = (Vec::with_capacity(txns.len()), vec![0; agents]);
-        for txn in txns {
-            let agent = number(txn.get("agent").ok_or("a txn without an agent")?)?;
+        let (mut txns, mut parents, mut ops) = (Vec::with_capacity(json_txns.len()), Vec::new(), Vec::new());
+        let (mut ends, mut next_sequence) = (Vec::with_capacity(json_txns.len()), vec![0; agents]);
+        for json_txn in json_txns {
+            let agent = number(json_txn.get("agent").ok_or("a txn without an agent")?)?;
             let start = ends.last().copied().unwrap_or(0);
             let (first_parent, first_op) = (parents.len() as u32, ops.len() as u32);
-            for parent in txn.get("parents").and_then(|p| p.as_array()).ok_or("a txn without parents")? {
+            for parent in json_txn.get("parents").and_then(|p| p.as_array()).ok_or("a txn without parents")? {
                 parents.push(*ends.get(number(parent)?).ok_or("a parent after its child")? - 1);
             }
             let mut len = 0;
-            for patch in txn.get("patches").and_then(|p| p.as_array()).ok_or("a txn without patches")? {
+            for patch in json_txn.get("patches").and_then(|p| p.as_array()).ok_or("a txn without patches")? {
                 let (pos, deleted) = (number(&patch[0])?, number(&patch[1])?);
                 let inserted = patch[2].as_str().ok_or("a patch without text")?;
                 if deleted > 0 {
@@ -92,7 +92,7 @@ impl Trace {
             }
             let next = next_sequence.get_mut(agent).ok_or("an agent past numAgents")?;
             let sequence_number = std::mem::replace(next, *next + len);
-            chunks.push(Chunk {
+            txns.push(Txn {
                 events: start..start + len,
                 agent,
                 sequence_number,
@@ -103,7 +103,7 @@ impl Trace {
             ends.push(start + len);
         }
         let agents = (0..agents).map(|agent| format!("agent{agent:04}")).collect();
-        Ok(Trace { history: History { agents, chunks, parents, ops, text: String::new() }, end_content })
+        Ok(Trace { history: History { agents, txns, parents, ops, text: String::new() }, end_content })
     }
 }
 
@@ -112,7 +112,7 @@ impl History<TextOperation, usize> {
     pub fn of(dt: &ListOpLog) -> Self {
         let entries = dt.as_chunked_operation_vec();
         let (mut agents, mut ids) = (Vec::new(), Vec::new());
-        let mut chunks = Vec::with_capacity(entries.len());
+        let mut txns = Vec::with_capacity(entries.len());
         let mut parents = Vec::with_capacity(entries.iter().map(|entry| entry.parents.as_ref().len()).sum());
         let mut ops = Vec::with_capacity(entries.iter().map(|entry| entry.ops.len()).sum());
         for entry in entries {
@@ -125,7 +125,7 @@ impl History<TextOperation, usize> {
             let (first_parent, first_op) = (parents.len() as u32, ops.len() as u32);
             parents.extend_from_slice(entry.parents.as_ref());
             ops.extend(entry.ops);
-            chunks.push(Chunk {
+            txns.push(Txn {
                 events: entry.span.start..entry.span.end,
                 agent,
                 sequence_number: entry.agent_span.seq_range.start,
@@ -134,7 +134,7 @@ impl History<TextOperation, usize> {
                 text: 0..0,
             });
         }
-        History { agents, chunks, parents, ops, text: String::new() }
+        History { agents, txns, parents, ops, text: String::new() }
     }
 
     /// Returns the history with its ops in eg-strider's form.
@@ -148,12 +148,12 @@ impl History<TextOperation, usize> {
         }
         let mut text = String::with_capacity(self.ops.iter().map(|op| inserted(op).len()).sum());
         let mut ops = Vec::with_capacity(self.ops.len());
-        let chunks = self
-            .chunks
+        let txns = self
+            .txns
             .iter()
-            .map(|chunk| {
+            .map(|txn| {
                 let start = text.len() as u32;
-                for op in self.ops(chunk) {
+                for op in self.ops(txn) {
                     let (pos, len) = (op.loc.span.start as u32, (op.loc.span.end - op.loc.span.start) as u32);
                     assert!(op.kind == ListOpKind::Del || op.loc.fwd, "reversed inserts are not supported");
                     text.push_str(inserted(op));
@@ -162,11 +162,11 @@ impl History<TextOperation, usize> {
                         ListOpKind::Del => Operation::Delete { pos, len, backward: !op.loc.fwd },
                     });
                 }
-                Chunk { text: start..text.len() as u32, ..chunk.clone() }
+                Txn { text: start..text.len() as u32, ..txn.clone() }
             })
             .collect();
         let parents = self.parents.iter().map(|&parent| parent as EventIndex).collect();
-        History { agents: self.agents.clone(), chunks, parents, ops, text }
+        History { agents: self.agents.clone(), txns, parents, ops, text }
     }
 }
 
@@ -177,15 +177,15 @@ pub fn convert(dt: &ListOpLog) -> OpLog {
     log
 }
 
-/// Appends the events of `history` that `log` lacks, up to the last whole chunk ending at or
+/// Appends the events of `history` that `log` lacks, up to the last whole transaction ending at or
 /// before `limit`.
 pub fn extend(log: &mut OpLog, history: &History, limit: usize) {
     let agents: Vec<_> = history.agents.iter().map(|name| log.get_or_create_replica(name)).collect();
     let have = log.len();
-    for chunk in history.chunks.iter().skip_while(|chunk| chunk.events.end <= have).take_while(|chunk| chunk.events.end <= limit) {
-        assert_eq!(log.len(), chunk.events.start);
-        let text = &history.text[chunk.text.start as usize..chunk.text.end as usize];
-        log.add_remote_ops(agents[chunk.agent], chunk.sequence_number as SequenceNumber, history.parents(chunk), history.ops(chunk), text)
+    for txn in history.txns.iter().skip_while(|txn| txn.events.end <= have).take_while(|txn| txn.events.end <= limit) {
+        assert_eq!(log.len(), txn.events.start);
+        let text = &history.text[txn.text.start as usize..txn.text.end as usize];
+        log.add_remote_ops(agents[txn.agent], txn.sequence_number as SequenceNumber, history.parents(txn), history.ops(txn), text)
             .expect("a trace's events are valid");
     }
 }

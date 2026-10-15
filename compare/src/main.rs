@@ -123,8 +123,8 @@ fn strider_merge(history: &History) -> OpLog {
 fn dt_append(history: &History<TextOperation, usize>) -> ListOpLog {
     let mut oplog = ListOpLog::new();
     let agents: Vec<_> = history.agents.iter().map(|name| oplog.get_or_create_agent_id(name)).collect();
-    for chunk in &history.chunks {
-        oplog.add_operations_remote(agents[chunk.agent], history.parents(chunk), chunk.sequence_number, history.ops(chunk));
+    for txn in &history.txns {
+        oplog.add_operations_remote(agents[txn.agent], history.parents(txn), txn.sequence_number, history.ops(txn));
     }
     oplog
 }
@@ -383,23 +383,21 @@ fn mb(bytes: usize) -> String {
     format!("{:.2} MB", bytes as f64 / (1 << 20) as f64)
 }
 
-/// The systems, in the order their figures are listed.
-const SYSTEMS: [&str; 5] = ["strider", "dt", "yjs", "loro", "automerge"];
+/// The libraries, in the order they are timed and their figures listed: each one's key in the
+/// results, and its name.
+const LIBRARIES: [(&str, &str); 5] = [("strider", "eg-strider"), ("dt", "diamond-types"), ("yjs", "yrs"), ("loro", "Loro"), ("automerge", "Automerge")];
 
-/// Writes one figure per system as a JSON object, with `null` where there is none.
+/// Writes one figure per library as a JSON object, with `null` where there is none.
 fn object<T: Display>(of: [Option<T>; 5]) -> String {
     let fields: Vec<String> =
-        SYSTEMS.iter().zip(of).map(|(name, value)| format!("\"{name}\":{}", value.map_or("null".to_string(), |v| v.to_string()))).collect();
+        LIBRARIES.iter().zip(of).map(|((key, _), value)| format!("\"{key}\":{}", value.map_or("null".to_string(), |v| v.to_string()))).collect();
     format!("{{{}}}", fields.join(","))
 }
 
-/// Lays one figure per system out in columns, with a dash where there is none.
+/// Lays one figure per library out in columns, with a dash where there is none.
 fn columns(of: [Option<String>; 5]) -> String {
     of.map(|value| format!("{:>13}", value.unwrap_or("-".to_string()))).join(" ")
 }
-
-/// The libraries, in the order they are timed.
-const NAMES: [&str; 5] = ["eg-strider", "diamond-types", "yrs", "Loro", "Automerge"];
 
 /// A trace read into memory, with what each library is handed and checked against.
 struct Loaded {
@@ -570,9 +568,9 @@ fn main() {
         measured_others.push(measured);
         tasks.push(turns);
     }
-    let mut merge_runs: Vec<Vec<Vec<MergeRun>>> = vec![vec![Vec::new(); NAMES.len()]; loaded.len()];
-    let mut open_runs: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); NAMES.len()]; loaded.len()];
-    for (library, name) in NAMES.iter().enumerate() {
+    let mut merge_runs: Vec<Vec<Vec<MergeRun>>> = vec![vec![Vec::new(); LIBRARIES.len()]; loaded.len()];
+    let mut open_runs: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); LIBRARIES.len()]; loaded.len()];
+    for (library, (_, name)) in LIBRARIES.iter().enumerate() {
         let timed: Vec<usize> = (0..loaded.len()).filter(|&trace| tasks[trace][library].is_some()).collect();
         if timed.is_empty() {
             continue;
@@ -649,7 +647,7 @@ fn main() {
         let strider = Measured {
             merge_ms,
             ops: held_by_history.kept,
-            merging: with_ops(held_by_history, memory_of(|| strider_merge(&history)).1),
+            merging: with_ops(held_by_history, memory_of(|| strider_merge(history)).1),
             open_ms,
             opening: memory_of(|| OpLog::load(saved.clone()).unwrap()).1,
             saved: saved.len(),
@@ -658,9 +656,9 @@ fn main() {
         let diamond = Measured {
             merge_ms: dt_ms,
             ops: held_by_dt_history.kept,
-            merging: with_ops(held_by_dt_history, memory_of(|| dt_merge(&dt_history)).1),
+            merging: with_ops(held_by_dt_history, memory_of(|| dt_merge(dt_history)).1),
             open_ms: dt_open_ms,
-            opening: memory_of(|| dt_open(&dt_saved)).1,
+            opening: memory_of(|| dt_open(dt_saved)).1,
             saved: dt_saved.len(),
             same,
         };
@@ -744,7 +742,7 @@ fn main() {
         ));
     }
 
-    let headings = || columns(["eg-strider", "diamond-types", "yrs", "Loro", "Automerge"].map(|name| Some(name.to_string())));
+    let headings = || columns(LIBRARIES.map(|(_, name)| Some(name.to_string())));
     println!(
         "\nmerging a history whose ops are in memory: the time, the most memory in use, how much of that the ops are, and what the document holds once done"
     );

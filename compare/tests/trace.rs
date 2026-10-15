@@ -21,9 +21,8 @@ fn a_trace_numbers_events_in_transaction_order() {
     let trace = Trace::of_json(TRACE.as_bytes()).unwrap();
     let history = &trace.history;
     assert_eq!(history.events(), 14);
-    let chunks: Vec<_> =
-        history.chunks.iter().map(|chunk| (chunk.events.clone(), chunk.agent, chunk.sequence_number, history.parents(chunk).to_vec())).collect();
-    assert_eq!(chunks, [(0..5, 0, 0, vec![]), (5..11, 0, 5, vec![4]), (11..13, 1, 0, vec![4]), (13..14, 1, 2, vec![10, 12])]);
+    let txns: Vec<_> = history.txns.iter().map(|txn| (txn.events.clone(), txn.agent, txn.sequence_number, history.parents(txn).to_vec())).collect();
+    assert_eq!(txns, [(0..5, 0, 0, vec![]), (5..11, 0, 5, vec![4]), (11..13, 1, 0, vec![4]), (13..14, 1, 2, vec![10, 12])]);
 }
 
 #[test]
@@ -31,8 +30,8 @@ fn a_trace_merges_to_its_text() {
     let trace = Trace::of_json(TRACE.as_bytes()).unwrap();
     let mut dt = ListOpLog::new();
     let agents: Vec<_> = trace.history.agents.iter().map(|name| dt.get_or_create_agent_id(name)).collect();
-    for chunk in &trace.history.chunks {
-        dt.add_operations_remote(agents[chunk.agent], trace.history.parents(chunk), chunk.sequence_number, trace.history.ops(chunk));
+    for txn in &trace.history.txns {
+        dt.add_operations_remote(agents[txn.agent], trace.history.parents(txn), txn.sequence_number, trace.history.ops(txn));
     }
     assert_eq!(dt.checkout_tip().content().to_string(), trace.end_content);
 
