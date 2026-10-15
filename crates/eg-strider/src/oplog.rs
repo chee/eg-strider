@@ -1,19 +1,12 @@
 mod file;
-mod reader;
-mod unread_history;
 
-use crate::document_state::DocumentState;
-use crate::malformed::Malformed;
-use crate::operation::Operation;
-use crate::operation_kind::OperationKind;
-use crate::operation_run::{OperationRun, DELETES_END_OF_PREVIOUS_INSERT, MAX_OP_LEN};
-use crate::operation_run_slice::OperationRunSlice;
-use crate::replay;
-use crate::replay_plan::ReplayPlan;
+pub use file::Malformed;
+
+use crate::operation::{ByteRange, Operation, OperationKind, OperationRun, OperationRunSlice, DELETES_END_OF_PREVIOUS_INSERT, MAX_OP_LEN};
+use crate::replay::{self, DocumentState, ReplayPlan};
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex};
-use unread_history::UnreadHistory;
 
 /// How many events a replica made before this one. With the replica, it names an event on every
 /// replica.
@@ -22,10 +15,6 @@ pub type ReplicaId = u32;
 
 /// Index of an op in the log.
 pub(crate) type OperationRunIndex = u32;
-
-/// Where some inserted text is in [`OpLog::inserted_text`]: its first byte, and the byte after
-/// its last.
-pub(crate) type ByteRange = (u32, u32);
 
 /// A run of consecutive events by one replica.
 struct ReplicaRun {
@@ -63,7 +52,7 @@ pub struct OpLog {
     /// then, since moving it into events still being added would cut them up at every merge.
     latest_document_state: Option<DocumentState>,
     /// History from before the first event held here, from a loaded file, still unread.
-    unread_history: Option<UnreadHistory>,
+    unread_history: Option<file::UnreadHistory>,
     /// Scratch for the frontier, as a local event's parents.
     parents: Vec<EventIndex>,
     /// The characters the inserts put in, and the characters the deletes take out.

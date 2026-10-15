@@ -1,6 +1,6 @@
-use crate::operation_kind::OperationKind;
+use crate::operation::OperationKind;
 use crate::oplog::{OpLog, OperationRunIndex};
-use crate::transformed_operations::TransformedOperations;
+use crate::replay::TransformedOperations;
 use std::ops::Range;
 use strider_graph::{EventRunIndex, EventRuns};
 
