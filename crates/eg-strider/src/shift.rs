@@ -3,11 +3,11 @@ use crate::replay::Placed;
 use std::ops::Range;
 use strider_graph::{EventRunIndex, EventRuns};
 
-/// Regions with more blocks go straight to the tracker. The sets kept per block grow with its
+/// Regions with more blocks go straight to the CRDT records. The sets kept per block grow with its
 /// square: 256 KB here.
 const MAX_BLOCKS: usize = 1024;
 
-/// Beyond this many clusters, scanning them for every edit costs more than the tracker would.
+/// Beyond this many clusters, scanning them for every edit costs more than the CRDT records would.
 const MAX_CLUSTERS: usize = 64;
 
 /// A block's place among its region's blocks, counting from 0.
@@ -204,7 +204,7 @@ impl Clusters {
 /// Merges a region without CRDT state when its concurrent edits do not touch: the simple case
 /// of operational transformation, moving each edit by the net length of the concurrent edits
 /// before it. Edited stretches are kept as clusters, and an edit landing in a cluster that
-/// holds edits it has not seen sends the region to the tracker. A block is stable once every
+/// holds edits it has not seen sends the region to the CRDT records. A block is stable once every
 /// later block has seen it.
 #[derive(Default)]
 pub(crate) struct Shifter {
@@ -217,7 +217,7 @@ pub(crate) struct Shifter {
 
 impl Shifter {
     /// Merges a region by shifting, recording in `document` where its ops go. Returns false,
-    /// leaving `document` as it was, if the region needs the tracker.
+    /// leaving `document` as it was, if the region needs the CRDT records.
     pub fn merge(&mut self, log: &OpLog, blocks: &EventRuns, first_op: &[OpIndex], region: &Range<EventRunIndex>, document: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;

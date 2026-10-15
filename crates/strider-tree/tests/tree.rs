@@ -1,9 +1,9 @@
 use std::cmp::Ordering;
-use strider_tree::{EntryId, PrepareEffectTree, View, Widths};
+use strider_tree::{EntryId, Lengths, PrepareEffectTree, View};
 
-/// Widths as the tree takes them, from a (prepare, effect) pair.
-fn w(pair: [u32; 2]) -> Widths {
-    Widths { prepare: pair[0], effect: pair[1] }
+/// Lengths as the tree takes them, from a (prepare, effect) pair.
+fn w(pair: [u32; 2]) -> Lengths {
+    Lengths { prepare: pair[0], effect: pair[1] }
 }
 use proptest::prelude::*;
 use proptest::sample::Index;
@@ -13,7 +13,7 @@ use proptest::sample::Index;
 enum Edit {
     Insert {
         before: Option<Index>,
-        widths: [u32; 2],
+        lengths: [u32; 2],
     },
     SplitEntry {
         at: Index,
@@ -22,11 +22,11 @@ enum Edit {
     },
     SetWidths {
         at: Index,
-        widths: [u32; 2],
+        lengths: [u32; 2],
     },
     Update {
         at: Index,
-        widths: [u32; 2],
+        lengths: [u32; 2],
     },
     /// Looks up a character index, which the tree remembers the whereabouts of.
     Find {
@@ -36,12 +36,12 @@ enum Edit {
 }
 
 fn edit() -> impl Strategy<Value = Edit> {
-    let widths = || [0u32..6, 0u32..6];
+    let lengths = || [0u32..6, 0u32..6];
     prop_oneof![
-        (proptest::option::weighted(0.9, any::<Index>()), widths()).prop_map(|(before, widths)| Edit::Insert { before, widths }),
+        (proptest::option::weighted(0.9, any::<Index>()), lengths()).prop_map(|(before, lengths)| Edit::Insert { before, lengths }),
         (any::<Index>(), any::<[Index; 2]>(), any::<bool>()).prop_map(|(at, share, before)| Edit::SplitEntry { at, share, before }),
-        (any::<Index>(), widths()).prop_map(|(at, widths)| Edit::SetWidths { at, widths }),
-        (any::<Index>(), widths()).prop_map(|(at, widths)| Edit::Update { at, widths }),
+        (any::<Index>(), lengths()).prop_map(|(at, lengths)| Edit::SetWidths { at, lengths }),
+        (any::<Index>(), lengths()).prop_map(|(at, lengths)| Edit::Update { at, lengths }),
         (any::<bool>(), any::<Index>()).prop_map(|(prepare, place)| Edit::Find { prepare, place }),
     ]
 }
@@ -54,18 +54,18 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
 
     for edit in edits {
         match *edit {
-            Edit::Insert { before, widths } => {
+            Edit::Insert { before, lengths } => {
                 let i = before.map_or(list.len(), |b| b.index(list.len()));
                 // Every other insert is by a caller that does not ask where it landed.
                 let before = list.get(i).map(|e| tree.cursor(e.0));
                 let id = if list.len().is_multiple_of(2) {
-                    tree.add(before, w(widths))
+                    tree.add(before, w(lengths))
                 } else {
-                    let (id, at) = tree.insert(before, w(widths));
+                    let (id, at) = tree.insert(before, w(lengths));
                     prop_assert_eq!(at, effect_index(&list[..i]));
                     id
                 };
-                list.insert(i, (id, widths));
+                list.insert(i, (id, lengths));
             }
             Edit::SplitEntry { at, share, before } => {
                 let i = at.index(list.len());
@@ -76,15 +76,15 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
                 list.insert(i + !before as usize, (id, taken));
                 prop_assert_eq!(parts.map(|part| tree.id(part)), [list[i].0, list[i + 1].0]);
             }
-            Edit::SetWidths { at, widths } => {
+            Edit::SetWidths { at, lengths } => {
                 let i = at.index(list.len());
-                tree.set_widths(tree.cursor(list[i].0), w(widths));
-                list[i].1 = widths;
+                tree.set_lengths(tree.cursor(list[i].0), w(lengths));
+                list[i].1 = lengths;
             }
-            Edit::Update { at, widths } => {
+            Edit::Update { at, lengths } => {
                 let i = at.index(list.len());
-                prop_assert_eq!(tree.update(tree.cursor(list[i].0), w(widths)), effect_index(&list[..i]));
-                list[i].1 = widths;
+                prop_assert_eq!(tree.update(tree.cursor(list[i].0), w(lengths)), effect_index(&list[..i]));
+                list[i].1 = lengths;
             }
             Edit::Find { prepare, place } => {
                 let (view, view_index) = if prepare { (View::Prepare, 0) } else { (View::Effect, 1) };
@@ -92,7 +92,7 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
                 if total > 0 {
                     let mut index = place.index(total as usize) as u32;
                     let (at, offset, effect) = tree.locate(view, index);
-                    // The first entry that `index` falls within, and the effect widths before it.
+                    // The first entry that `index` falls within, and the effect lengths before it.
                     let mut before = 0;
                     let entry = list.iter().find(|e| {
                         let within = index < e.1[view_index];
@@ -109,9 +109,9 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
     // The tree holds the same entries in the same order.
     prop_assert_eq!(tree.len(), list.len());
     let mut at = Some(tree.first());
-    for &(id, widths) in &list {
+    for &(id, lengths) in &list {
         let here = at.expect("tree ended early");
-        prop_assert_eq!((tree.id(here), tree.widths(here)), (id, w(widths)));
+        prop_assert_eq!((tree.id(here), tree.lengths(here)), (id, w(lengths)));
         prop_assert_eq!(tree.cursor(id), here);
         at = tree.next(here);
     }
@@ -120,9 +120,9 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
     // In each view, every character index leads to the right entry, and back.
     for (view, view_index) in [(View::Prepare, 0), (View::Effect, 1)] {
         let mut start = 0;
-        for (i, &(id, widths)) in list.iter().enumerate() {
+        for (i, &(id, lengths)) in list.iter().enumerate() {
             let here = tree.cursor(id);
-            for offset in 0..widths[view_index] {
+            for offset in 0..lengths[view_index] {
                 prop_assert_eq!(tree.char_index_to_entry(view, start + offset), (here, offset));
             }
             prop_assert_eq!(tree.entry_to_char_index(view, here), start);
@@ -130,7 +130,7 @@ fn check_against_list<const N: usize>(edits: &[Edit]) -> Result<(), TestCaseErro
                 prop_assert_eq!(tree.cmp(tree.cursor(list[i - 1].0), here), Ordering::Less);
                 prop_assert_eq!(tree.cmp(tree.first(), here), Ordering::Less);
             }
-            start += widths[view_index];
+            start += lengths[view_index];
         }
     }
     Ok(())

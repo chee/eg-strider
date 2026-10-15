@@ -512,13 +512,22 @@ fn others(loaded: &Loaded) -> [Option<(Measured, Turns<'_>)>; 3] {
     let expected = &loaded.expected;
     let [yjs, loro, automerge] = &loaded.sent;
     [
-        yjs.as_ref().ok().map(|(sent, _)| prepare(expected, move || yjs_decode_batches(sent), yjs_merge, yjs_text, yjs_save, |saved| yjs_apply(yjs_decode(saved)))),
+        yjs.as_ref()
+            .ok()
+            .map(|(sent, _)| prepare(expected, move || yjs_decode_batches(sent), yjs_merge, yjs_text, yjs_save, |saved| yjs_apply(yjs_decode(saved)))),
         loro.as_ref().ok().map(|(sent, _)| {
             let ops = loro_decode_batches(sent);
             prepare(expected, move || ops.clone(), loro_apply, loro_text, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import)
         }),
         automerge.as_ref().ok().map(|(sent, _)| {
-            prepare(expected, move || automerge_decode(sent), automerge_apply, automerge_text, |document: &mut automerge::AutoCommit| document.save(), automerge_open)
+            prepare(
+                expected,
+                move || automerge_decode(sent),
+                automerge_apply,
+                automerge_text,
+                |document: &mut automerge::AutoCommit| document.save(),
+                automerge_open,
+            )
         }),
     ]
 }
@@ -569,7 +578,8 @@ fn main() {
             continue;
         }
         eprintln!("timing {name}...");
-        let mut merges: Vec<&mut dyn FnMut() -> MergeRun> = tasks.iter_mut().filter_map(|turns| turns[library].as_mut()).map(|turns| &mut *turns.merge as _).collect();
+        let mut merges: Vec<&mut dyn FnMut() -> MergeRun> =
+            tasks.iter_mut().filter_map(|turns| turns[library].as_mut()).map(|turns| &mut *turns.merge as _).collect();
         for (&trace, runs) in timed.iter().zip(in_turns(reps, &mut merges)) {
             merge_runs[trace][library] = runs;
         }

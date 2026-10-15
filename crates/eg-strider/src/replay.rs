@@ -1,6 +1,6 @@
+use crate::crdt_records::{CrdtRecords, DeleteTargets, RecordId};
 use crate::oplog::{ByteRange, OpIndex, OpKind, OpLog, OpSlice};
 use crate::shift::Shifter;
-use crate::tracker::{ItemId, Targets, Tracker};
 use std::ops::Range;
 use strider_graph::{walk, EventIndex, EventRunIndex, HistoryRange, WalkScratch, WalkStep};
 use strider_text::PieceTable;
@@ -72,15 +72,15 @@ impl Placed {
     }
 }
 
-/// What a region's critical version keeps once the region has been through the tracker.
+/// What a region's critical version keeps once the region has been through the CRDT records.
 #[derive(Default)]
 struct Kept {
     /// How many of the region's events, from its start, `resolved` covers.
     events: u32,
-    /// Tracker items, op by op in log order. An insert: its first character's left origin, then
+    /// Records, op by op in log order. An insert: its first character's left origin, then
     /// the right origin all its characters share. A delete: per stretch of consecutive targets,
     /// the first and the count, with [`DESCENDING`] if they count down.
-    resolved: Vec<ItemId>,
+    resolved: Vec<RecordId>,
 }
 
 const DESCENDING: u32 = 1 << 31;
@@ -105,7 +105,7 @@ pub(crate) struct Memo {
 /// Scratch space for merging regions, reused across regions.
 #[derive(Default)]
 struct Workspace {
-    tracker: Tracker,
+    records: CrdtRecords,
     walk: WalkScratch,
     shifter: Shifter,
 }
@@ -119,7 +119,7 @@ struct Plan {
     /// Per block, the op holding its first event; then the number of ops.
     first_op: Vec<OpIndex>,
     /// Per segment, what its starting critical version keeps: nothing unless it is a region
-    /// that went through the tracker.
+    /// that went through the CRDT records.
     kept: Vec<Kept>,
 }
 
@@ -170,7 +170,7 @@ impl Plan {
         }
     }
 
-    /// Counts the regions that have been through the tracker.
+    /// Counts the regions that have been through the CRDT records.
     fn tracked_regions(&self) -> usize {
         self.kept.iter().filter(|kept| kept.events > 0).count()
     }
@@ -194,7 +194,7 @@ impl Memo {
 /// `memo`. Returns the text and its length in characters.
 ///
 /// Linear stretches apply as recorded. A region is merged by shifting if it can be, else with
-/// the tracker, whose results are memoised at the region's critical version. Merging only works
+/// the CRDT records, whose results are memoised at the region's critical version. Merging only works
 /// out where each op goes; the text is then built by taking the edits back, last to first. If
 /// `base` ends inside a region, a block and an op must start there: the region's events that
 /// `base` holds are walked first and not recorded.
@@ -297,8 +297,8 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
 
 /// Merges one region, recording in `document` where its ops go.
 fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &mut Kept, workspace: &mut Workspace, document: &mut Placed) {
-    let Workspace { tracker, walk: walk_scratch, shifter } = workspace;
-    // Nothing kept: the region has not needed the tracker so far. See whether it does now.
+    let Workspace { records, walk: walk_scratch, shifter } = workspace;
+    // Nothing kept: the region has not needed the CRDT records so far. See whether it does now.
     if kept.events == 0 && shifter.merge(log, log.graph.runs(), &plan.first_op, region, document) {
         return;
     }
@@ -308,10 +308,10 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
     // The region's blocks that the document already holds, which are its first. The document
     // was no longer when the region began than it is now plus what those events removed.
     let held = document.new.clamp(region.start, region.end);
-    tracker.begin_region((end - start) as usize, document.len + (blocks.start(held) - start));
+    records.clear_to_placeholder((end - start) as usize, document.len + (blocks.start(held) - start));
 
     // EventRuns resolved in full by earlier replays are placed by id. Their events stay in the
-    // tracker's prepare version, which is where the walk of the rest begins.
+    // records's prepare version, which is where the walk of the rest begins.
     let known_blocks = (region.start..region.end).take_while(|&block| blocks.start(block + 1) - start <= kept.events).count();
     let known = region.start..region.start + known_blocks as EventRunIndex;
     let mut resolved = kept.resolved.iter().copied();
@@ -327,7 +327,7 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
             match op.kind {
                 OpKind::Ins => {
                     let (left, right) = (next(), next());
-                    let pos = tracker.insert_by_id(event, op.len, left, right, goes_before);
+                    let pos = records.insert_with_known_origins(event, op.len, left, right, goes_before);
                     document.insert(pos, op.len);
                 }
                 OpKind::Del => {
@@ -335,8 +335,10 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
                     while done < op.len {
                         let (first, stretch) = (next(), next());
                         let (n, descending) = ((stretch & !DESCENDING).min(op.len - done), stretch & DESCENDING != 0);
-                        let item = if descending { first + 1 - n } else { first };
-                        tracker.delete_by_id(Targets { first_event: event + done, len: n, item, descending }, |pos, len| document.remove(pos, len));
+                        let record = if descending { first + 1 - n } else { first };
+                        records.delete_with_known_targets(DeleteTargets { first_event: event + done, len: n, record, descending }, |pos, len| {
+                            document.remove(pos, len)
+                        });
                         done += n;
                     }
                     document.end_delete();
@@ -353,33 +355,33 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
     walk(walk_scratch, blocks, region, known_blocks, (held - region.start) as usize, |step| match step {
         WalkStep::Retreat(stretch) => {
             for op in plan.ops(log, &stretch) {
-                tracker.retreat(op.kind, op.first_event - start..op.first_event - start + op.len);
+                records.retreat(op.kind, op.first_event - start..op.first_event - start + op.len);
             }
         }
         WalkStep::Advance(stretch) => {
             for op in plan.ops(log, &stretch) {
-                tracker.advance(op.kind, op.first_event - start..op.first_event - start + op.len);
+                records.advance(op.kind, op.first_event - start..op.first_event - start + op.len);
             }
         }
         WalkStep::Apply(block) => {
             document.begin(block..block + 1);
             for op in plan.ops(log, &(block..block + 1)) {
-                walk_op(start, op, tracker, &goes_before, document);
+                walk_op(start, op, records, &goes_before, document);
             }
         }
     });
 
-    // The tracker now knows what every event of the region resolved to. Keep that.
+    // The records now knows what every event of the region resolved to. Keep that.
     kept.events = end - start;
     kept.resolved.clear();
     for op in plan.ops(log, region) {
         let event = op.first_event - start;
         match op.kind {
-            OpKind::Ins => kept.resolved.extend(tracker.origins(event)),
+            OpKind::Ins => kept.resolved.extend(records.origins_of(event)),
             OpKind::Del => {
                 let mut done = 0;
                 while done < op.len {
-                    let targets = tracker.targets(event + done, event + op.len);
+                    let targets = records.targets_of(event + done, event + op.len);
                     kept.resolved.extend([targets.first(), targets.len | if targets.descending { DESCENDING } else { 0 }]);
                     done += targets.len;
                 }
@@ -389,16 +391,16 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
     kept.resolved.shrink_to_fit();
 }
 
-/// Merges one op at the tracker's prepare version.
-fn walk_op(start: EventIndex, op: OpSlice, tracker: &mut Tracker, goes_before: &impl Fn(EventIndex, EventIndex) -> bool, document: &mut Placed) {
+/// Merges one op at the CRDT records' prepare version.
+fn walk_op(start: EventIndex, op: OpSlice, records: &mut CrdtRecords, goes_before: &impl Fn(EventIndex, EventIndex) -> bool, document: &mut Placed) {
     let event = op.first_event - start;
     match op.kind {
         OpKind::Ins => {
-            let pos = tracker.insert(event, op.len, op.pos, goes_before);
+            let pos = records.insert(event, op.len, op.pos, goes_before);
             document.insert(pos, op.len);
         }
         OpKind::Del => {
-            tracker.delete(event, op.pos, op.len, op.forward, |pos, len| document.remove(pos, len));
+            records.delete(event, op.pos, op.len, op.forward, |pos, len| document.remove(pos, len));
             document.end_delete();
         }
     }
