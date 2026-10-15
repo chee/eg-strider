@@ -181,7 +181,7 @@ pub struct OpLog {
     latest_document_state: Option<DocumentState>,
     /// History from before the first event held here, from a loaded file, still unread.
     unread_history: Option<file::UnreadHistory>,
-    /// Scratch for a new event's parents.
+    /// Scratch for the frontier, as a local event's parents.
     parents: Vec<EventIndex>,
     /// The characters the inserts put in, and the characters the deletes take out.
     totals: (u32, u32),
@@ -496,14 +496,18 @@ impl OpLog {
         if continues {
             return (true, self.graph.push(&[event - 1], len));
         }
-        let mut at = std::mem::take(&mut self.parents);
-        at.clear();
-        match parents {
-            Some(parents) => at.extend_from_slice(parents),
-            None => at.extend_from_slice(self.graph.frontier()),
-        }
-        let events = self.graph.push(&at, len);
-        self.parents = at;
+        let events = match parents {
+            Some(parents) => self.graph.push(parents, len),
+            // The frontier changes as the events go in, so it is copied first.
+            None => {
+                let mut frontier = std::mem::take(&mut self.parents);
+                frontier.clear();
+                frontier.extend_from_slice(self.graph.frontier());
+                let events = self.graph.push(&frontier, len);
+                self.parents = frontier;
+                events
+            }
+        };
         (false, events)
     }
 
