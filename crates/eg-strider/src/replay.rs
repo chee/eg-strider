@@ -111,16 +111,15 @@ pub(crate) struct ReplayPlan {
     /// Per range, what its starting critical version keeps: nothing unless it is a concurrent
     /// range that went through the CRDT records.
     resolved: Vec<ResolvedOrigins>,
-    /// How many ranges of runs and positions the concurrent ranges took last time, to reserve
-    /// next time.
-    room: (usize, usize),
+    /// How many positions the concurrent ranges took last time, to reserve next time.
+    room: usize,
 }
 
 impl ReplayPlan {
     /// Analyses the log, taking over what the `previous` plan resolved for concurrent ranges that
     /// start at the same event.
     fn new(log: &OpLog, mut previous: Option<ReplayPlan>) -> Self {
-        let room = previous.as_ref().map_or((0, 0), |previous| previous.room);
+        let room = previous.as_ref().map_or(0, |previous| previous.room);
         let runs = log.graph.runs();
         let ranges = log.graph.split_at_critical_versions();
         let range_starts = ranges.iter().map(|range| runs.start(range.runs().start)).collect();
@@ -197,9 +196,15 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
     let events = |run_range: &Range<EventRunIndex>| runs.start(run_range.start)..runs.start(run_range.end);
     debug_assert!((log.graph.first_held_event()..log.graph.len()).contains(&base.events), "a base the log does not reach back to");
     let first_new_run = runs.containing(base.events);
+    // Each run of a concurrent range after the base is begun at most once, so that is room
+    // enough for the merge order.
+    let concurrent_runs = plan.ranges.iter().map(|range| match range {
+        HistoryRange::Concurrent(concurrent) => concurrent.end.saturating_sub(concurrent.start.max(first_new_run)) as usize,
+        HistoryRange::Linear(_) => 0,
+    });
     let mut transformed = TransformedOperations {
-        merge_order: Vec::with_capacity(plan.room.0),
-        positions: Vec::with_capacity(plan.room.1),
+        merge_order: Vec::with_capacity(concurrent_runs.sum()),
+        positions: Vec::with_capacity(plan.room),
         removed_pieces: 0,
         len: base.chars,
         first_new_run,
@@ -244,7 +249,7 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
     // The text is built without the room that merging took.
     drop((versions, stable, edited, spare));
     plan.resolved = resolved;
-    plan.room = (transformed.merge_order.len(), transformed.positions.len());
+    plan.room = transformed.positions.len();
 
     // Backwards: take every operation back, starting from the final document.
     let mut text = PieceTable::new(transformed.len, log.inserted_text());
