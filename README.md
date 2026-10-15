@@ -6,7 +6,7 @@
 
 ## Results
 
-Traces are sourced from [editing histories published alongside Eg-walker](https://github.com/josephg/egwalker-paper/tree/master/datasets).
+Traces are sourced from the JSON versions of the [editing histories published alongside Eg-walker](https://github.com/josephg/egwalker-paper/tree/master/datasets).
 
 They contain 3 classes of traces:
 - Sequential text editing traces (S)
@@ -38,16 +38,16 @@ more edits.
 
 **Snapshot size.** The size of a saved checkpoint of a document.
 
-### Measurements
+### Measurement details
 
-[diamond-types](https://github.com/josephg/diamond-types) is the implementation of
-Eg-walker that the paper benchmarked. Every library but Automerge is measured at its latest
-version, and Yjs through yrs, its Rust port. Automerge is at 0.6.1: from 0.7 on, applying
-even a few changes walks every op in the document, so writing the concurrent traces out as
-Automerge changes, a few edits at a time, does not finish in 15 minutes. Every library is
-handed the same history, read from the paper's JSON editing traces, and keeps the text of
-deleted characters: Yjs runs with garbage collection off. Times are the p50 of 100 runs. A
-star marks a library whose text for that trace ends up different from diamond-types'.
+- [diamond-types](https://github.com/josephg/diamond-types) is the implementation of
+  Eg-walker that the paper benchmarked. 
+- Yjs is measured through yrs, its Rust port. 
+- Automerge is measured at 0.12. Each trace's Automerge changes are made once with 0.6.1,
+  the last version without quadratic blowup when a replica applies a few changes at a
+  time, which making the concurrent traces requires. 0.12 then applies them all at once.
+- Yjs runs with garbage collection off. 
+- Times are the p50 of 100 runs. 
 
 ## Improvements
 
