@@ -343,7 +343,10 @@ impl OpLog {
     }
 
     /// Stores a run's ops and text, and returns the number of events. The graph and the agent's
-    /// numbering are left to the caller.
+    /// numbering are left to the caller. Never inlined: with its callers' values also live, its
+    /// loop runs out of registers and keeps the op being built in memory, which costs a tenth
+    /// more on a run of many edits.
+    #[inline(never)]
     fn store_run(&mut self, event: EventIndex, parents: &[EventIndex], ops: &[Edit], text: &str) -> u32 {
         let parts = |edit: &Edit| match *edit {
             Edit::Insert { pos, len } => (OpKind::Ins, true, pos, len),
