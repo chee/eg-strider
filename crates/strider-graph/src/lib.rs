@@ -167,15 +167,9 @@ impl CausalGraph {
         // Later runs named this one for its last event, which the second part now has; and
         // every run after it moves up one.
         let later = runs.parent_start[i + 1] as usize;
-        for parent in &mut runs.parents[later..] {
-            *parent += EventRunIndex::from(*parent >= first);
-        }
-        runs.parents.insert(later, first);
+        insert_and_grow(&mut runs.parents, later, first, |parent| EventRunIndex::from(parent >= first));
         runs.start.insert(i + 1, at);
-        runs.parent_start.insert(i + 1, later as u32);
-        for start in &mut runs.parent_start[i + 2..] {
-            *start += 1;
-        }
+        insert_and_grow(&mut runs.parent_start, i + 1, later as u32, |_| 1);
         self.seen_prefix_len.insert(i + 1, if self.seen_prefix_len[i] == runs.start[i] { at } else { self.seen_prefix_len[i] });
 
         let moved = self.critical_versions.partition_point(|&critical| critical <= first);
@@ -210,6 +204,17 @@ impl CausalGraph {
         }
         ranges
     }
+}
+
+/// Inserts `item` into `list` at `at`, adding `grow(old)` to each item after it as it moves along
+/// one. Splits land near the end, so one pass from there costs less than moving the rest and then
+/// passing over it again.
+fn insert_and_grow(list: &mut Vec<u32>, at: usize, item: u32, grow: impl Fn(u32) -> u32) {
+    list.push(item);
+    for i in (at + 1..list.len()).rev() {
+        list[i] = list[i - 1] + grow(list[i - 1]);
+    }
+    list[at] = item;
 }
 
 /// The graph cut into event runs: maximal chains of events that nothing branches off partway,
