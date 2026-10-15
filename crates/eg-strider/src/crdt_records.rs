@@ -1,4 +1,5 @@
-use crate::oplog::OperationKind;
+use crate::delete_targets::DeleteTargets;
+use crate::operation_kind::OperationKind;
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::EventIndex;
@@ -40,36 +41,6 @@ struct RecordRun {
     origin_right: RecordId,
     prepare_state: u32,
     deleted_in_effect: bool,
-}
-
-/// A stretch of delete events whose targets are consecutive records: the first event's is the
-/// lowest, or the highest if `backward`.
-#[derive(Clone, Copy)]
-pub(crate) struct DeleteTargets {
-    /// The first of the events.
-    pub first_event: EventIndex,
-    pub len: u32,
-    /// The lowest record deleted.
-    pub record: RecordId,
-    pub backward: bool,
-}
-
-impl DeleteTargets {
-    /// Returns the record that the first event deletes.
-    pub fn first(&self) -> RecordId {
-        if self.backward {
-            self.record + self.len - 1
-        } else {
-            self.record
-        }
-    }
-
-    /// Returns the part of the stretch from `event`, at most `len` events long.
-    fn from(&self, event: EventIndex, len: u32) -> DeleteTargets {
-        let (skip, len) = (event - self.first_event, len.min(self.first_event + self.len - event));
-        let record = if self.backward { self.record + self.len - skip - len } else { self.record + skip };
-        DeleteTargets { first_event: event, len, record, backward: self.backward }
-    }
 }
 
 impl RecordRun {

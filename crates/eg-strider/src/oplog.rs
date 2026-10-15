@@ -1,11 +1,19 @@
 mod file;
+mod reader;
+mod unread_history;
 
-pub use file::Malformed;
-
-use crate::replay::{self, DocumentState, ReplayPlan};
+use crate::document_state::DocumentState;
+use crate::malformed::Malformed;
+use crate::operation::Operation;
+use crate::operation_kind::OperationKind;
+use crate::operation_run::{OperationRun, DELETES_END_OF_PREVIOUS_INSERT, MAX_OP_LEN};
+use crate::operation_run_slice::OperationRunSlice;
+use crate::replay;
+use crate::replay_plan::ReplayPlan;
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex};
+use unread_history::UnreadHistory;
 
 /// How many events a replica made before this one. With the replica, it names an event on every
 /// replica.
@@ -19,137 +27,12 @@ pub(crate) type OperationRunIndex = u32;
 /// its last.
 pub(crate) type ByteRange = (u32, u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OperationKind {
-    Insert,
-    Delete,
-}
-
-/// One op of a run handed to [`OpLog::add_remote_ops`]. Positions and lengths count
-/// characters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Operation {
-    /// Inserts the next `len` characters of the run's text at `pos`.
-    Insert { pos: u32, len: u32 },
-    /// Deletes the `len` characters at `pos`, the last of them first if `backward`, as backspace
-    /// does.
-    Delete { pos: u32, len: u32, backward: bool },
-}
-
-/// A run of consecutive events of one kind, in 16 bytes since a log holds so many.
-#[derive(Clone, Copy)]
-struct OperationRun {
-    first_event: EventIndex,
-    /// The number of events, up to [`MAX_OP_LEN`], with [`DELETE`], [`BACKWARD`] and [`DELETES_END_OF_PREVIOUS_INSERT`]
-    /// above it.
-    len_and_flags: u32,
-    /// The positions `pos..pos + len` that the run touches, before its first event.
-    pos: u32,
-    /// Where the run's inserted text ends in [`OpLog::inserted_text`]. It starts where the text of
-    /// the run before ends, and a delete has none.
-    inserted_text_end: u32,
-}
-
-const _: () = assert!(std::mem::size_of::<OperationRun>() == 16);
-
-/// Marks an op that deletes.
-const DELETE: u32 = 1 << 31;
-/// Deletes only: marks backspace, whose first event removes the last position.
-const BACKWARD: u32 = 1 << 30;
-/// Deletes only: marks a delete that removes the end of what the insert before it put in. Found
-/// when a run of ops arrives together.
-const DELETES_END_OF_PREVIOUS_INSERT: u32 = 1 << 29;
-/// The most events one op holds.
-const MAX_OP_LEN: u32 = DELETES_END_OF_PREVIOUS_INSERT - 1;
-
-impl OperationRun {
-    fn new(
-        first_event: EventIndex,
-        len: u32,
-        kind: OperationKind,
-        backward: bool,
-        deletes_end_of_previous_insert: bool,
-        pos: u32,
-        inserted_text_end: u32,
-    ) -> OperationRun {
-        assert!(len <= MAX_OP_LEN, "an edit longer than an op holds");
-        let flags = if kind == OperationKind::Delete { DELETE } else { 0 }
-            | if backward { BACKWARD } else { 0 }
-            | if deletes_end_of_previous_insert { DELETES_END_OF_PREVIOUS_INSERT } else { 0 };
-        OperationRun { first_event, len_and_flags: len | flags, pos, inserted_text_end }
-    }
-
-    fn len(&self) -> u32 {
-        self.len_and_flags & MAX_OP_LEN
-    }
-
-    fn kind(&self) -> OperationKind {
-        if self.len_and_flags & DELETE == 0 {
-            OperationKind::Insert
-        } else {
-            OperationKind::Delete
-        }
-    }
-
-    fn backward(&self) -> bool {
-        self.len_and_flags & BACKWARD != 0
-    }
-
-    fn deletes_end_of_previous_insert(&self) -> bool {
-        self.len_and_flags & DELETES_END_OF_PREVIOUS_INSERT != 0
-    }
-
-    /// Takes in `op`, which follows this op, if it carries it on, as typing, holding delete or
-    /// holding backspace does. Returns whether it did.
-    fn append(&mut self, op: OperationRun) -> bool {
-        let (len, kind) = (op.len(), op.kind());
-        if self.kind() != kind || self.len() + len > MAX_OP_LEN {
-            return false;
-        }
-        let carries_on = if kind == OperationKind::Insert { self.pos + self.len() == op.pos } else { self.pos == op.pos };
-        if !self.backward() && !op.backward() && !self.deletes_end_of_previous_insert() && carries_on {
-            // The flags are above the length, which stays in its bits.
-            self.len_and_flags += len;
-            self.inserted_text_end = op.inserted_text_end;
-            true
-        } else if kind == OperationKind::Delete
-            && self.deletes_end_of_previous_insert() == op.deletes_end_of_previous_insert()
-            && (self.len() == 1 || self.backward())
-            && (len == 1 || op.backward())
-            && op.pos + len == self.pos
-        {
-            // Backspace: a delete that ends where the last began, each removing one character
-            // or already running backwards.
-            self.pos = op.pos;
-            self.len_and_flags = (self.len_and_flags | BACKWARD) + len;
-            true
-        } else {
-            false
-        }
-    }
-}
-
 /// A run of consecutive events by one replica.
 struct ReplicaRun {
     first_event: EventIndex,
     len: u32,
     replica: ReplicaId,
     sequence_number: SequenceNumber,
-}
-
-/// Part of an op, as the replay sees it.
-#[derive(Clone, Copy)]
-pub(crate) struct OperationRunSlice {
-    pub first_event: EventIndex,
-    pub len: u32,
-    pub kind: OperationKind,
-    pub backward: bool,
-    /// Whether this is a whole delete that trims the insert before it.
-    pub deletes_end_of_previous_insert: bool,
-    /// Inserts go at `pos`; deletes remove `pos..pos + len`.
-    pub pos: u32,
-    /// Inserts only: the inserted text.
-    pub text: ByteRange,
 }
 
 /// The operation log: every insert and delete this replica knows of, in the order it learned of
@@ -180,7 +63,7 @@ pub struct OpLog {
     /// then, since moving it into events still being added would cut them up at every merge.
     latest_document_state: Option<DocumentState>,
     /// History from before the first event held here, from a loaded file, still unread.
-    unread_history: Option<file::UnreadHistory>,
+    unread_history: Option<UnreadHistory>,
     /// Scratch for the frontier, as a local event's parents.
     parents: Vec<EventIndex>,
     /// The characters the inserts put in, and the characters the deletes take out.

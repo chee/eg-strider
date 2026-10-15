@@ -1,5 +1,12 @@
-use super::{OpLog, OperationKind, OperationRun, OperationRunSlice, ReplicaRun, MAX_OP_LEN};
-use crate::replay::{DocumentState, ReplayPlan};
+use super::reader::{Reader, Runs};
+use super::unread_history::{HistoryPartIndex, UnreadHistory};
+use super::{OpLog, ReplicaRun};
+use crate::document_state::DocumentState;
+use crate::malformed::Malformed;
+use crate::operation_kind::OperationKind;
+use crate::operation_run::{OperationRun, MAX_OP_LEN};
+use crate::operation_run_slice::OperationRunSlice;
+use crate::replay_plan::ReplayPlan;
 use std::borrow::Cow;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex, EventRunIndex, HistoryRange};
@@ -10,40 +17,6 @@ const MAGIC: &[u8] = b"eg-strider\x05";
 /// size of the one after, so that recent history reads alone and the rest packs well. Tiny in
 /// debug builds, so that tests save several.
 const EVENTS_PER_PART: u32 = if cfg!(debug_assertions) { 8 } else { 1 << 15 };
-
-/// Index of a part of saved history.
-pub(crate) type HistoryPartIndex = usize;
-
-/// A file that is not a saved document, or is damaged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Malformed;
-
-impl std::fmt::Display for Malformed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("not a saved eg-strider document")
-    }
-}
-
-impl std::error::Error for Malformed {}
-
-/// History still as saved, in parts: the events before the first that the log holds.
-pub(crate) struct UnreadHistory {
-    /// The file the log was loaded from.
-    bytes: Vec<u8>,
-    /// Where each part is in `bytes`.
-    parts: Vec<Range<usize>>,
-    /// Each part's first event, then the total number of events.
-    starts: Vec<EventIndex>,
-    /// That history's frontier.
-    pub frontier: Vec<EventIndex>,
-}
-
-impl UnreadHistory {
-    /// Finds the part holding an event.
-    pub fn part_holding(&self, event: EventIndex) -> HistoryPartIndex {
-        self.starts.partition_point(|&start| start <= event) - 1
-    }
-}
 
 impl OpLog {
     /// Writes the log as a file that [`load`](Self::load) opens without merging: a header, the
@@ -411,7 +384,7 @@ fn number(out: &mut Vec<u8>, mut n: usize) {
 }
 
 /// Appends a column: its length in bytes, then what `write` writes.
-fn column(out: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>)) {
+pub(super) fn column(out: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>)) {
     let mut values = Vec::new();
     write(&mut values);
     number(out, values.len());
@@ -419,7 +392,7 @@ fn column(out: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>)) {
 }
 
 /// Appends values as runs: each value, then how many times it repeats.
-fn runs(out: &mut Vec<u8>, values: impl Iterator<Item = u64>) {
+pub(super) fn runs(out: &mut Vec<u8>, values: impl Iterator<Item = u64>) {
     let mut run: Option<(u64, usize)> = None;
     for value in values {
         match &mut run {
@@ -456,90 +429,11 @@ fn compress_with_checksum(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Decompresses `len` bytes that [`compress_with_checksum`] compressed.
-fn decompress_checked(compressed: &[u8], len: usize) -> Result<Vec<u8>, Malformed> {
+pub(super) fn decompress_checked(compressed: &[u8], len: usize) -> Result<Vec<u8>, Malformed> {
     // The compressed bytes say for themselves how long they decompress to, so room is only ever
     // made for a length that both agree on.
     if zstd::zstd_safe::get_frame_content_size(compressed).ok().flatten() != Some(len as u64) {
         return Err(Malformed);
     }
     zstd::bulk::decompress(compressed, len).ok().filter(|bytes| bytes.len() == len).ok_or(Malformed)
-}
-
-/// What is left to read of a file or a column.
-struct Reader<'a>(&'a [u8]);
-
-impl<'a> Reader<'a> {
-    #[inline]
-    fn varint(&mut self) -> Result<u64, Malformed> {
-        // Most numbers fit in a byte.
-        if let Some((&byte, rest)) = self.0.split_first().filter(|(&byte, _)| byte < 0x80) {
-            self.0 = rest;
-            return Ok(u64::from(byte));
-        }
-        let mut n = 0;
-        for shift in (0..64).step_by(7) {
-            let (&byte, rest) = self.0.split_first().ok_or(Malformed)?;
-            self.0 = rest;
-            n |= u64::from(byte & 0x7f) << shift;
-            if byte < 0x80 {
-                return Ok(n);
-            }
-        }
-        Err(Malformed)
-    }
-
-    #[inline]
-    fn number(&mut self) -> Result<u32, Malformed> {
-        u32::try_from(self.varint()?).map_err(|_| Malformed)
-    }
-
-    /// Reads a count of things at least a byte each.
-    fn count(&mut self) -> Result<usize, Malformed> {
-        let items = self.number()? as usize;
-        (items <= self.0.len()).then_some(items).ok_or(Malformed)
-    }
-
-    /// Takes the next `len` bytes, which [`count`](Self::count) has checked are there.
-    fn take(&mut self, len: usize) -> &'a [u8] {
-        let (bytes, rest) = self.0.split_at(len);
-        self.0 = rest;
-        bytes
-    }
-
-    /// Reads a column that [`column`](fn@column) wrote.
-    fn column(&mut self) -> Result<Reader<'a>, Malformed> {
-        let len = self.count()?;
-        Ok(Reader(self.take(len)))
-    }
-
-    /// Reads a compressed section: its length, its compressed length, then the bytes.
-    fn compressed(&mut self) -> Result<Vec<u8>, Malformed> {
-        let (len, compressed_len) = (self.number()? as usize, self.count()?);
-        decompress_checked(self.take(compressed_len), len)
-    }
-}
-
-/// Reads values that [`runs`] wrote.
-struct Runs<'a> {
-    from: Reader<'a>,
-    value: u64,
-    left: u64,
-}
-
-impl<'a> Runs<'a> {
-    fn of(from: Reader<'a>) -> Self {
-        Runs { from, value: 0, left: 0 }
-    }
-
-    #[inline]
-    fn next(&mut self) -> Result<u64, Malformed> {
-        if self.left == 0 {
-            (self.value, self.left) = (self.from.varint()?, self.from.varint()?);
-            if self.left == 0 {
-                return Err(Malformed);
-            }
-        }
-        self.left -= 1;
-        Ok(self.value)
-    }
 }
