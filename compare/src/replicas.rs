@@ -1,11 +1,3 @@
-mod automerge;
-mod loro;
-mod yjs;
-
-pub use self::automerge::Automerge;
-pub use self::loro::Loro;
-pub use self::yjs::Yjs;
-
 use crate::History;
 use diamond_types::list::operation::{ListOpKind, TextOperation};
 use std::time::{Duration, Instant};
@@ -218,4 +210,204 @@ pub fn replay<R: Replica>(history: &History<TextOperation, usize>, limit: Durati
         sent.extend_from_slice(&bytes);
     }
     Some(Replayed { batches: sent, peers, moved })
+}
+
+pub struct Automerge {
+    document: automerge_replay::AutoCommit,
+    text: automerge_replay::ObjId,
+}
+
+/// The document every Automerge replica starts from, which holds the text object.
+fn automerge_base() -> &'static [u8] {
+    use automerge_replay::{transaction::Transactable, ActorId, AutoCommit, ObjType, ROOT};
+    static BASE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| {
+        let mut document = AutoCommit::new().with_actor(ActorId::from(vec![0u8; 8]));
+        document.put_object(ROOT, "text", ObjType::Text).unwrap();
+        document.save()
+    })
+}
+
+impl Replica for Automerge {
+    type Update = automerge_replay::Change;
+
+    fn new(peer: u64, _: bool) -> Self {
+        use automerge_replay::{ActorId, AutoCommit, ReadDoc, ROOT};
+        let document = AutoCommit::load(automerge_base()).unwrap().with_actor(ActorId::from(peer.to_be_bytes().to_vec()));
+        let (_, text) = document.get(ROOT, "text").unwrap().unwrap();
+        Automerge { document, text }
+    }
+
+    fn start() -> Vec<Self::Update> {
+        automerge_replay::AutoCommit::load(automerge_base()).unwrap().get_changes(&[]).into_iter().cloned().collect()
+    }
+
+    fn fork(&mut self, peer: u64) -> Self {
+        let document = self.document.fork().with_actor(automerge_replay::ActorId::from(peer.to_be_bytes().to_vec()));
+        Automerge { document, text: self.text.clone() }
+    }
+
+    fn apply(&mut self, updates: &[&Self::Update]) {
+        self.document.apply_changes(updates.iter().map(|&change| change.clone())).unwrap();
+    }
+
+    fn edit(&mut self, patches: &[Patch]) -> (Option<Self::Update>, usize) {
+        use automerge_replay::{transaction::Transactable, ReadDoc};
+        let (mut moved, mut made) = (0, false);
+        for patch in patches {
+            let len = self.document.length(&self.text);
+            let at = patch.at.min(len);
+            let count = if patch.ins { patch.len } else { patch.len.min(len - at) };
+            moved += usize::from(at < patch.at || count < patch.len);
+            if count > 0 {
+                let removed = if patch.ins { 0 } else { count as isize };
+                self.document.splice_text(&self.text, at, removed, &patch.text).unwrap();
+                made = true;
+            }
+        }
+        self.document.commit();
+        (made.then(|| self.document.get_last_local_change().unwrap().clone()), moved)
+    }
+
+    fn bytes(change: &Self::Update) -> Vec<u8> {
+        change.raw_bytes().to_vec()
+    }
+}
+
+pub struct Yjs {
+    document: yrs::Doc,
+    text: yrs::TextRef,
+    /// The text, kept only when it is not all ASCII, since yrs counts positions in bytes.
+    chars: Option<Vec<char>>,
+    /// The update yrs emitted for the last transaction, once committed: what a writer sends.
+    sent: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+impl Replica for Yjs {
+    type Update = Vec<u8>;
+
+    fn new(peer: u64, ascii: bool) -> Self {
+        let options = yrs::Options { client_id: yrs::block::ClientID::new(peer), skip_gc: true, offset_kind: yrs::OffsetKind::Bytes, ..Default::default() };
+        let document = yrs::Doc::with_options(options);
+        let text = document.get_or_insert_text("text");
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let to = sent.clone();
+        document.observe_update_v1("sent", move |_, event| *to.lock().unwrap() = Some(event.update.clone())).unwrap();
+        Yjs { document, text, chars: (!ascii).then(Vec::new), sent }
+    }
+
+    fn fork(&mut self, peer: u64) -> Self {
+        use yrs::updates::decoder::Decode;
+        use yrs::{ReadTxn, StateVector, Transact};
+        let state = self.document.transact().encode_state_as_update_v1(&StateVector::default());
+        let copy = Yjs { chars: self.chars.clone(), ..Yjs::new(peer, true) };
+        copy.document.transact_mut().apply_update(yrs::Update::decode_v1(&state).unwrap()).unwrap();
+        copy
+    }
+
+    fn apply(&mut self, updates: &[&Self::Update]) {
+        use yrs::updates::decoder::Decode;
+        use yrs::{GetString, Transact};
+        let mut txn = self.document.transact_mut();
+        for update in updates {
+            txn.apply_update(yrs::Update::decode_v1(update).unwrap()).unwrap();
+        }
+        if let Some(chars) = &mut self.chars {
+            *chars = self.text.get_string(&txn).chars().collect();
+        }
+    }
+
+    fn edit(&mut self, patches: &[Patch]) -> (Option<Self::Update>, usize) {
+        use yrs::{Text, Transact};
+        // Applying what other replicas made emits updates too, which are not this one's.
+        self.sent.lock().unwrap().take();
+        let mut txn = self.document.transact_mut();
+        let (mut moved, mut made) = (0, false);
+        for patch in patches {
+            let len = self.chars.as_ref().map_or_else(|| self.text.len(&txn) as usize, Vec::len);
+            let at = patch.at.min(len);
+            let count = if patch.ins { patch.len } else { patch.len.min(len - at) };
+            moved += usize::from(at < patch.at || count < patch.len);
+            let bytes = |range: std::ops::Range<usize>| match &self.chars {
+                Some(chars) => chars[range].iter().map(|ch| ch.len_utf8()).sum::<usize>() as u32,
+                None => range.len() as u32,
+            };
+            let offset = bytes(0..at);
+            if patch.ins {
+                self.text.insert(&mut txn, offset, &patch.text);
+                if let Some(chars) = &mut self.chars {
+                    chars.splice(at..at, patch.text.chars());
+                }
+                made = true;
+            } else if count > 0 {
+                self.text.remove_range(&mut txn, offset, bytes(at..at + count));
+                if let Some(chars) = &mut self.chars {
+                    chars.drain(at..at + count);
+                }
+                made = true;
+            }
+        }
+        // Committing joins up what the transaction made, and the update yrs then emits is what a
+        // writer sends.
+        drop(txn);
+        let sent = self.sent.lock().unwrap().take();
+        (sent.filter(|_| made), moved)
+    }
+
+    fn bytes(update: &Self::Update) -> Vec<u8> {
+        update.clone()
+    }
+}
+
+pub struct Loro {
+    document: loro::LoroDoc,
+}
+
+impl Loro {
+    /// Wraps a document, giving it `peer` as its id.
+    fn with_peer(document: loro::LoroDoc, peer: u64) -> Self {
+        document.set_peer_id(peer).unwrap();
+        Loro { document }
+    }
+}
+
+impl Replica for Loro {
+    type Update = Vec<u8>;
+
+    fn new(peer: u64, _: bool) -> Self {
+        Loro::with_peer(loro::LoroDoc::new(), peer)
+    }
+
+    fn fork(&mut self, peer: u64) -> Self {
+        Loro::with_peer(self.document.fork(), peer)
+    }
+
+    fn apply(&mut self, updates: &[&Self::Update]) {
+        let updates: Vec<Vec<u8>> = updates.iter().map(|&update| update.clone()).collect();
+        self.document.import_batch(&updates).unwrap();
+    }
+
+    fn edit(&mut self, patches: &[Patch]) -> (Option<Self::Update>, usize) {
+        let before = self.document.oplog_vv();
+        let text = self.document.get_text(TEXT);
+        let (mut moved, mut made) = (0, false);
+        for patch in patches {
+            let len = text.len_unicode();
+            let at = patch.at.min(len);
+            let count = if patch.ins { patch.len } else { patch.len.min(len - at) };
+            moved += usize::from(at < patch.at || count < patch.len);
+            if patch.ins {
+                text.insert(at, &patch.text).unwrap();
+            } else if count > 0 {
+                text.delete(at, count).unwrap();
+            }
+            made |= count > 0;
+        }
+        self.document.commit();
+        (made.then(|| self.document.export(loro::ExportMode::updates(&before)).unwrap()), moved)
+    }
+
+    fn bytes(update: &Self::Update) -> Vec<u8> {
+        update.clone()
+    }
 }

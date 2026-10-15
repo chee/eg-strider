@@ -1,12 +1,61 @@
-use crate::loaded::Loaded;
-use crate::memory::{memory_of, Memory};
-use crate::{
-    automerge_apply, automerge_decode, automerge_open, automerge_text, dt_append, dt_open, loro_apply, loro_decode_batches, loro_import, loro_text, since,
-    yjs_apply, yjs_decode, yjs_decode_batches, yjs_merge, yjs_save, yjs_text,
-};
-use eg_strider::OpLog;
-use loro::ExportMode;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
+
+/// The system allocator, counting the bytes in use.
+struct Counting;
+
+static IN_USE: AtomicUsize = AtomicUsize::new(0);
+static MOST: AtomicUsize = AtomicUsize::new(0);
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// Counts `bytes` more in use, raising the high-water mark if it is passed.
+fn took(bytes: usize) {
+    MOST.fetch_max(IN_USE.fetch_add(bytes, Relaxed) + bytes, Relaxed);
+}
+
+// SAFETY: every request is passed to the system allocator unchanged.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        took(layout.size());
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        took(layout.size());
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        IN_USE.fetch_sub(layout.size(), Relaxed);
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        IN_USE.fetch_sub(layout.size(), Relaxed);
+        took(new_size);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+/// What running something did to memory use, in bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct Memory {
+    /// The most in use at once, beyond what was in use at the start.
+    pub(crate) peak: usize,
+    /// How much more is in use afterwards, while the result is held.
+    pub(crate) kept: usize,
+}
+
+/// Runs `f` and reports what it did to the memory in use.
+pub(crate) fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
+    let before = IN_USE.load(Relaxed);
+    MOST.store(before, Relaxed);
+    let result = f();
+    (result, Memory { peak: MOST.load(Relaxed) - before, kept: IN_USE.load(Relaxed).saturating_sub(before) })
+}
 
 /// How long each trace's merges run before any is timed.
 const WARM_UP: std::time::Duration = std::time::Duration::from_millis(300);
@@ -43,7 +92,7 @@ pub(crate) struct Turns<'a> {
 /// Checks a library on the two tasks and measures their memory, then sets them up to be timed
 /// in turns with its tasks on the other traces. `ops` puts a history's ops in memory, untimed but
 /// counted. A document's text is read only to check it, outside the times and memory.
-fn prepare<'a, O: 'a, D: 'a>(
+pub(crate) fn prepare<'a, O: 'a, D: 'a>(
     expected: &str,
     ops: impl Fn() -> O + 'a,
     merge: impl Fn(O) -> D + 'a,
@@ -100,82 +149,29 @@ pub(crate) fn in_turns<T>(reps: u32, tasks: &mut [&mut dyn FnMut() -> T]) -> Vec
     runs
 }
 
-/// Sets eg-strider's two tasks on a trace up to be timed. Its merge also times its appending,
-/// and one more edit at the end, merged on top of what is there.
-pub(crate) fn strider_turns(loaded: &Loaded) -> Turns<'_> {
-    let (history, expected) = (&loaded.history, loaded.expected.as_str());
-    let expected_chars = expected.chars().count();
-    Turns {
-        merge: Box::new(move || {
-            let t = Instant::now();
-            let mut log = OpLog::new();
-            compare::extend(&mut log, history, usize::MAX);
-            let append_ms = since(t);
-            let merged = log.checkout();
-            let merge_ms = since(t);
-            let mut same = merged == expected;
-            let typist = log.get_or_create_replica("typist");
-            let t = Instant::now();
-            log.add_insert(typist, expected_chars, "!");
-            let merged = log.checkout().len();
-            let again_ms = since(t);
-            same &= merged == expected.len() + 1;
-            ([merge_ms, append_ms, again_ms], same)
-        }),
-        // eg-strider takes the file's bytes to keep, so each run is handed its own.
-        open: Box::new(move || {
-            let bytes = loaded.saved.clone();
-            let t = Instant::now();
-            let mut log = OpLog::load(bytes).unwrap();
-            log.checkout();
-            since(t)
-        }),
-    }
+/// Returns the milliseconds since `start`.
+pub(crate) fn since(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1e3
 }
 
-/// Sets diamond-types' two tasks on a trace up to be timed. Its merge also times its appending.
-pub(crate) fn dt_turns(loaded: &Loaded) -> Turns<'_> {
-    Turns {
-        merge: Box::new(move || {
-            let t = Instant::now();
-            let oplog = dt_append(&loaded.dt_history);
-            let append_ms = since(t);
-            let branch = oplog.checkout_tip();
-            let ms = since(t);
-            let same = branch.content() == loaded.expected;
-            ([ms, append_ms, f64::NAN], same)
-        }),
-        open: Box::new(move || {
-            let t = Instant::now();
-            let document = dt_open(&loaded.dt_saved);
-            let ms = since(t);
-            drop(document);
-            ms
-        }),
-    }
+/// Returns the median: the middle time, or the mean of the middle two.
+pub(crate) fn median(mut times: Vec<f64>) -> f64 {
+    times.sort_by(f64::total_cmp);
+    let (below, above) = (times.len().saturating_sub(1) / 2, times.len() / 2);
+    times.get(below).map_or(f64::NAN, |low| (low + times[above]) / 2.0)
 }
 
-/// Checks and weighs yrs, Loro and Automerge on a trace, and sets their tasks up to be timed.
-pub(crate) fn others(loaded: &Loaded) -> [Option<(Measured, Turns<'_>)>; 3] {
-    let expected = &loaded.expected;
-    let [yjs, loro, automerge] = &loaded.sent;
-    [
-        yjs.as_ref()
-            .ok()
-            .map(|(sent, _)| prepare(expected, move || yjs_decode_batches(sent), yjs_merge, yjs_text, yjs_save, |saved| yjs_apply(yjs_decode(saved)))),
-        loro.as_ref().ok().map(|(sent, _)| {
-            let ops = loro_decode_batches(sent);
-            prepare(expected, move || ops.clone(), loro_apply, loro_text, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import)
-        }),
-        automerge.as_ref().ok().map(|(sent, _)| {
-            prepare(
-                expected,
-                move || automerge_decode(sent),
-                automerge_apply,
-                automerge_text,
-                |document: &mut automerge::AutoCommit| document.save(),
-                automerge_open,
-            )
-        }),
-    ]
+/// Returns the median milliseconds of `reps` runs of `f`, each on what an untimed `setup`
+/// makes, and the last result.
+pub(crate) fn median_of<S, T>(reps: u32, mut setup: impl FnMut() -> S, mut f: impl FnMut(S) -> T) -> (f64, T) {
+    let mut times = Vec::with_capacity(reps as usize);
+    loop {
+        let input = setup();
+        let t = Instant::now();
+        let result = f(input);
+        times.push(since(t));
+        if times.len() >= reps as usize {
+            return (median(times), result);
+        }
+    }
 }

@@ -1,20 +1,58 @@
-mod loaded;
-mod memory;
-mod turns;
+mod measure;
 
 use compare::replicas::TEXT;
-use compare::History;
+use compare::{History, Trace};
 use diamond_types::list::encoding::EncodeOptions;
 use diamond_types::list::operation::TextOperation;
 use diamond_types::list::{ListBranch, ListOpLog};
 use eg_strider::{EventIndex, OpLog};
 use jumprope::JumpRope;
-use loaded::{load, Loaded};
-use loro::LoroDoc;
-use memory::{memory_of, Memory};
+use loro::{ExportMode, LoroDoc};
+use measure::{in_turns, median, median_of, memory_of, prepare, since, Measured, Memory, MergeRun, Turns};
 use std::fmt::Display;
 use std::time::Instant;
-use turns::{dt_turns, in_turns, others, strider_turns, Measured, MergeRun};
+
+/// How long replaying a history into another library may take before it is given up.
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Where histories replayed into other libraries are kept, as the batches each writer sent,
+/// apart from the downloaded traces.
+const REPLAYED: &str = "traces/batches";
+
+/// Loads a history as the batches each writer's replica of another library sent it as, with how
+/// many peers it took and how many edits had to be moved. Replayed on first use and kept in
+/// [`REPLAYED`]. Nothing for a library in `left_out`.
+fn replayed<R: compare::replicas::Replica>(
+    name: &str,
+    kind: &str,
+    history: &History<TextOperation, usize>,
+    replay: bool,
+    left_out: &[&str],
+) -> Result<(Vec<u8>, String), &'static str> {
+    if left_out.contains(&kind) {
+        return Err("left out");
+    }
+    let file = |suffix: &str| format!("{REPLAYED}/{name}.{kind}{suffix}");
+    if let (Ok(bytes), Ok(notes)) = (std::fs::read(file("")), std::fs::read_to_string(file("-notes"))) {
+        return Ok((bytes, notes));
+    }
+    if std::path::Path::new(&file("-unfinished")).exists() {
+        return Err("did not finish");
+    }
+    if !replay {
+        return Err("not replayed yet: pass --replay");
+    }
+    eprintln!("replaying {name} into {kind} (once)...");
+    std::fs::create_dir_all(REPLAYED).unwrap();
+    let Some(replayed) = compare::replicas::replay::<R>(history, LIMIT) else {
+        std::fs::write(file("-unfinished"), "").unwrap();
+        return Err("did not finish");
+    };
+    let notes = format!("{:>6} {:>6}", replayed.peers, replayed.moved);
+    std::fs::write(file(""), &replayed.batches).unwrap();
+    std::fs::write(file("-notes"), &notes).unwrap();
+    Ok((replayed.batches, notes))
+}
 
 /// Appends a history to a new eg-strider log through its remote-edit calls, then merges it.
 fn strider_merge(history: &History) -> OpLog {
@@ -167,33 +205,6 @@ fn loro_apply(ops: loro::JsonSchema) -> LoroDoc {
     document
 }
 
-/// Returns the milliseconds since `start`.
-fn since(start: Instant) -> f64 {
-    start.elapsed().as_secs_f64() * 1e3
-}
-
-/// Returns the median: the middle time, or the mean of the middle two.
-fn median(mut times: Vec<f64>) -> f64 {
-    times.sort_by(f64::total_cmp);
-    let (below, above) = (times.len().saturating_sub(1) / 2, times.len() / 2);
-    times.get(below).map_or(f64::NAN, |low| (low + times[above]) / 2.0)
-}
-
-/// Returns the median milliseconds of `reps` runs of `f`, each on what an untimed `setup`
-/// makes, and the last result.
-fn median_of<S, T>(reps: u32, mut setup: impl FnMut() -> S, mut f: impl FnMut(S) -> T) -> (f64, T) {
-    let mut times = Vec::with_capacity(reps as usize);
-    loop {
-        let input = setup();
-        let t = Instant::now();
-        let result = f(input);
-        times.push(since(t));
-        if times.len() >= reps as usize {
-            return (median(times), result);
-        }
-    }
-}
-
 /// Formats a byte count in megabytes.
 fn mb(bytes: usize) -> String {
     format!("{:.2} MB", bytes as f64 / (1 << 20) as f64)
@@ -213,6 +224,137 @@ fn object<T: Display>(of: [Option<T>; 5]) -> String {
 /// Lays one figure per library out in columns, with a dash where there is none.
 fn columns(of: [Option<String>; 5]) -> String {
     of.map(|value| format!("{:>13}", value.unwrap_or("-".to_string()))).join(" ")
+}
+
+/// A trace read into memory, with what each library is handed and checked against.
+struct Loaded {
+    name: String,
+    path: String,
+    events: usize,
+    dt_history: History<TextOperation, usize>,
+    /// What the history takes in diamond-types' form, and in eg-strider's.
+    held_by_dt_history: Memory,
+    history: History,
+    held_by_history: Memory,
+    /// diamond-types' text for the trace.
+    expected: String,
+    /// Whether that is the trace's own text.
+    trace_text: bool,
+    saved: Vec<u8>,
+    dt_saved: Vec<u8>,
+    /// Whether eg-strider's and diamond-types' saved documents reopen with that text.
+    same: bool,
+    /// The batches each writer of yrs, Loro and Automerge sent, with notes on the replay, or why
+    /// there are none.
+    sent: [Result<(Vec<u8>, String), &'static str>; 3],
+}
+
+/// Reads a trace and the other libraries' replays of it, replaying any not yet kept if `replay`.
+fn load(path: &str, replay: bool, left_out: &[&str]) -> Loaded {
+    let name = path.rsplit('/').next().unwrap().trim_end_matches(".json").to_string();
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    // What reading the trace keeps is its ops and its text.
+    let (trace, read) = memory_of(|| Trace::of_json(&bytes).unwrap_or_else(|e| panic!("{path}: {e}")));
+    let Trace { history: dt_history, end_content } = trace;
+    let held_by_dt_history = Memory { peak: 0, kept: read.kept - end_content.capacity() };
+    drop(bytes);
+    let events = dt_history.events();
+    let (history, held_by_history) = memory_of(|| dt_history.edits());
+    // A trace numbers its agents in the order of their names, but splits an agent whose
+    // edits are concurrent with its own into several, so ties between concurrent inserts
+    // can fall differently from the trace's text.
+    let expected = dt_merge(&dt_history).1.content().to_string();
+    let trace_text = expected == end_content;
+    drop(end_content);
+    let saved = strider_merge(&history).save();
+    let dt_saved = dt_save(&dt_append(&dt_history), &expected);
+    let same = OpLog::load(saved.clone()).unwrap().checkout() == expected && dt_open(&dt_saved).1.to_string() == expected;
+    let sent = [
+        replayed::<compare::replicas::Yjs>(&name, "yrs", &dt_history, replay, left_out),
+        replayed::<compare::replicas::Loro>(&name, "loro", &dt_history, replay, left_out),
+        replayed::<compare::replicas::Automerge>(&name, "automerge", &dt_history, replay, left_out),
+    ];
+    Loaded { name, path: path.to_string(), events, dt_history, held_by_dt_history, history, held_by_history, expected, trace_text, saved, dt_saved, same, sent }
+}
+
+/// Sets eg-strider's two tasks on a trace up to be timed. Its merge also times its appending,
+/// and one more edit at the end, merged on top of what is there.
+fn strider_turns(loaded: &Loaded) -> Turns<'_> {
+    let (history, expected) = (&loaded.history, loaded.expected.as_str());
+    let expected_chars = expected.chars().count();
+    Turns {
+        merge: Box::new(move || {
+            let t = Instant::now();
+            let mut log = OpLog::new();
+            compare::extend(&mut log, history, usize::MAX);
+            let append_ms = since(t);
+            let merged = log.checkout();
+            let merge_ms = since(t);
+            let mut same = merged == expected;
+            let typist = log.get_or_create_replica("typist");
+            let t = Instant::now();
+            log.add_insert(typist, expected_chars, "!");
+            let merged = log.checkout().len();
+            let again_ms = since(t);
+            same &= merged == expected.len() + 1;
+            ([merge_ms, append_ms, again_ms], same)
+        }),
+        // eg-strider takes the file's bytes to keep, so each run is handed its own.
+        open: Box::new(move || {
+            let bytes = loaded.saved.clone();
+            let t = Instant::now();
+            let mut log = OpLog::load(bytes).unwrap();
+            log.checkout();
+            since(t)
+        }),
+    }
+}
+
+/// Sets diamond-types' two tasks on a trace up to be timed. Its merge also times its appending.
+fn dt_turns(loaded: &Loaded) -> Turns<'_> {
+    Turns {
+        merge: Box::new(move || {
+            let t = Instant::now();
+            let oplog = dt_append(&loaded.dt_history);
+            let append_ms = since(t);
+            let branch = oplog.checkout_tip();
+            let ms = since(t);
+            let same = branch.content() == loaded.expected;
+            ([ms, append_ms, f64::NAN], same)
+        }),
+        open: Box::new(move || {
+            let t = Instant::now();
+            let document = dt_open(&loaded.dt_saved);
+            let ms = since(t);
+            drop(document);
+            ms
+        }),
+    }
+}
+
+/// Checks and weighs yrs, Loro and Automerge on a trace, and sets their tasks up to be timed.
+fn others(loaded: &Loaded) -> [Option<(Measured, Turns<'_>)>; 3] {
+    let expected = &loaded.expected;
+    let [yjs, loro, automerge] = &loaded.sent;
+    [
+        yjs.as_ref()
+            .ok()
+            .map(|(sent, _)| prepare(expected, move || yjs_decode_batches(sent), yjs_merge, yjs_text, yjs_save, |saved| yjs_apply(yjs_decode(saved)))),
+        loro.as_ref().ok().map(|(sent, _)| {
+            let ops = loro_decode_batches(sent);
+            prepare(expected, move || ops.clone(), loro_apply, loro_text, |document| document.export(ExportMode::snapshot()).unwrap(), loro_import)
+        }),
+        automerge.as_ref().ok().map(|(sent, _)| {
+            prepare(
+                expected,
+                move || automerge_decode(sent),
+                automerge_apply,
+                automerge_text,
+                |document: &mut automerge::AutoCommit| document.save(),
+                automerge_open,
+            )
+        }),
+    ]
 }
 
 /// Measures eg-strider beside diamond-types, yrs, Loro and Automerge on each of the paper's
