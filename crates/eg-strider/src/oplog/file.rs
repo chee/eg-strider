@@ -6,13 +6,13 @@ use strider_graph::{CausalGraph, EventIndex, EventRunIndex, HistoryRange};
 
 const MAGIC: &[u8] = b"eg-strider\x05";
 
-/// About how many events the last block of history holds. Each earlier block is twice the size
-/// of the one after, so that recent history reads alone and the rest packs well. Tiny in debug
-/// builds, so that tests save several.
-const BLOCK: u32 = if cfg!(debug_assertions) { 8 } else { 1 << 15 };
+/// About how many events the last part of saved history holds. Each earlier part is twice the
+/// size of the one after, so that recent history reads alone and the rest packs well. Tiny in
+/// debug builds, so that tests save several.
+const EVENTS_PER_PART: u32 = if cfg!(debug_assertions) { 8 } else { 1 << 15 };
 
-/// Index of a block of saved history.
-pub(crate) type SavedBlockIndex = usize;
+/// Index of a part of saved history.
+pub(crate) type HistoryPartIndex = usize;
 
 /// A file that is not a saved document, or is damaged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,44 +26,44 @@ impl std::fmt::Display for Malformed {
 
 impl std::error::Error for Malformed {}
 
-/// History still as saved: the events before the first that the log holds.
-pub(crate) struct Packed {
+/// History still as saved, in parts: the events before the first that the log holds.
+pub(crate) struct UnreadHistory {
     /// The file the log was loaded from.
     bytes: Vec<u8>,
-    /// Where each block is in `bytes`.
-    blocks: Vec<Range<usize>>,
-    /// Each block's first event, then the total number of events.
+    /// Where each part is in `bytes`.
+    parts: Vec<Range<usize>>,
+    /// Each part's first event, then the total number of events.
     starts: Vec<EventIndex>,
     /// That history's frontier.
     pub frontier: Vec<EventIndex>,
 }
 
-impl Packed {
-    /// Finds the block holding an event.
-    pub fn block_holding(&self, event: EventIndex) -> SavedBlockIndex {
+impl UnreadHistory {
+    /// Finds the part holding an event.
+    pub fn part_holding(&self, event: EventIndex) -> HistoryPartIndex {
         self.starts.partition_point(|&start| start <= event) - 1
     }
 }
 
 impl OpLog {
     /// Writes the log as a file that [`load`](Self::load) opens without merging: a header, the
-    /// merged text, then the history in blocks that each start at a critical version, so that a
-    /// block and those after it read alone. A block stores each field as a column of LEB128
+    /// merged text, then the history in parts that each start at a critical version, so that a
+    /// part and those after it read alone. A part stores each field as a column of LEB128
     /// varints, run-length encoded where values repeat, with positions relative to the op
     /// before and parents as distances back. Columns and text are compressed with Zstandard,
     /// each with a checksum.
     pub fn save(&mut self) -> Vec<u8> {
         self.checkout();
-        let (floor, len) = (self.graph.first_held_event(), self.graph.len());
-        // History that was never read is written as it is; the rest is cut into blocks.
-        let kept = self.packed.iter().flat_map(|packed| {
-            packed.blocks.iter().zip(packed.starts.windows(2)).map(|(block, ends)| (Cow::from(&packed.bytes[block.clone()]), ends[1] - ends[0]))
+        let (first_held, len) = (self.graph.first_held_event(), self.graph.len());
+        // History that was never read is written as it is; the rest is cut into parts.
+        let kept = self.unread_history.iter().flat_map(|unread| {
+            unread.parts.iter().zip(unread.starts.windows(2)).map(|(part, ends)| (Cow::from(&unread.bytes[part.clone()]), ends[1] - ends[0]))
         });
-        let cuts = self.cuts(floor, len);
-        let new = cuts.windows(2).map(|ends| (Cow::from(self.pack(ends[0]..ends[1])), ends[1] - ends[0]));
-        let blocks: Vec<(Cow<[u8]>, u32)> = kept.chain(new).collect();
+        let bounds = self.part_bounds(first_held, len);
+        let new = bounds.windows(2).map(|ends| (Cow::from(self.pack(ends[0]..ends[1])), ends[1] - ends[0]));
+        let parts: Vec<(Cow<[u8]>, u32)> = kept.chain(new).collect();
         let document = self.merged();
-        let text = squeezed(document.text.as_bytes());
+        let text = compress_with_checksum(document.text.as_bytes());
 
         let mut out = MAGIC.to_vec();
         number(&mut out, self.replica_names.len());
@@ -80,13 +80,13 @@ impl OpLog {
         frontier.iter().for_each(|&event| number(&mut out, (len - event) as usize));
         number(&mut out, document.text.len());
         number(&mut out, text.len());
-        number(&mut out, blocks.len());
-        for (block, events) in &blocks {
-            number(&mut out, block.len());
+        number(&mut out, parts.len());
+        for (part, events) in &parts {
+            number(&mut out, part.len());
             number(&mut out, *events as usize);
         }
         out.extend_from_slice(&text);
-        blocks.iter().for_each(|(block, _)| out.extend_from_slice(block));
+        parts.iter().for_each(|(part, _)| out.extend_from_slice(part));
         out
     }
 
@@ -104,7 +104,7 @@ impl OpLog {
         let (events, chars) = (file.number()?, file.number()?);
         let frontier = (0..file.count()?).map(|_| events.checked_sub(file.number()?).ok_or(Malformed)).collect::<Result<Vec<_>, _>>()?;
         let in_order = frontier.windows(2).all(|pair| pair[0] < pair[1]) && frontier.last().map_or(events == 0, |&last| last + 1 == events);
-        let (text_len, text_packed) = (file.number()? as usize, file.number()? as usize);
+        let (text_len, text_compressed_len) = (file.number()? as usize, file.number()? as usize);
         let (mut starts, mut lens, mut end) = (vec![0], Vec::new(), 0 as EventIndex);
         for _ in 0..file.count()? {
             lens.push(file.number()? as usize);
@@ -112,44 +112,45 @@ impl OpLog {
             starts.push(end);
         }
 
-        // The parts follow the header, and together are the rest of the file.
+        // The text and the parts of history follow the header, and together are the rest of the
+        // file.
         let mut at = bytes.len() - file.0.len();
-        let mut part = |len: usize| {
+        let mut section = |len: usize| {
             let end = at.checked_add(len).filter(|&end| end <= bytes.len()).ok_or(Malformed)?;
             Ok(std::mem::replace(&mut at, end)..end)
         };
-        let text = part(text_packed)?;
-        let blocks = lens.into_iter().map(&mut part).collect::<Result<Vec<_>, Malformed>>()?;
+        let text = section(text_compressed_len)?;
+        let parts = lens.into_iter().map(&mut section).collect::<Result<Vec<_>, Malformed>>()?;
         if at != bytes.len() || !in_order || end != events {
             return Err(Malformed);
         }
-        let text = String::from_utf8(unpacked(&bytes[text], text_len)?).map_err(|_| Malformed)?;
+        let text = String::from_utf8(decompress_checked(&bytes[text], text_len)?).map_err(|_| Malformed)?;
         if text.chars().count() != chars as usize {
             return Err(Malformed);
         }
 
         log.graph = CausalGraph::after(events, &frontier);
         log.base = DocumentState { events, chars, text };
-        log.packed = (events > 0).then_some(Packed { bytes, blocks, starts, frontier });
+        log.unread_history = (events > 0).then_some(UnreadHistory { bytes, parts, starts, frontier });
         Ok(log)
     }
 
-    /// Reads the saved history from block `from` on, so that the log holds every event from
-    /// that block's first.
-    pub(crate) fn unpack_from(&mut self, from: SavedBlockIndex) -> Result<(), Malformed> {
-        let Some(packed) = &self.packed else { return Ok(()) };
-        // The blocks are read into a log of their own, so that a damaged one leaves this one as it was.
-        let mut read = OpLog { replica_names: self.replica_names.clone(), graph: CausalGraph::after(packed.starts[from], &[]), ..OpLog::default() };
-        // The first event of a block has the frontier of the history before it for parents.
+    /// Reads the saved history from part `from` on, so that the log holds every event from that
+    /// part's first.
+    pub(crate) fn unpack_from(&mut self, from: HistoryPartIndex) -> Result<(), Malformed> {
+        let Some(unread) = &self.unread_history else { return Ok(()) };
+        // The parts are read into a log of their own, so that a damaged one leaves this one as it was.
+        let mut read = OpLog { replica_names: self.replica_names.clone(), graph: CausalGraph::after(unread.starts[from], &[]), ..OpLog::default() };
+        // The first event of a part has the frontier of the history before it for parents.
         let mut frontier = Vec::new();
-        for (i, block) in packed.blocks[from..].iter().enumerate() {
-            let first = read.unpack(&packed.bytes[block.clone()])?;
+        for (i, part) in unread.parts[from..].iter().enumerate() {
+            let first = read.unpack(&unread.bytes[part.clone()])?;
             if i == 0 {
                 frontier = first;
             }
         }
 
-        let mut packed = self.packed.take().expect("the saved history was just read");
+        let mut unread = self.unread_history.take().expect("the saved history was just read");
         let later = std::mem::replace(self, read);
         (self.next_sequence_numbers, self.replay_cache) = (later.next_sequence_numbers, later.replay_cache);
         (self.base, self.latest_document_state) = (later.base, later.latest_document_state);
@@ -159,69 +160,70 @@ impl OpLog {
         self.ops.extend(later.ops.into_iter().map(|op| OperationRun { inserted_text_end: op.inserted_text_end + shift, ..op }));
         self.replica_runs.extend(later.replica_runs);
         self.totals = (self.totals.0 + later.totals.0, self.totals.1 + later.totals.1);
-        let blocks = later.graph.runs();
-        for block in 0..blocks.len() {
-            let parents: Vec<EventIndex> = blocks.parents(block).iter().map(|&parent| blocks.start(parent + 1) - 1).collect();
-            // A block of the later events with no block for a parent followed the old frontier.
-            let parents = if parents.is_empty() { &packed.frontier } else { &parents };
-            self.graph.push(parents, blocks.events(block).len() as u32);
+        let runs = later.graph.runs();
+        for run in 0..runs.len() {
+            let parents: Vec<EventIndex> = runs.parents(run).iter().map(|&parent| runs.start(parent + 1) - 1).collect();
+            // A run of the later events with no run for a parent followed the old frontier.
+            let parents = if parents.is_empty() { &unread.frontier } else { &parents };
+            self.graph.push(parents, runs.events(run).len() as u32);
         }
 
-        packed.blocks.truncate(from);
-        packed.starts.truncate(from + 1);
-        packed.frontier = frontier;
-        self.packed = (from > 0).then_some(packed);
+        unread.parts.truncate(from);
+        unread.starts.truncate(from + 1);
+        unread.frontier = frontier;
+        self.unread_history = (from > 0).then_some(unread);
         Ok(())
     }
 
-    /// Returns the parents of block `block`'s first event: for a chain with no block before it,
-    /// the saved history's frontier.
-    fn parents_of(&self, block: EventRunIndex) -> Vec<EventIndex> {
-        let blocks = self.graph.runs();
-        let parents: Vec<EventIndex> = blocks.parents(block).iter().map(|&parent| blocks.start(parent + 1) - 1).collect();
-        match &self.packed {
-            Some(packed) if parents.is_empty() => packed.frontier.clone(),
+    /// Returns the parents of run `run`'s first event: for a chain with no run before it, the
+    /// saved history's frontier.
+    fn parents_of(&self, run: EventRunIndex) -> Vec<EventIndex> {
+        let runs = self.graph.runs();
+        let parents: Vec<EventIndex> = runs.parents(run).iter().map(|&parent| runs.start(parent + 1) - 1).collect();
+        match &self.unread_history {
+            Some(unread) if parents.is_empty() => unread.frontier.clone(),
             _ => parents,
         }
     }
 
-    /// Chooses where to cut the held events `from..to` into blocks: at critical versions, about
-    /// [`BLOCK`] events before the end and twice as far apart each time. Returns `from`, then
-    /// each block's end.
-    fn cuts(&self, from: EventIndex, to: EventIndex) -> Vec<EventIndex> {
-        let blocks = self.graph.runs();
-        let (mut cuts, mut size) = (vec![to], BLOCK);
-        for segment in self.graph.split_at_critical_versions().iter().rev() {
-            let stretch = segment.runs();
-            let (start, end) = (blocks.start(stretch.start).max(from), blocks.start(stretch.end).min(to));
+    /// Chooses where to cut the held events `from..to` into parts: at critical versions, about
+    /// [`EVENTS_PER_PART`] events before the end and twice as far apart each time. Returns `from`,
+    /// then each part's end.
+    fn part_bounds(&self, from: EventIndex, to: EventIndex) -> Vec<EventIndex> {
+        let runs = self.graph.runs();
+        let (mut bounds, mut size) = (vec![to], EVENTS_PER_PART);
+        for range in self.graph.split_at_critical_versions().iter().rev() {
+            let run_range = range.runs();
+            let (start, end) = (runs.start(run_range.start).max(from), runs.start(run_range.end).min(to));
             if start >= end {
                 continue;
             }
-            // Anywhere in a linear stretch is a critical version; a region has to stay whole.
-            let mut last = *cuts.last().expect("the last cut");
-            while matches!(segment, HistoryRange::Linear(_)) && last - start > size {
+            // Anywhere in a linear range is a critical version; a concurrent range has to stay
+            // whole.
+            let mut last = *bounds.last().expect("the last bound");
+            while matches!(range, HistoryRange::Linear(_)) && last - start > size {
                 last -= size;
-                cuts.push(last);
+                bounds.push(last);
                 size *= 2;
             }
             if last - start >= size {
-                cuts.push(start);
+                bounds.push(start);
                 size *= 2;
             }
         }
-        if *cuts.last().expect("the last cut") > from {
-            cuts.push(from);
+        if *bounds.last().expect("the last bound") > from {
+            bounds.push(from);
         }
-        cuts.reverse();
-        cuts
+        bounds.reverse();
+        bounds
     }
 
-    /// Packs the held events `events` as a block.
+    /// Packs the held events `events` as a part.
     fn pack(&self, events: Range<EventIndex>) -> Vec<u8> {
         let mut columns = Vec::new();
 
         // The runs of events by one replica. A replica's runs nearly always carry on from one
-        // another, so after its first in the block a run's sequence number is stored as how
+        // another, so after its first in the part a run's sequence number is stored as how
         // far it is from that.
         let first = self.replica_runs.partition_point(|run| run.first_event + run.len <= events.start);
         let replica_runs = || {
@@ -253,7 +255,7 @@ impl OpLog {
         let wide = |op: &OperationRunSlice| op.kind == OperationKind::Insert && bytes(op) != op.len as usize;
         column(&mut columns, |out| {
             number(out, ops().count());
-            // A delete only trims an insert that is in the block with it.
+            // A delete only trims an insert that is in the part with it.
             let mut open = false;
             for op in ops() {
                 let trims = op.deletes_end_of_previous_insert && open;
@@ -272,41 +274,41 @@ impl OpLog {
         column(&mut columns, |out| ops().filter(wide).for_each(|op| number(out, bytes(&op))));
 
         // The graph, as chains of events: how long each is, and its first event's parents as
-        // how far back they are. A chain cut off from its start by the block follows the event
+        // how far back they are. A chain cut off from its start by the part follows the event
         // before it, which is stored as one parent fewer than none.
-        let blocks = self.graph.runs();
-        let chains = || (blocks.containing(events.start)..blocks.len()).take_while(|&block| blocks.start(block) < events.end);
-        let whole = |block: &EventRunIndex| blocks.start(*block) >= events.start;
+        let graph_runs = self.graph.runs();
+        let chains = || (graph_runs.containing(events.start)..graph_runs.len()).take_while(|&run| graph_runs.start(run) < events.end);
+        let whole = |run: &EventRunIndex| graph_runs.start(*run) >= events.start;
         column(&mut columns, |out| {
             number(out, chains().count());
-            for block in chains() {
-                number(out, (blocks.start(block + 1).min(events.end) - blocks.start(block).max(events.start)) as usize);
+            for run in chains() {
+                number(out, (graph_runs.start(run + 1).min(events.end) - graph_runs.start(run).max(events.start)) as usize);
             }
         });
-        column(&mut columns, |out| runs(out, chains().map(|block| if whole(&block) { self.parents_of(block).len() as u64 + 1 } else { 0 })));
+        column(&mut columns, |out| runs(out, chains().map(|run| if whole(&run) { self.parents_of(run).len() as u64 + 1 } else { 0 })));
         column(&mut columns, |out| {
-            for block in chains().filter(whole) {
-                self.parents_of(block).iter().for_each(|&parent| number(out, (blocks.start(block) - parent) as usize));
+            for run in chains().filter(whole) {
+                self.parents_of(run).iter().for_each(|&parent| number(out, (graph_runs.start(run) - parent) as usize));
             }
         });
 
         let text: String = ops().map(|op| &self.inserted_text[op.text.0 as usize..op.text.1 as usize]).collect();
         let mut out = Vec::new();
-        for part in [&columns[..], text.as_bytes()] {
-            let packed = squeezed(part);
-            number(&mut out, part.len());
-            number(&mut out, packed.len());
-            out.extend_from_slice(&packed);
+        for section in [&columns[..], text.as_bytes()] {
+            let compressed = compress_with_checksum(section);
+            number(&mut out, section.len());
+            number(&mut out, compressed.len());
+            out.extend_from_slice(&compressed);
         }
         out
     }
 
-    /// Reads a block that [`pack`](Self::pack) wrote, whose events follow those held, and adds
+    /// Reads a part that [`pack`](Self::pack) wrote, whose events follow those held, and adds
     /// them. Returns the first event's parents.
-    fn unpack(&mut self, block: &[u8]) -> Result<Vec<EventIndex>, Malformed> {
-        let mut file = Reader(block);
-        let columns = file.packed()?;
-        let text = String::from_utf8(file.packed()?).map_err(|_| Malformed)?;
+    fn unpack(&mut self, part: &[u8]) -> Result<Vec<EventIndex>, Malformed> {
+        let mut file = Reader(part);
+        let columns = file.compressed()?;
+        let text = String::from_utf8(file.compressed()?).map_err(|_| Malformed)?;
         let mut columns = Reader(&columns);
         let start = self.graph.len();
 
@@ -445,22 +447,22 @@ fn unzigzag(n: u64) -> i64 {
     (n >> 1) as i64 ^ -((n & 1) as i64)
 }
 
-/// Compresses bytes, with a checksum that unpacking checks, so that damage is found when a
+/// Compresses bytes, with a checksum that decompressing checks, so that damage is found when a
 /// part is read rather than when what it holds is used.
-fn squeezed(bytes: &[u8]) -> Vec<u8> {
+fn compress_with_checksum(bytes: &[u8]) -> Vec<u8> {
     let mut compressor = zstd::bulk::Compressor::new(3).expect("a compression level zstd has");
     compressor.include_checksum(true).expect("zstd takes a checksum");
     compressor.compress(bytes).expect("compressing into memory")
 }
 
-/// Unpacks `len` bytes that [`squeezed`] compressed.
-fn unpacked(packed: &[u8], len: usize) -> Result<Vec<u8>, Malformed> {
-    // The compressed bytes say for themselves how long they unpack to, so room is only ever
+/// Decompresses `len` bytes that [`compress_with_checksum`] compressed.
+fn decompress_checked(compressed: &[u8], len: usize) -> Result<Vec<u8>, Malformed> {
+    // The compressed bytes say for themselves how long they decompress to, so room is only ever
     // made for a length that both agree on.
-    if zstd::zstd_safe::get_frame_content_size(packed).ok().flatten() != Some(len as u64) {
+    if zstd::zstd_safe::get_frame_content_size(compressed).ok().flatten() != Some(len as u64) {
         return Err(Malformed);
     }
-    zstd::bulk::decompress(packed, len).ok().filter(|part| part.len() == len).ok_or(Malformed)
+    zstd::bulk::decompress(compressed, len).ok().filter(|bytes| bytes.len() == len).ok_or(Malformed)
 }
 
 /// What is left to read of a file or a column.
@@ -510,10 +512,10 @@ impl<'a> Reader<'a> {
         Ok(Reader(self.take(len)))
     }
 
-    /// Reads a compressed part: its length, its compressed length, then the bytes.
-    fn packed(&mut self) -> Result<Vec<u8>, Malformed> {
-        let (len, packed) = (self.number()? as usize, self.count()?);
-        unpacked(self.take(packed), len)
+    /// Reads a compressed section: its length, its compressed length, then the bytes.
+    fn compressed(&mut self) -> Result<Vec<u8>, Malformed> {
+        let (len, compressed_len) = (self.number()? as usize, self.count()?);
+        decompress_checked(self.take(compressed_len), len)
     }
 }
 

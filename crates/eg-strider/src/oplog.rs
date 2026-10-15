@@ -178,7 +178,7 @@ pub struct OpLog {
     /// then, since moving it into events still being added would cut them up at every merge.
     latest_document_state: Option<DocumentState>,
     /// History from before the first event held here, from a loaded file, still unread.
-    packed: Option<file::Packed>,
+    unread_history: Option<file::UnreadHistory>,
     /// Scratch for a new event's parents.
     parents: Vec<EventIndex>,
     /// The characters the inserts put in, and the characters the deletes take out.
@@ -198,9 +198,9 @@ fn held_backspaces(edits: &[Operation], pos: u32, room: u32) -> u32 {
 
 /// Returns how many bytes of `text` come before the first that is not ASCII.
 fn ascii_prefix(text: &[u8]) -> usize {
-    // Whole blocks are checked a word at a time; only the block that fails is searched.
-    let blocks = text.chunks(256).take_while(|block| block.is_ascii()).count();
-    let rest = &text[(blocks * 256).min(text.len())..];
+    // Whole 256-byte chunks are checked a word at a time; only the chunk that fails is searched.
+    let chunks = text.chunks(256).take_while(|chunk| chunk.is_ascii()).count();
+    let rest = &text[(chunks * 256).min(text.len())..];
     text.len() - rest.len() + rest.iter().take_while(|byte| byte.is_ascii()).count()
 }
 
@@ -472,14 +472,14 @@ impl OpLog {
 
     /// Reads back the saved history that an event made at `parents` needs, if it was made
     /// without all of it: with no parent held here, and not all of the old frontier for parents.
-    /// A saved block starts at a critical version, so the event has all that comes before the
-    /// block holding its latest parent.
+    /// A saved part starts at a critical version, so the event has all that comes before the
+    /// part holding its latest parent.
     fn unpack_needed_history(&mut self, parents: &[EventIndex]) -> Result<(), Malformed> {
-        if let Some(packed) = &self.packed {
-            let floor = self.graph.first_held_event();
-            if !parents.iter().any(|&parent| parent >= floor) && !packed.frontier.iter().all(|event| parents.contains(event)) {
-                let block = parents.iter().max().map_or(0, |&parent| packed.block_holding(parent));
-                self.unpack_from(block)?;
+        if let Some(unread) = &self.unread_history {
+            let first_held = self.graph.first_held_event();
+            if !parents.iter().any(|&parent| parent >= first_held) && !unread.frontier.iter().all(|event| parents.contains(event)) {
+                let part = parents.iter().max().map_or(0, |&parent| unread.part_holding(parent));
+                self.unpack_from(part)?;
             }
         }
         Ok(())
