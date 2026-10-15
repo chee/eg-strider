@@ -17,7 +17,7 @@ SYSTEMS = [
 ]
 ORDER = ["S1", "S2", "S3", "C1", "C2", "A1", "A2"]
 LEFT, RIGHT, ROW, GAP, TOP = 120, 640, 12, 14, 30
-TIMES = [(0.1, "0.1 ms"), (1, "1 ms"), (10, "10 ms"), (100, "100 ms"), (1000, "1 sec"), (10000, "10 sec"), (100000, "100 sec")]
+TIMES = [(0.01, "0.01 ms"), (0.1, "0.1 ms"), (1, "1 ms"), (10, "10 ms"), (100, "100 ms"), (1000, "1 sec"), (10000, "10 sec"), (100000, "100 sec")]
 
 
 def milliseconds(v):
@@ -38,10 +38,10 @@ def times(ratio):
     return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
 
 
-def chart(results, kind, label, caption, ticks, share=()):
+def chart(results, kind, label, caption, ticks):
     """Draws one bar per system for each trace. The axis runs in decades of the first tick,
-    and is long enough for the kinds of figure in `share` too, so that charts of them line
-    up. A system whose text came out unlike diamond-types' is starred."""
+    from the one at or below the smallest figure. A system whose text came out unlike
+    diamond-types' is starred."""
     by_trace = {r["trace"]: r[kind] for r in results}
     # A library left out of the run has no figures at all, and no rows.
     shown = [system for system in SYSTEMS if any(r[kind].get(system[1]) is not None for r in results)]
@@ -49,7 +49,7 @@ def chart(results, kind, label, caption, ticks, share=()):
     traces = [t for t in ORDER if t in by_trace]
     systems = shown
     origin = ticks[0][0]
-    values = [r[k].get(key) for r in results for k in (kind, *share) for _, key, _ in shown]
+    values = [r[kind].get(key) for r in results for _, key, _ in shown]
     decades = [math.log10(v / origin) for v in values if v]
     low, high = math.floor(min(decades)), math.ceil(max(decades))
     x = lambda v: LEFT + (math.log10(v / origin) - low) / (high - low) * (RIGHT - LEFT)
@@ -108,10 +108,10 @@ def main(results_path, out_dir):
     runs = f"Median of {results[0]['reps']} runs. {scale}"
     sizes = [(2**20 * 10**k, text) for k, text in ((-2, "0.01 MiB"), (-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
     charts = {
-        "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES, share=["open_ms"]),
-        "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES, share=["merge_ms"]),
-        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history, the ops being merged included. {scale}", sizes, ["merge_kept"]),
-        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes, ["merge_peak"]),
+        "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES),
+        "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES),
+        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history, the ops being merged included. {scale}", sizes),
+        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes),
         "file-size": chart(results, "saved", memory, f"Size of a saved document. {scale}", sizes),
     }
     for name, drawn in charts.items():

@@ -12,170 +12,159 @@
 <text x="461.20000000000005" y="15" font-size="11">Automerge</text>
 <text x="740" y="15" font-size="9" fill="#888" text-anchor="end">* ends with a different text</text>
 <line x1="120.0" y1="26" x2="120.0" y2="548" stroke="#ddd" stroke-width="1"/>
-<line x1="159.1" y1="26" x2="159.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="182.0" y1="26" x2="182.0" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="198.3" y1="26" x2="198.3" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="210.9" y1="26" x2="210.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="221.2" y1="26" x2="221.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="229.9" y1="26" x2="229.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="237.4" y1="26" x2="237.4" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="244.1" y1="26" x2="244.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="250.0" y1="26" x2="250.0" y2="548" stroke="#ddd" stroke-width="1"/>
-<line x1="289.1" y1="26" x2="289.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="312.0" y1="26" x2="312.0" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="328.3" y1="26" x2="328.3" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="340.9" y1="26" x2="340.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="351.2" y1="26" x2="351.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="359.9" y1="26" x2="359.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="367.4" y1="26" x2="367.4" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="374.1" y1="26" x2="374.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="380.0" y1="26" x2="380.0" y2="548" stroke="#ddd" stroke-width="1"/>
-<line x1="419.1" y1="26" x2="419.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="442.0" y1="26" x2="442.0" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="458.3" y1="26" x2="458.3" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="470.9" y1="26" x2="470.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="481.2" y1="26" x2="481.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="489.9" y1="26" x2="489.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="497.4" y1="26" x2="497.4" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="504.1" y1="26" x2="504.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="510.0" y1="26" x2="510.0" y2="548" stroke="#ddd" stroke-width="1"/>
-<line x1="549.1" y1="26" x2="549.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="572.0" y1="26" x2="572.0" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="588.3" y1="26" x2="588.3" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="600.9" y1="26" x2="600.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="611.2" y1="26" x2="611.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="619.9" y1="26" x2="619.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="627.4" y1="26" x2="627.4" y2="548" stroke="#ddd" stroke-width="0.5"/>
-<line x1="634.1" y1="26" x2="634.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="172.2" y1="26" x2="172.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="202.7" y1="26" x2="202.7" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="224.4" y1="26" x2="224.4" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="241.2" y1="26" x2="241.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="254.9" y1="26" x2="254.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="266.5" y1="26" x2="266.5" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="276.5" y1="26" x2="276.5" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="285.4" y1="26" x2="285.4" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="293.3" y1="26" x2="293.3" y2="548" stroke="#ddd" stroke-width="1"/>
+<line x1="345.5" y1="26" x2="345.5" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="376.0" y1="26" x2="376.0" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="397.7" y1="26" x2="397.7" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="414.5" y1="26" x2="414.5" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="428.2" y1="26" x2="428.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="439.8" y1="26" x2="439.8" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="449.9" y1="26" x2="449.9" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="458.7" y1="26" x2="458.7" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="466.7" y1="26" x2="466.7" y2="548" stroke="#ddd" stroke-width="1"/>
+<line x1="518.8" y1="26" x2="518.8" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="549.4" y1="26" x2="549.4" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="571.0" y1="26" x2="571.0" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="587.8" y1="26" x2="587.8" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="601.5" y1="26" x2="601.5" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="613.2" y1="26" x2="613.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="623.2" y1="26" x2="623.2" y2="548" stroke="#ddd" stroke-width="0.5"/>
+<line x1="632.1" y1="26" x2="632.1" y2="548" stroke="#ddd" stroke-width="0.5"/>
 <line x1="120.0" y1="548" x2="120.0" y2="553" stroke="black"/>
 <text x="120.0" y="565" font-size="10" text-anchor="middle">1 MiB</text>
-<line x1="250.0" y1="548" x2="250.0" y2="553" stroke="black"/>
-<text x="250.0" y="565" font-size="10" text-anchor="middle">10 MiB</text>
-<line x1="380.0" y1="548" x2="380.0" y2="553" stroke="black"/>
-<text x="380.0" y="565" font-size="10" text-anchor="middle">100 MiB</text>
-<line x1="510.0" y1="548" x2="510.0" y2="553" stroke="black"/>
-<text x="510.0" y="565" font-size="10" text-anchor="middle">1,000 MiB</text>
+<line x1="293.3" y1="548" x2="293.3" y2="553" stroke="black"/>
+<text x="293.3" y="565" font-size="10" text-anchor="middle">10 MiB</text>
+<line x1="466.7" y1="548" x2="466.7" y2="553" stroke="black"/>
+<text x="466.7" y="565" font-size="10" text-anchor="middle">100 MiB</text>
 <line x1="640.0" y1="548" x2="640.0" y2="553" stroke="black"/>
-<text x="640.0" y="565" font-size="10" text-anchor="middle">10,000 MiB</text>
+<text x="640.0" y="565" font-size="10" text-anchor="middle">1,000 MiB</text>
 <line x1="120" y1="548" x2="640" y2="548" stroke="black"/>
 <text x="640" y="581" font-size="10" text-anchor="end">Memory a document holds at rest, ready for more edits, once a merge from nothing is done. Log scale. (Less is better) →</text>
 <text x="58" y="64.0" font-size="14" text-anchor="end">S1</text>
 <line x1="120" y1="28" x2="120" y2="90" stroke="black" stroke-width="1.5"/>
 <text x="114" y="38" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="30" width="15.8" height="10" fill="#d55e00"/>
-<text x="140.8" y="38.5" font-size="9">1.3 MiB</text>
+<rect x="120" y="30" width="21.0" height="10" fill="#d55e00"/>
+<text x="146.0" y="38.5" font-size="9">1.3 MiB</text>
 <text x="114" y="50" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="42" width="81.1" height="10" fill="#0072b2"/>
-<text x="206.1" y="50.5" font-size="9">4.2 MiB <tspan fill="#888">(3.18×)</tspan></text>
+<rect x="120" y="42" width="108.1" height="10" fill="#0072b2"/>
+<text x="233.1" y="50.5" font-size="9">4.2 MiB <tspan fill="#888">(3.18×)</tspan></text>
 <text x="114" y="62" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
-<rect x="120" y="54" width="109.8" height="10" fill="#e69f00"/>
-<text x="234.8" y="62.5" font-size="9">7.0 MiB <tspan fill="#888">(5.29×)</tspan></text>
+<rect x="120" y="54" width="146.4" height="10" fill="#e69f00"/>
+<text x="271.4" y="62.5" font-size="9">7.0 MiB <tspan fill="#888">(5.29×)</tspan></text>
 <text x="114" y="74" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
-<rect x="120" y="66" width="110.7" height="10" fill="#009e73"/>
-<text x="235.7" y="74.5" font-size="9">7.1 MiB <tspan fill="#888">(5.37×)</tspan></text>
+<rect x="120" y="66" width="147.6" height="10" fill="#009e73"/>
+<text x="272.6" y="74.5" font-size="9">7.1 MiB <tspan fill="#888">(5.37×)</tspan></text>
 <text x="114" y="86" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
-<rect x="120" y="78" width="320.7" height="10" fill="#cc79a7"/>
-<text x="445.7" y="86.5" font-size="9">293 MiB <tspan fill="#888">(222×)</tspan></text>
+<rect x="120" y="78" width="427.6" height="10" fill="#cc79a7"/>
+<text x="552.6" y="86.5" font-size="9">293 MiB <tspan fill="#888">(222×)</tspan></text>
 <text x="58" y="138.0" font-size="14" text-anchor="end">S2</text>
 <line x1="120" y1="102" x2="120" y2="164" stroke="black" stroke-width="1.5"/>
 <text x="114" y="112" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="104" width="32.3" height="10" fill="#d55e00"/>
-<text x="157.3" y="112.5" font-size="9">1.8 MiB</text>
+<rect x="120" y="104" width="43.0" height="10" fill="#d55e00"/>
+<text x="168.0" y="112.5" font-size="9">1.8 MiB</text>
 <text x="114" y="124" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="116" width="99.5" height="10" fill="#0072b2"/>
-<text x="224.5" y="124.5" font-size="9">5.8 MiB <tspan fill="#888">(3.29×)</tspan></text>
+<rect x="120" y="116" width="132.7" height="10" fill="#0072b2"/>
+<text x="257.7" y="124.5" font-size="9">5.8 MiB <tspan fill="#888">(3.29×)</tspan></text>
 <text x="114" y="136" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
-<rect x="120" y="128" width="123.6" height="10" fill="#e69f00"/>
-<text x="248.6" y="136.5" font-size="9">8.9 MiB <tspan fill="#888">(5.05×)</tspan></text>
+<rect x="120" y="128" width="164.9" height="10" fill="#e69f00"/>
+<text x="289.9" y="136.5" font-size="9">8.9 MiB <tspan fill="#888">(5.05×)</tspan></text>
 <text x="114" y="148" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
-<rect x="120" y="140" width="130.2" height="10" fill="#009e73"/>
-<text x="255.2" y="148.5" font-size="9">10 MiB <tspan fill="#888">(5.66×)</tspan></text>
+<rect x="120" y="140" width="173.5" height="10" fill="#009e73"/>
+<text x="298.5" y="148.5" font-size="9">10 MiB <tspan fill="#888">(5.66×)</tspan></text>
 <text x="114" y="160" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
-<rect x="120" y="152" width="341.7" height="10" fill="#cc79a7"/>
-<text x="466.7" y="160.5" font-size="9">425 MiB <tspan fill="#888">(240×)</tspan></text>
+<rect x="120" y="152" width="455.6" height="10" fill="#cc79a7"/>
+<text x="580.6" y="160.5" font-size="9">425 MiB <tspan fill="#888">(240×)</tspan></text>
 <text x="58" y="212.0" font-size="14" text-anchor="end">S3</text>
 <line x1="120" y1="176" x2="120" y2="238" stroke="black" stroke-width="1.5"/>
 <text x="114" y="186" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="178" width="67.3" height="10" fill="#d55e00"/>
-<text x="192.3" y="186.5" font-size="9">3.3 MiB</text>
+<rect x="120" y="178" width="89.7" height="10" fill="#d55e00"/>
+<text x="214.7" y="186.5" font-size="9">3.3 MiB</text>
 <text x="114" y="198" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="190" width="133.4" height="10" fill="#0072b2"/>
-<text x="258.4" y="198.5" font-size="9">11 MiB <tspan fill="#888">(3.23×)</tspan></text>
+<rect x="120" y="190" width="177.9" height="10" fill="#0072b2"/>
+<text x="302.9" y="198.5" font-size="9">11 MiB <tspan fill="#888">(3.23×)</tspan></text>
 <text x="114" y="210" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
-<rect x="120" y="202" width="129.8" height="10" fill="#e69f00"/>
-<text x="254.8" y="210.5" font-size="9">10.0 MiB <tspan fill="#888">(3.02×)</tspan></text>
+<rect x="120" y="202" width="173.0" height="10" fill="#e69f00"/>
+<text x="298.0" y="210.5" font-size="9">10.0 MiB <tspan fill="#888">(3.02×)</tspan></text>
 <text x="114" y="222" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
-<rect x="120" y="214" width="151.3" height="10" fill="#009e73"/>
-<text x="276.3" y="222.5" font-size="9">15 MiB <tspan fill="#888">(4.43×)</tspan></text>
+<rect x="120" y="214" width="201.7" height="10" fill="#009e73"/>
+<text x="326.7" y="222.5" font-size="9">15 MiB <tspan fill="#888">(4.43×)</tspan></text>
 <text x="114" y="234" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
-<rect x="120" y="226" width="384.3" height="10" fill="#cc79a7"/>
-<text x="509.3" y="234.5" font-size="9">904 MiB <tspan fill="#888">(274×)</tspan></text>
+<rect x="120" y="226" width="512.4" height="10" fill="#cc79a7"/>
+<text x="637.4" y="234.5" font-size="9">904 MiB <tspan fill="#888">(274×)</tspan></text>
 <text x="58" y="286.0" font-size="14" text-anchor="end">C1</text>
 <line x1="120" y1="250" x2="120" y2="312" stroke="black" stroke-width="1.5"/>
 <text x="114" y="260" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="252" width="115.1" height="10" fill="#d55e00"/>
-<text x="240.1" y="260.5" font-size="9">7.7 MiB</text>
+<rect x="120" y="252" width="153.4" height="10" fill="#d55e00"/>
+<text x="278.4" y="260.5" font-size="9">7.7 MiB</text>
 <text x="114" y="272" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="264" width="166.3" height="10" fill="#0072b2"/>
-<text x="291.3" y="272.5" font-size="9">19 MiB <tspan fill="#888">(2.48×)</tspan></text>
+<rect x="120" y="264" width="221.8" height="10" fill="#0072b2"/>
+<text x="346.8" y="272.5" font-size="9">19 MiB <tspan fill="#888">(2.48×)</tspan></text>
 <text x="114" y="284" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
-<rect x="120" y="276" width="130.4" height="10" fill="#e69f00"/>
-<text x="255.4" y="284.5" font-size="9">10 MiB <tspan fill="#888">(1.31×)</tspan></text>
+<rect x="120" y="276" width="173.9" height="10" fill="#e69f00"/>
+<text x="298.9" y="284.5" font-size="9">10 MiB <tspan fill="#888">(1.31×)</tspan></text>
 <text x="114" y="296" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
-<rect x="120" y="288" width="267.1" height="10" fill="#009e73"/>
-<text x="392.1" y="296.5" font-size="9">113 MiB <tspan fill="#888">(14.8×)</tspan></text>
+<rect x="120" y="288" width="356.1" height="10" fill="#009e73"/>
+<text x="481.1" y="296.5" font-size="9">113 MiB <tspan fill="#888">(14.8×)</tspan></text>
 <text x="114" y="308" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
-<rect x="120" y="300" width="344.0" height="10" fill="#cc79a7"/>
-<text x="469.0" y="308.5" font-size="9">442 MiB <tspan fill="#888">(57.6×)</tspan></text>
+<rect x="120" y="300" width="458.6" height="10" fill="#cc79a7"/>
+<text x="583.6" y="308.5" font-size="9">442 MiB <tspan fill="#888">(57.6×)</tspan></text>
 <text x="58" y="360.0" font-size="14" text-anchor="end">C2</text>
 <line x1="120" y1="324" x2="120" y2="386" stroke="black" stroke-width="1.5"/>
 <text x="114" y="334" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="326" width="125.4" height="10" fill="#d55e00"/>
-<text x="250.4" y="334.5" font-size="9">9.2 MiB <tspan fill="#888">(1.33×)</tspan></text>
+<rect x="120" y="326" width="167.2" height="10" fill="#d55e00"/>
+<text x="292.2" y="334.5" font-size="9">9.2 MiB <tspan fill="#888">(1.33×)</tspan></text>
 <text x="114" y="346" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="338" width="176.6" height="10" fill="#0072b2"/>
-<text x="301.6" y="346.5" font-size="9">23 MiB <tspan fill="#888">(3.30×)</tspan></text>
+<rect x="120" y="338" width="235.5" height="10" fill="#0072b2"/>
+<text x="360.5" y="346.5" font-size="9">23 MiB <tspan fill="#888">(3.30×)</tspan></text>
 <text x="114" y="358" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
-<rect x="120" y="350" width="109.3" height="10" fill="#e69f00"/>
-<text x="234.3" y="358.5" font-size="9">6.9 MiB</text>
+<rect x="120" y="350" width="145.7" height="10" fill="#e69f00"/>
+<text x="270.7" y="358.5" font-size="9">6.9 MiB</text>
 <text x="114" y="370" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
-<rect x="120" y="362" width="287.8" height="10" fill="#009e73"/>
-<text x="412.8" y="370.5" font-size="9">164 MiB <tspan fill="#888">(23.6×)</tspan></text>
+<rect x="120" y="362" width="383.8" height="10" fill="#009e73"/>
+<text x="508.8" y="370.5" font-size="9">164 MiB <tspan fill="#888">(23.6×)</tspan></text>
 <text x="114" y="382" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
-<rect x="120" y="374" width="356.6" height="10" fill="#cc79a7"/>
-<text x="481.6" y="382.5" font-size="9">554 MiB <tspan fill="#888">(80.0×)</tspan></text>
+<rect x="120" y="374" width="475.5" height="10" fill="#cc79a7"/>
+<text x="600.5" y="382.5" font-size="9">554 MiB <tspan fill="#888">(80.0×)</tspan></text>
 <text x="58" y="434.0" font-size="14" text-anchor="end">A1</text>
 <line x1="120" y1="398" x2="120" y2="460" stroke="black" stroke-width="1.5"/>
 <text x="114" y="408" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="400" width="35.2" height="10" fill="#d55e00"/>
-<text x="160.2" y="408.5" font-size="9">1.9 MiB</text>
+<rect x="120" y="400" width="46.9" height="10" fill="#d55e00"/>
+<text x="171.9" y="408.5" font-size="9">1.9 MiB</text>
 <text x="114" y="420" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="412" width="92.1" height="10" fill="#0072b2"/>
-<text x="217.1" y="420.5" font-size="9">5.1 MiB <tspan fill="#888">(2.74×)</tspan></text>
+<rect x="120" y="412" width="122.8" height="10" fill="#0072b2"/>
+<text x="247.8" y="420.5" font-size="9">5.1 MiB <tspan fill="#888">(2.74×)</tspan></text>
 <text x="114" y="432" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
-<rect x="120" y="424" width="131.0" height="10" fill="#e69f00"/>
-<text x="256.0" y="432.5" font-size="9">10 MiB <tspan fill="#888">(5.45×)</tspan></text>
+<rect x="120" y="424" width="174.6" height="10" fill="#e69f00"/>
+<text x="299.6" y="432.5" font-size="9">10 MiB <tspan fill="#888">(5.45×)</tspan></text>
 <text x="114" y="444" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
-<rect x="120" y="436" width="142.3" height="10" fill="#009e73"/>
-<text x="267.3" y="444.5" font-size="9">12 MiB <tspan fill="#888">(6.66×)</tspan></text>
+<rect x="120" y="436" width="189.7" height="10" fill="#009e73"/>
+<text x="314.7" y="444.5" font-size="9">12 MiB <tspan fill="#888">(6.66×)</tspan></text>
 <text x="114" y="456" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
-<rect x="120" y="448" width="315.6" height="10" fill="#cc79a7"/>
-<text x="440.6" y="456.5" font-size="9">268 MiB <tspan fill="#888">(143×)</tspan></text>
+<rect x="120" y="448" width="420.7" height="10" fill="#cc79a7"/>
+<text x="545.7" y="456.5" font-size="9">268 MiB <tspan fill="#888">(143×)</tspan></text>
 <text x="58" y="508.0" font-size="14" text-anchor="end">A2</text>
 <line x1="120" y1="472" x2="120" y2="534" stroke="black" stroke-width="1.5"/>
 <text x="114" y="482" font-size="7.5" fill="#888" text-anchor="end">eg-strider</text>
-<rect x="120" y="474" width="30.7" height="10" fill="#d55e00"/>
-<text x="155.7" y="482.5" font-size="9">1.7 MiB</text>
+<rect x="120" y="474" width="40.9" height="10" fill="#d55e00"/>
+<text x="165.9" y="482.5" font-size="9">1.7 MiB</text>
 <text x="114" y="494" font-size="7.5" fill="#888" text-anchor="end">diamond-types</text>
-<rect x="120" y="486" width="81.3" height="10" fill="#0072b2"/>
-<text x="206.3" y="494.5" font-size="9">4.2 MiB <tspan fill="#888">(2.45×)</tspan></text>
+<rect x="120" y="486" width="108.4" height="10" fill="#0072b2"/>
+<text x="233.4" y="494.5" font-size="9">4.2 MiB <tspan fill="#888">(2.45×)</tspan></text>
 <text x="114" y="506" font-size="7.5" fill="#888" text-anchor="end">Yjs (yrs)</text>
-<rect x="120" y="498" width="115.1" height="10" fill="#e69f00"/>
-<text x="240.1" y="506.5" font-size="9">7.7 MiB* <tspan fill="#888">(4.46×)</tspan></text>
+<rect x="120" y="498" width="153.4" height="10" fill="#e69f00"/>
+<text x="278.4" y="506.5" font-size="9">7.7 MiB* <tspan fill="#888">(4.46×)</tspan></text>
 <text x="114" y="518" font-size="7.5" fill="#888" text-anchor="end">Loro</text>
-<rect x="120" y="510" width="271.8" height="10" fill="#009e73"/>
-<text x="396.8" y="518.5" font-size="9">123 MiB <tspan fill="#888">(71.5×)</tspan></text>
+<rect x="120" y="510" width="362.3" height="10" fill="#009e73"/>
+<text x="487.3" y="518.5" font-size="9">123 MiB <tspan fill="#888">(71.5×)</tspan></text>
 <text x="114" y="530" font-size="7.5" fill="#888" text-anchor="end">Automerge</text>
-<rect x="120" y="522" width="316.7" height="10" fill="#cc79a7"/>
-<text x="441.7" y="530.5" font-size="9">273 MiB* <tspan fill="#888">(158×)</tspan></text>
+<rect x="120" y="522" width="422.2" height="10" fill="#cc79a7"/>
+<text x="547.2" y="530.5" font-size="9">273 MiB* <tspan fill="#888">(158×)</tspan></text>
 </svg>
