@@ -108,24 +108,10 @@ pub(crate) struct CrdtRecords {
     integrate_scan_stamp: u32,
 }
 
-impl Default for CrdtRecords {
-    fn default() -> Self {
-        CrdtRecords {
-            tree: PrepareEffectTree::new(Lengths::default()),
-            record_runs: Vec::new(),
-            record_of_event: Vec::new(),
-            delete_targets: Vec::new(),
-            placeholder_index: Vec::new(),
-            integrate_scan_marks: Vec::new(),
-            integrate_scan_stamp: 0,
-        }
-    }
-}
-
 impl CrdtRecords {
-    /// Clears the records to one placeholder for the current document, `len` characters long, for
-    /// a concurrent range of `events` events.
-    pub fn clear_to_placeholder(&mut self, events: usize, len: u32) {
+    /// Starts the records of a concurrent range of `events` events with one placeholder record,
+    /// for the document as the range began, `len` characters long.
+    pub fn new(events: usize, len: u32) -> Self {
         let placeholder = RecordRun {
             record: PLACEHOLDER,
             len: PLACEHOLDER_LEN,
@@ -134,16 +120,15 @@ impl CrdtRecords {
             prepare_state: INSERTED,
             deleted_in_effect: false,
         };
-        self.tree.reset(placeholder.lengths());
-        self.record_runs.clear();
-        self.record_runs.push(placeholder);
-        self.placeholder_index.clear();
-        self.placeholder_index.resize((len / PLACEHOLDER_INDEX_STRIDE) as usize + 1, 0);
-        self.integrate_scan_marks.clear();
-        self.integrate_scan_stamp = 0;
-        self.record_of_event.clear();
-        self.record_of_event.resize(events, NO_RECORD);
-        self.delete_targets.clear();
+        CrdtRecords {
+            tree: PrepareEffectTree::new(placeholder.lengths()),
+            record_runs: vec![placeholder],
+            record_of_event: vec![NO_RECORD; events],
+            delete_targets: Vec::new(),
+            placeholder_index: vec![0; (len / PLACEHOLDER_INDEX_STRIDE) as usize + 1],
+            integrate_scan_marks: Vec::new(),
+            integrate_scan_stamp: 0,
+        }
     }
 
     // ---------------------------------------------------------------- finding things

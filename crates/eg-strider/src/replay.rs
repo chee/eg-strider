@@ -98,13 +98,6 @@ pub(crate) struct DocumentState {
     pub text: String,
 }
 
-/// Space for merging concurrent ranges, reused across ranges.
-#[derive(Default)]
-struct MergeScratch {
-    records: CrdtRecords,
-    transform: Transform,
-}
-
 /// The history's shape, and what earlier replays of a log worked out, valid while the log has
 /// the same number of events.
 pub(crate) struct ReplayPlan {
@@ -212,7 +205,7 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
         first_new_run,
         in_base: false,
     };
-    let mut scratch = MergeScratch::default();
+    let mut transform = Transform::default();
     // The ranges that have events after the base, and for each the first of those.
     let after = |range: &HistoryRange| Some(events(range.runs())).filter(|events| events.end > base.events).map(|events| events.start.max(base.events));
     for (range, resolved) in plan.ranges.iter().zip(&mut resolved) {
@@ -226,12 +219,12 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
             }
             HistoryRange::Concurrent(concurrent) => {
                 debug_assert_eq!(from, runs.start(first_new_run.max(concurrent.start)), "a base partway through a run of a concurrent range");
-                replay_concurrent_range(log, plan, concurrent, resolved, &mut scratch, &mut transformed)
+                replay_concurrent_range(log, plan, concurrent, resolved, &mut transform, &mut transformed)
             }
         }
     }
     // The text is built without the room that merging took.
-    drop(scratch);
+    drop(transform);
     plan.resolved = resolved;
     plan.room = (transformed.merge_order.len(), transformed.positions.len());
 
@@ -302,10 +295,9 @@ fn replay_concurrent_range(
     plan: &ReplayPlan,
     range: &Range<EventRunIndex>,
     resolved: &mut ResolvedOrigins,
-    scratch: &mut MergeScratch,
+    transform: &mut Transform,
     transformed: &mut TransformedOperations,
 ) {
-    let MergeScratch { records, transform } = scratch;
     // Nothing resolved: the range has not needed the CRDT records so far. See whether it does now.
     if resolved.events == 0 && transform.try_merge(log, log.graph.runs(), &plan.first_op_of_run, range, transformed) {
         return;
@@ -316,7 +308,7 @@ fn replay_concurrent_range(
     // The range's runs that the document already holds, which are its first. The document was
     // no longer when the range began than it is now plus what those events removed.
     let held_until = transformed.first_new_run.clamp(range.start, range.end);
-    records.clear_to_placeholder((end - start) as usize, transformed.len + (runs.start(held_until) - start));
+    let mut records = CrdtRecords::new((end - start) as usize, transformed.len + (runs.start(held_until) - start));
 
     // Runs resolved in full by earlier replays are placed by record. Their events stay in the
     // records' prepare version, which is where the walk of the rest begins.
@@ -374,7 +366,7 @@ fn replay_concurrent_range(
         WalkStep::Apply(run) => {
             transformed.begin(run..run + 1);
             for op in plan.ops(log, &(run..run + 1)) {
-                apply(start, op, records, &goes_before, transformed);
+                apply(start, op, &mut records, &goes_before, transformed);
             }
         }
     });
