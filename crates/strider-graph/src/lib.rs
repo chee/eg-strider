@@ -24,8 +24,6 @@ pub struct CausalGraph {
     seen_prefix_len: Vec<EventIndex>,
     /// Runs that start at a critical version, ascending.
     critical_versions: Vec<EventRunIndex>,
-    /// Scratch: the runs a new event's parents end.
-    parent_runs: Vec<EventRunIndex>,
 }
 
 impl CausalGraph {
@@ -110,10 +108,10 @@ impl CausalGraph {
             return start..end;
         }
 
-        // A parent partway along a run splits it there. Taking them in ascending order keeps
-        // the indexes already in `parent_runs` valid, since a split only moves the runs after it.
-        let mut parent_runs = std::mem::take(&mut self.parent_runs);
-        parent_runs.clear();
+        // The new run's parent runs go straight onto the end of the list of parents, and a parent
+        // partway along a run splits it there. A split renumbers only the runs from the one it
+        // splits on, and the parents come in ascending order and are concurrent, so no two are
+        // in one run: the runs of the parents before stay as they are.
         let first_held = self.first_held_event();
         // Parents from before the graph begins are in every event's history, and name no run.
         for &parent in parents.iter().filter(|&&parent| parent >= first_held) {
@@ -121,18 +119,18 @@ impl CausalGraph {
             if parent + 1 < self.runs.start(run + 1) {
                 self.split_run(run, parent + 1);
             }
-            parent_runs.push(run);
+            self.runs.parents.push(run);
         }
+        let own_parents = *self.runs.parent_start.last().expect("a start for the parents of each run, and one after") as usize..;
         // An event whose parents are the whole frontier has seen everything, and becomes the
         // whole frontier.
         let merges_all = parents == self.frontier;
-        let seen = if merges_all { start } else { parent_runs.iter().map(|&run| self.seen_prefix_len_after(run)).max().unwrap_or(first_held) };
+        let seen =
+            if merges_all { start } else { self.runs.parents[own_parents].iter().map(|&run| self.seen_prefix_len_after(run)).max().unwrap_or(first_held) };
         let new = self.runs.len();
-        self.runs.parents.extend_from_slice(&parent_runs);
         self.runs.parent_start.push(self.runs.parents.len() as u32);
         self.runs.start.push(end);
         self.seen_prefix_len.push(seen);
-        self.parent_runs = parent_runs;
 
         // A version is critical only while every later run has seen all that came before it.
         while self.critical_versions.last().is_some_and(|&run| self.runs.start(run) > seen) {
