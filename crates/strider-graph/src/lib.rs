@@ -123,8 +123,9 @@ impl CausalGraph {
         }
         let own_parents = *self.runs.parent_start.last().expect("a start for the parents of each run, and one after") as usize..;
         // An event whose parents are the whole frontier has seen everything, and becomes the
-        // whole frontier.
-        let merges_all = parents == self.frontier;
+        // whole frontier. Compared one by one: comparing slices calls out to compare memory,
+        // which costs more than the one or two events here.
+        let merges_all = parents.len() == self.frontier.len() && parents.iter().zip(&self.frontier).all(|(parent, event)| parent == event);
         let seen =
             if merges_all { start } else { self.runs.parents[own_parents].iter().map(|&run| self.seen_prefix_len_after(run)).max().unwrap_or(first_held) };
         let new = self.runs.len();
