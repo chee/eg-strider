@@ -1,4 +1,4 @@
-use crate::oplog::{OpIndex, OpKind, OpLog};
+use crate::oplog::{OpLog, OperationKind, OperationRunIndex};
 use crate::replay::Placed;
 use std::ops::Range;
 use strider_graph::{EventRunIndex, EventRuns};
@@ -218,7 +218,7 @@ pub(crate) struct Shifter {
 impl Shifter {
     /// Merges a region by shifting, recording in `document` where its ops go. Returns false,
     /// leaving `document` as it was, if the region needs the CRDT records.
-    pub fn merge(&mut self, log: &OpLog, blocks: &EventRuns, first_op: &[OpIndex], region: &Range<EventRunIndex>, document: &mut Placed) -> bool {
+    pub fn merge(&mut self, log: &OpLog, blocks: &EventRuns, first_op: &[OperationRunIndex], region: &Range<EventRunIndex>, document: &mut Placed) -> bool {
         if region.len() > MAX_BLOCKS {
             return false;
         }
@@ -232,12 +232,12 @@ impl Shifter {
             document.begin(block..block + 1);
             for op in log.ops(first_op[block as usize]..first_op[block as usize + 1], blocks.events(block)) {
                 let at = match op.kind {
-                    OpKind::Ins => clusters.insert(&viewer, op.pos as i64, op.len as i64),
-                    OpKind::Del => clusters.remove(&viewer, op.pos as i64, op.len as i64),
+                    OperationKind::Insert => clusters.insert(&viewer, op.pos as i64, op.len as i64),
+                    OperationKind::Delete => clusters.remove(&viewer, op.pos as i64, op.len as i64),
                 };
                 match (at, op.kind) {
-                    (Some(at), OpKind::Ins) => document.insert(at as u32, op.len),
-                    (Some(at), OpKind::Del) => {
+                    (Some(at), OperationKind::Insert) => document.insert(at as u32, op.len),
+                    (Some(at), OperationKind::Delete) => {
                         document.remove(at as u32, op.len);
                         document.end_delete();
                     }

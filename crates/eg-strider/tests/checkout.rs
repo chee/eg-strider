@@ -1,11 +1,11 @@
-use eg_strider::{Edit, EventIndex, OpLog};
+use eg_strider::{EventIndex, OpLog, Operation};
 
 /// Two replicas rewrite different ends of a shared text at once. Nothing either does lands
 /// among what the other did, so the tracker is never needed.
 #[test]
 fn concurrent_edits_that_keep_apart_are_merged_by_shifting() {
     let mut log = OpLog::new();
-    let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+    let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = [log.add_insert(a, 0, "one two three four").end - 1];
     let x = log.add_delete_at(a, &base, 0..3, true).unwrap(); // " two three four"
     let x = log.add_insert_at(a, &[x.end - 1], 0, "1").unwrap(); // "1 two three four"
@@ -14,26 +14,26 @@ fn concurrent_edits_that_keep_apart_are_merged_by_shifting() {
     let y = log.add_insert_at(b, &[y.end - 1], 14, "4").unwrap(); // "one two three 4!"
     log.add_insert_at(a, &[x.end - 1, y.end - 1], 1, "st").unwrap();
     assert_eq!(log.checkout(), "1st two three 4!");
-    assert_eq!(log.tracked_regions(), 0);
+    assert_eq!(log.ranges_using_crdt_records(), 0);
     assert_eq!(log.checkout(), "1st two three 4!");
 }
 
 #[test]
 fn concurrent_edits_at_one_place_go_to_the_tracker() {
     let mut log = OpLog::new();
-    let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+    let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = [log.add_insert(a, 0, "<>").end - 1];
     log.add_insert_at(a, &base, 1, "x").unwrap();
     log.add_insert_at(b, &base, 1, "y").unwrap();
     assert_eq!(log.checkout(), "<xy>");
-    assert_eq!(log.tracked_regions(), 1);
+    assert_eq!(log.ranges_using_crdt_records(), 1);
     assert_eq!(log.checkout(), "<xy>");
 }
 
 #[test]
 fn sequential_edits() {
     let mut log = OpLog::new();
-    let a = log.get_or_create_agent("a");
+    let a = log.get_or_create_replica("a");
     log.add_insert(a, 0, "hello");
     log.add_insert(a, 5, " world");
     log.add_delete(a, 0..1);
@@ -46,7 +46,7 @@ fn sequential_edits() {
 #[test]
 fn paper_figure_4() {
     let mut log = OpLog::new();
-    let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+    let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = log.add_insert(a, 0, "hi").end - 1;
     log.add_insert_at(a, &[base], 0, "H").unwrap();
     let left = log.add_delete_at(a, &[base + 1], 1..2, true).unwrap().end - 1;
@@ -59,7 +59,7 @@ fn paper_figure_4() {
 #[test]
 fn concurrent_inserts_at_one_position_do_not_interleave() {
     let mut log = OpLog::new();
-    let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+    let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     log.add_insert_at(a, &[], 0, "aaa").unwrap();
     log.add_insert_at(b, &[], 0, "bbb").unwrap();
     assert_eq!(log.checkout(), "aaabbb");
@@ -68,7 +68,7 @@ fn concurrent_inserts_at_one_position_do_not_interleave() {
 #[test]
 fn concurrent_deletes_of_the_same_text() {
     let mut log = OpLog::new();
-    let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+    let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = log.add_insert(a, 0, "abcdef").end - 1;
     let left = log.add_delete_at(a, &[base], 1..4, true).unwrap().end - 1;
     let right = log.add_delete_at(b, &[base], 2..5, false).unwrap().end - 1;
@@ -79,7 +79,7 @@ fn concurrent_deletes_of_the_same_text() {
 #[test]
 fn checking_out_again_and_after_growing_gives_the_same_document() {
     let mut log = OpLog::new();
-    let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+    let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
     let base = log.add_insert(a, 0, "0123456789").end - 1;
     let left = log.add_insert_at(a, &[base], 3, "aa").unwrap().end - 1;
     let right = log.add_delete_at(b, &[base], 2..6, false).unwrap().end - 1;
@@ -91,13 +91,13 @@ fn checking_out_again_and_after_growing_gives_the_same_document() {
     log.add_insert_at(a, &[left], 0, ">").unwrap();
     log.add_insert_at(b, &[merged], 0, "#").unwrap();
     let grown = log.checkout().to_string();
-    log.forget().unwrap();
+    log.clear_replay_cache().unwrap();
     assert_eq!(grown, log.checkout());
 
     // An event concurrent with the whole history leaves no critical version but the first.
     log.add_insert_at(a, &[], 0, "~").unwrap();
     let regrown = log.checkout().to_string();
-    log.forget().unwrap();
+    log.clear_replay_cache().unwrap();
     assert_eq!(regrown, log.checkout());
 }
 
@@ -107,12 +107,12 @@ fn checking_out_again_and_after_growing_gives_the_same_document() {
 #[test]
 fn an_event_made_partway_through_a_run_of_backspaces() {
     let mut log = OpLog::new();
-    let (a, b, c) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"), log.get_or_create_agent("c"));
+    let (a, b, c) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"), log.get_or_create_replica("c"));
     let base = log.add_insert(a, 0, "abcdef").end - 1;
     let backspaces = log.add_delete_at(a, &[base], 2..6, false).unwrap(); // "ab", removing f, e, d, c in turn
     log.add_insert_at(c, &[base], 4, "Y").unwrap(); // "abcdYef"
     assert_eq!(log.checkout(), "abY");
-    assert_eq!(log.tracked_regions(), 1);
+    assert_eq!(log.ranges_using_crdt_records(), 1);
     // After the first two backspaces the text was "abcd".
     log.add_insert_at(b, &[backspaces.start + 1], 3, "X").unwrap(); // "abcXd"
     assert_eq!(log.checkout(), "abXY");
@@ -120,32 +120,32 @@ fn an_event_made_partway_through_a_run_of_backspaces() {
 
 /// A run typed, corrected and typed again: "héllo" loses its end to two backspaces, and what is
 /// typed next is deleted whole. Returns the ops and the text they insert.
-fn corrected_typing() -> (Vec<Edit>, &'static str) {
+fn corrected_typing() -> (Vec<Operation>, &'static str) {
     let ops = vec![
-        Edit::Insert { pos: 0, len: 5 },
-        Edit::Delete { pos: 3, len: 2, backspace: true },
-        Edit::Delete { pos: 2, len: 1, backspace: true },
-        Edit::Insert { pos: 2, len: 3 },
-        Edit::Delete { pos: 2, len: 3, backspace: false },
-        Edit::Insert { pos: 0, len: 1 },
-        Edit::Delete { pos: 1, len: 1, backspace: false },
+        Operation::Insert { pos: 0, len: 5 },
+        Operation::Delete { pos: 3, len: 2, backspace: true },
+        Operation::Delete { pos: 2, len: 1, backspace: true },
+        Operation::Insert { pos: 2, len: 3 },
+        Operation::Delete { pos: 2, len: 3, backspace: false },
+        Operation::Insert { pos: 0, len: 1 },
+        Operation::Delete { pos: 1, len: 1, backspace: false },
     ];
     (ops, "hélloy!🙂A")
 }
 
 /// Appends the same ops one call at a time, each following the one before.
-fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Edit], text: &str) {
+fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Operation], text: &str) {
     let (mut sequence_number, mut rest) = (0, text);
     let mut parents = log.frontier();
     for op in ops {
         let events = match *op {
-            Edit::Insert { pos, len } => {
+            Operation::Insert { pos, len } => {
                 let bytes = rest.char_indices().nth(len as usize).map_or(rest.len(), |(at, _)| at);
                 let (inserted, after) = rest.split_at(bytes);
                 rest = after;
                 log.add_remote_insert(agent, sequence_number, &parents, pos as usize, inserted).unwrap()
             }
-            Edit::Delete { pos, len, backspace } => {
+            Operation::Delete { pos, len, backspace } => {
                 log.add_remote_delete(agent, sequence_number, &parents, pos as usize..(pos + len) as usize, !backspace).unwrap()
             }
         };
@@ -158,7 +158,7 @@ fn one_at_a_time(log: &mut OpLog, agent: u32, ops: &[Edit], text: &str) {
 fn ops_arriving_as_a_run_merge_as_they_do_one_at_a_time() {
     let (ops, text) = corrected_typing();
     let (mut together, mut apart) = (OpLog::new(), OpLog::new());
-    let (a, b) = (together.get_or_create_agent("a"), apart.get_or_create_agent("a"));
+    let (a, b) = (together.get_or_create_replica("a"), apart.get_or_create_replica("a"));
     let events = together.add_remote_ops(a, 0, &[], &ops, text).unwrap();
     one_at_a_time(&mut apart, b, &ops, text);
     assert_eq!(events, 0..apart.len() as EventIndex);
@@ -168,7 +168,7 @@ fn ops_arriving_as_a_run_merge_as_they_do_one_at_a_time() {
     // An event made after only part of the first insert puts that insert in a concurrent
     // part of the history, where its corrections are merged like any other deletes.
     for log in [&mut together, &mut apart] {
-        let c = log.get_or_create_agent("c");
+        let c = log.get_or_create_replica("c");
         log.add_insert_at(c, &[2], 1, "<>").unwrap();
     }
     assert_eq!(together.checkout(), apart.checkout());
@@ -179,12 +179,12 @@ fn a_run_that_follows_earlier_typing_is_merged_with_it() {
     let (ops, text) = corrected_typing();
     let (mut together, mut apart) = (OpLog::new(), OpLog::new());
     for log in [&mut together, &mut apart] {
-        let a = log.get_or_create_agent("a");
+        let a = log.get_or_create_replica("a");
         log.add_insert(a, 0, "xyz");
     }
-    let (a, tip) = (together.get_or_create_agent("b"), together.frontier());
+    let (a, tip) = (together.get_or_create_replica("b"), together.frontier());
     together.add_remote_ops(a, 0, &tip, &ops, text).unwrap();
-    let b = apart.get_or_create_agent("b");
+    let b = apart.get_or_create_replica("b");
     one_at_a_time(&mut apart, b, &ops, text);
     assert_eq!(together.checkout(), apart.checkout());
     assert_eq!(together.checkout(), "A\u{e9}xyz");
@@ -198,7 +198,7 @@ fn an_event_from_before_the_last_merge_is_merged_into_it() {
     for (deleting, expected) in [(false, "01x234é🙂é🙂y56789!"), (true, "01xy6789!")] {
         let build = |merge_halfway: bool| {
             let mut log = OpLog::new();
-            let (a, b) = (log.get_or_create_agent("a"), log.get_or_create_agent("b"));
+            let (a, b) = (log.get_or_create_replica("a"), log.get_or_create_replica("b"));
             let start = log.add_insert(a, 0, "0123456789").end - 1;
             let half = |log: &mut OpLog, at: usize| if deleting { log.add_delete(a, 2..4) } else { log.add_insert(a, at, "é🙂") };
             half(&mut log, 5);
@@ -225,14 +225,14 @@ fn an_event_from_before_the_last_merge_is_merged_into_it() {
 fn holding_backspace_is_stored_as_one_delete() {
     let (mut held, mut at_once) = (OpLog::new(), OpLog::new());
     for log in [&mut held, &mut at_once] {
-        let a = log.get_or_create_agent("a");
+        let a = log.get_or_create_replica("a");
         log.add_insert(a, 0, "hello world");
     }
-    let a = held.get_or_create_agent("a");
+    let a = held.get_or_create_replica("a");
     for at in (6..11).rev() {
         held.add_delete(a, at..at + 1);
     }
-    let (a, tip) = (at_once.get_or_create_agent("a"), at_once.frontier());
+    let (a, tip) = (at_once.get_or_create_replica("a"), at_once.frontier());
     at_once.add_delete_at(a, &tip, 6..11, false).unwrap();
     assert_eq!(held.checkout(), "hello ");
     assert_eq!(held.save(), at_once.save());
@@ -243,20 +243,20 @@ fn holding_backspace_is_stored_as_one_delete() {
 /// that trims the insert before it, and one that does not.
 #[test]
 fn holding_backspace_in_a_run_is_stored_as_deletes_made_at_once() {
-    let backspace = |pos: u32, len: u32| Edit::Delete { pos, len, backspace: true };
-    let held = [Edit::Insert { pos: 3, len: 3 }, backspace(5, 1), backspace(4, 1), backspace(3, 1), backspace(2, 1), backspace(1, 1)];
-    let at_once = [Edit::Insert { pos: 3, len: 3 }, backspace(3, 3), backspace(1, 2)];
+    let backspace = |pos: u32, len: u32| Operation::Delete { pos, len, backspace: true };
+    let held = [Operation::Insert { pos: 3, len: 3 }, backspace(5, 1), backspace(4, 1), backspace(3, 1), backspace(2, 1), backspace(1, 1)];
+    let at_once = [Operation::Insert { pos: 3, len: 3 }, backspace(3, 3), backspace(1, 2)];
     let mut logs = [OpLog::new(), OpLog::new(), OpLog::new()];
     for log in &mut logs {
-        let a = log.get_or_create_agent("a");
+        let a = log.get_or_create_replica("a");
         log.add_insert(a, 0, "xyz");
     }
     let [run, apart, made_at_once] = &mut logs;
-    let (b, tip) = (run.get_or_create_agent("b"), run.frontier());
+    let (b, tip) = (run.get_or_create_replica("b"), run.frontier());
     run.add_remote_ops(b, 0, &tip, &held, "abc").unwrap();
-    let b = apart.get_or_create_agent("b");
+    let b = apart.get_or_create_replica("b");
     one_at_a_time(apart, b, &held, "abc");
-    let b = made_at_once.get_or_create_agent("b");
+    let b = made_at_once.get_or_create_replica("b");
     made_at_once.add_remote_ops(b, 0, &tip, &at_once, "abc").unwrap();
     assert_eq!(run.checkout(), "x");
     assert_eq!(apart.checkout(), "x");

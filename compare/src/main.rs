@@ -466,7 +466,7 @@ fn strider_turns(loaded: &Loaded) -> Turns<'_> {
             let merged = log.checkout();
             let merge_ms = since(t);
             let mut same = merged == expected;
-            let typist = log.get_or_create_agent("typist");
+            let typist = log.get_or_create_replica("typist");
             let t = Instant::now();
             log.add_insert(typist, expected_chars, "!");
             let merged = log.checkout().len();
@@ -627,7 +627,7 @@ fn main() {
                 log
             };
             let (ms, mut log) = median_of(reps, reopen, |mut log| {
-                let typist = log.get_or_create_agent("typist");
+                let typist = log.get_or_create_replica("typist");
                 match back {
                     None => log.add_insert(typist, 0, "!"),
                     Some(back) => log.add_insert_at(typist, &[(log.len() - 1 - back.min(log.len() - 1)) as EventIndex], 0, "!").unwrap(),
@@ -637,9 +637,9 @@ fn main() {
             });
             // Merged from nothing, the history with that edit comes to the same text.
             let merged = log.checkout().to_string();
-            log.forget().unwrap();
+            log.clear_replay_cache().unwrap();
             same &= log.checkout() == merged;
-            (ms, log.unread())
+            (ms, log.unread_events())
         });
         afterwards.push(format!("{name:6} {}", then.map(|(ms, _)| format!("{ms:>16.2} ms")).join(" ")));
 

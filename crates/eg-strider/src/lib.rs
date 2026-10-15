@@ -3,5 +3,5 @@ mod oplog;
 mod replay;
 mod shift;
 
-pub use oplog::{AgentId, Edit, Malformed, OpLog, SequenceNumber};
+pub use oplog::{Malformed, OpLog, Operation, ReplicaId, SequenceNumber};
 pub use strider_graph::EventIndex;

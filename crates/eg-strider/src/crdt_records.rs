@@ -1,4 +1,4 @@
-use crate::oplog::OpKind;
+use crate::oplog::OperationKind;
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::EventIndex;
@@ -552,22 +552,22 @@ impl CrdtRecords {
     // ---------------------------------------------------------------- moving the prepare version
 
     /// Takes events of the range, all inserts or all deletes, out of the prepare version.
-    pub fn retreat(&mut self, kind: OpKind, events: Range<EventIndex>) {
+    pub fn retreat(&mut self, kind: OperationKind, events: Range<EventIndex>) {
         self.shift(kind, events, 1u32.wrapping_neg());
     }
 
     /// Puts events of the range, all inserts or all deletes, back into the prepare version.
-    pub fn advance(&mut self, kind: OpKind, events: Range<EventIndex>) {
+    pub fn advance(&mut self, kind: OperationKind, events: Range<EventIndex>) {
         self.shift(kind, events, 1);
     }
 
     /// Moves events of the range into or out of the prepare version, run by run.
-    fn shift(&mut self, kind: OpKind, events: Range<EventIndex>, delta: u32) {
+    fn shift(&mut self, kind: OperationKind, events: Range<EventIndex>, delta: u32) {
         let mut event = events.start;
         while event < events.end {
             match kind {
                 // Every run, or part of one, that these events created.
-                OpKind::Ins => {
+                OperationKind::Insert => {
                     let id = self.record_of_event[event as usize];
                     let run = &self.record_runs[id as usize];
                     let (offset, end) = (event - run.record, events.end.min(run.record + run.len));
@@ -575,7 +575,7 @@ impl CrdtRecords {
                     self.shift_record_run(at, delta);
                     event = end;
                 }
-                OpKind::Del => {
+                OperationKind::Delete => {
                     let DeleteTargets { len: n, mut record, .. } = self.targets_of(event, events.end);
                     let stop = record + n;
                     while record < stop {

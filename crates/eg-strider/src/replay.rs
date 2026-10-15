@@ -1,5 +1,5 @@
 use crate::crdt_records::{CrdtRecords, DeleteTargets, RecordId};
-use crate::oplog::{ByteRange, OpIndex, OpKind, OpLog, OpSlice};
+use crate::oplog::{ByteRange, OpLog, OperationKind, OperationRunIndex, OperationRunSlice};
 use crate::shift::Shifter;
 use std::ops::Range;
 use strider_graph::{walk, EventIndex, EventRunIndex, HistoryRange, WalkScratch, WalkStep};
@@ -117,7 +117,7 @@ struct Plan {
     starts: Vec<EventIndex>,
     segments: Vec<HistoryRange>,
     /// Per block, the op holding its first event; then the number of ops.
-    first_op: Vec<OpIndex>,
+    first_op: Vec<OperationRunIndex>,
     /// Per segment, what its starting critical version keeps: nothing unless it is a region
     /// that went through the CRDT records.
     kept: Vec<Kept>,
@@ -151,18 +151,18 @@ impl Plan {
 
     /// Iterates over a stretch's ops, cutting any that run past either end.
     #[inline]
-    fn ops<'a>(&self, log: &'a OpLog, stretch: &Range<EventRunIndex>) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
+    fn ops<'a>(&self, log: &'a OpLog, stretch: &Range<EventRunIndex>) -> impl DoubleEndedIterator<Item = OperationRunSlice> + 'a {
         self.ops_from(log, stretch, log.graph.runs().start(stretch.start))
     }
 
     /// Iterates over a stretch's ops from event `from`, which is in it.
     #[inline]
-    fn ops_from<'a>(&self, log: &'a OpLog, stretch: &Range<EventRunIndex>, from: EventIndex) -> impl DoubleEndedIterator<Item = OpSlice> + 'a {
+    fn ops_from<'a>(&self, log: &'a OpLog, stretch: &Range<EventRunIndex>, from: EventIndex) -> impl DoubleEndedIterator<Item = OperationRunSlice> + 'a {
         log.ops(self.op_at(log, stretch, from)..self.first_op[stretch.end as usize], from..log.graph.runs().start(stretch.end))
     }
 
     /// Returns the op holding event `from` of a stretch.
-    fn op_at(&self, log: &OpLog, stretch: &Range<EventRunIndex>, from: EventIndex) -> OpIndex {
+    fn op_at(&self, log: &OpLog, stretch: &Range<EventRunIndex>, from: EventIndex) -> OperationRunIndex {
         if from == log.graph.runs().start(stretch.start) {
             self.first_op[stretch.start as usize]
         } else {
@@ -171,15 +171,15 @@ impl Plan {
     }
 
     /// Counts the regions that have been through the CRDT records.
-    fn tracked_regions(&self) -> usize {
+    fn ranges_using_crdt_records(&self) -> usize {
         self.kept.iter().filter(|kept| kept.events > 0).count()
     }
 }
 
 impl Memo {
     /// Returns how many regions the last checkout could not merge by shifting alone.
-    pub(crate) fn tracked_regions(&self) -> usize {
-        self.plan.as_ref().map_or(0, Plan::tracked_regions)
+    pub(crate) fn ranges_using_crdt_records(&self) -> usize {
+        self.plan.as_ref().map_or(0, Plan::ranges_using_crdt_records)
     }
 
     /// Notes that the log's blocks changed though its events did not.
@@ -237,12 +237,12 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
     memo.room = (document.order.len(), document.at.len());
 
     // Backwards: take every edit back, starting from the final document.
-    let mut text = PieceTable::new(document.len, log.content());
+    let mut text = PieceTable::new(document.len, log.inserted_text());
     let bytes = |(start, end): ByteRange| start as usize..end as usize;
     let mut order = document.order.iter().rev().peekable();
     let mut places = document.at.iter().rev().copied();
     let mut place = || places.next().expect("a place for every op of a region");
-    let mut trims: Vec<OpSlice> = Vec::new();
+    let mut trimming_deletes: Vec<OperationRunSlice> = Vec::new();
     for segment in plan.segments.iter().rev() {
         let Some(from) = after(segment) else { break };
         match segment {
@@ -250,35 +250,37 @@ pub(crate) fn checkout(log: &OpLog, memo: &mut Memo, base: &Base) -> (String, u3
                 for op in plan.ops_from(log, linear, from).rev() {
                     // A delete that takes back the end of the insert before it is met first.
                     // The two together are a shorter insert, so it only has to be counted.
-                    if op.trims {
-                        trims.push(op);
+                    if op.deletes_end_of_previous_insert {
+                        trimming_deletes.push(op);
                         continue;
                     }
-                    let cut = trims.iter().map(|trim| trim.len).sum::<u32>();
-                    let folds =
-                        cut > 0 && op.kind == OpKind::Ins && cut <= op.len && trims.last().is_some_and(|first| first.first_event == op.first_event + op.len);
+                    let cut = trimming_deletes.iter().map(|delete| delete.len).sum::<u32>();
+                    let folds = cut > 0
+                        && op.kind == OperationKind::Insert
+                        && cut <= op.len
+                        && trimming_deletes.last().is_some_and(|first| first.first_event == op.first_event + op.len);
                     if cut > 0 && !folds {
                         // Not enough of the insert is here: this stretch begins partway
                         // through it.
-                        trims.drain(..).for_each(|trim| text.undo_remove(trim.pos, trim.len));
+                        trimming_deletes.drain(..).for_each(|delete| text.undo_remove(delete.pos, delete.len));
                     }
                     match op.kind {
-                        OpKind::Ins if folds => {
+                        OperationKind::Insert if folds => {
                             text.undo_insert(op.pos, bytes(log.trimmed(op.text, op.len, cut)), op.len - cut);
-                            trims.clear();
+                            trimming_deletes.clear();
                         }
-                        OpKind::Ins => text.undo_insert(op.pos, bytes(op.text), op.len),
-                        OpKind::Del => text.undo_remove(op.pos, op.len),
+                        OperationKind::Insert => text.undo_insert(op.pos, bytes(op.text), op.len),
+                        OperationKind::Delete => text.undo_remove(op.pos, op.len),
                     }
                 }
-                trims.drain(..).for_each(|trim| text.undo_remove(trim.pos, trim.len));
+                trimming_deletes.drain(..).for_each(|delete| text.undo_remove(delete.pos, delete.len));
             }
             HistoryRange::Concurrent(region) => {
                 while let Some(stretch) = order.next_if(|stretch| stretch.start >= region.start) {
                     for op in plan.ops(log, stretch).rev() {
                         match op.kind {
-                            OpKind::Ins => text.undo_insert(place(), bytes(op.text), op.len),
-                            OpKind::Del => {
+                            OperationKind::Insert => text.undo_insert(place(), bytes(op.text), op.len),
+                            OperationKind::Delete => {
                                 for _ in 0..place() {
                                     let (len, pos) = (place(), place());
                                     text.undo_remove(pos, len);
@@ -325,12 +327,12 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
         for op in plan.ops(log, &stretch) {
             let event = op.first_event - start;
             match op.kind {
-                OpKind::Ins => {
+                OperationKind::Insert => {
                     let (left, right) = (next(), next());
                     let pos = records.insert_with_known_origins(event, op.len, left, right, goes_before);
                     document.insert(pos, op.len);
                 }
-                OpKind::Del => {
+                OperationKind::Delete => {
                     let mut done = 0;
                     while done < op.len {
                         let (first, stretch) = (next(), next());
@@ -377,8 +379,8 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
     for op in plan.ops(log, region) {
         let event = op.first_event - start;
         match op.kind {
-            OpKind::Ins => kept.resolved.extend(records.origins_of(event)),
-            OpKind::Del => {
+            OperationKind::Insert => kept.resolved.extend(records.origins_of(event)),
+            OperationKind::Delete => {
                 let mut done = 0;
                 while done < op.len {
                     let targets = records.targets_of(event + done, event + op.len);
@@ -392,14 +394,14 @@ fn merge_region(log: &OpLog, plan: &Plan, region: &Range<EventRunIndex>, kept: &
 }
 
 /// Merges one op at the CRDT records' prepare version.
-fn walk_op(start: EventIndex, op: OpSlice, records: &mut CrdtRecords, goes_before: &impl Fn(EventIndex, EventIndex) -> bool, document: &mut Placed) {
+fn walk_op(start: EventIndex, op: OperationRunSlice, records: &mut CrdtRecords, goes_before: &impl Fn(EventIndex, EventIndex) -> bool, document: &mut Placed) {
     let event = op.first_event - start;
     match op.kind {
-        OpKind::Ins => {
+        OperationKind::Insert => {
             let pos = records.insert(event, op.len, op.pos, goes_before);
             document.insert(pos, op.len);
         }
-        OpKind::Del => {
+        OperationKind::Delete => {
             records.delete(event, op.pos, op.len, op.forward, |pos, len| document.remove(pos, len));
             document.end_delete();
         }

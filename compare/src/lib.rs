@@ -2,19 +2,19 @@ pub mod replicas;
 
 use diamond_types::list::operation::{ListOpKind, TextOperation};
 use diamond_types::list::ListOpLog;
-use eg_strider::{Edit, EventIndex, OpLog, SequenceNumber};
+use eg_strider::{EventIndex, OpLog, Operation, SequenceNumber};
 use std::ops::Range;
 
 /// A history with its ops in memory, as one peer would hand it to another, for testing
 /// eg-strider against diamond-types and measuring every library on the same histories. Each
 /// library gets the ops in the form its calls take: diamond-types its [`TextOperation`]s with
-/// `usize` parents, and eg-strider its [`Edit`]s beside their text, with [`EventIndex`] parents.
-pub struct History<Op = Edit, Parent = EventIndex> {
+/// `usize` parents, and eg-strider its [`Operation`]s beside their text, with [`EventIndex`] parents.
+pub struct History<OperationRun = Operation, Parent = EventIndex> {
     pub agents: Vec<String>,
     pub chunks: Vec<Chunk>,
     parents: Vec<Parent>,
-    ops: Vec<Op>,
-    /// The text of every inserting [`Edit`], in order.
+    ops: Vec<OperationRun>,
+    /// The text of every inserting [`Operation`], in order.
     text: String,
 }
 
@@ -32,14 +32,14 @@ pub struct Chunk {
     text: Range<u32>,
 }
 
-impl<Op, Parent> History<Op, Parent> {
+impl<OperationRun, Parent> History<OperationRun, Parent> {
     /// Returns a chunk's parents.
     pub fn parents(&self, chunk: &Chunk) -> &[Parent] {
         &self.parents[chunk.parents.start as usize..chunk.parents.end as usize]
     }
 
     /// Returns a chunk's ops.
-    pub fn ops(&self, chunk: &Chunk) -> &[Op] {
+    pub fn ops(&self, chunk: &Chunk) -> &[OperationRun] {
         &self.ops[chunk.ops.start as usize..chunk.ops.end as usize]
     }
 
@@ -158,8 +158,8 @@ impl History<TextOperation, usize> {
                     assert!(op.kind == ListOpKind::Del || op.loc.fwd, "reversed inserts are not supported");
                     text.push_str(inserted(op));
                     ops.push(match op.kind {
-                        ListOpKind::Ins => Edit::Insert { pos, len },
-                        ListOpKind::Del => Edit::Delete { pos, len, backspace: !op.loc.fwd },
+                        ListOpKind::Ins => Operation::Insert { pos, len },
+                        ListOpKind::Del => Operation::Delete { pos, len, backspace: !op.loc.fwd },
                     });
                 }
                 Chunk { text: start..text.len() as u32, ..chunk.clone() }
@@ -180,7 +180,7 @@ pub fn convert(dt: &ListOpLog) -> OpLog {
 /// Appends the events of `history` that `log` lacks, up to the last whole chunk ending at or
 /// before `limit`.
 pub fn extend(log: &mut OpLog, history: &History, limit: usize) {
-    let agents: Vec<_> = history.agents.iter().map(|name| log.get_or_create_agent(name)).collect();
+    let agents: Vec<_> = history.agents.iter().map(|name| log.get_or_create_replica(name)).collect();
     let have = log.len();
     for chunk in history.chunks.iter().skip_while(|chunk| chunk.events.end <= have).take_while(|chunk| chunk.events.end <= limit) {
         assert_eq!(log.len(), chunk.events.start);
