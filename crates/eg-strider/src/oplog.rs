@@ -2,7 +2,7 @@ mod file;
 
 pub use file::Malformed;
 
-use crate::replay::{self, Base, Memo};
+use crate::replay::{self, DocumentState, ReplayCache};
 use std::cmp::Ordering;
 use std::ops::Range;
 use strider_graph::{CausalGraph, EventIndex};
@@ -152,17 +152,17 @@ pub(crate) struct OperationRunSlice {
 }
 
 /// The operation log: every insert and delete this replica knows of, in the order it learned of
-/// them, with each event's parents, author and position. Consecutive events are run-length
-/// encoded into ops, and inserted text lives in one append-only buffer. A checkout derives the
-/// document in the style of Eg-walker (Gentle and Kleppmann, 2024), building CRDT state only
-/// where history is concurrent; on top of that, regions whose concurrent edits do not touch are
-/// merged by shifting positions, what the CRDT works out is memoised at critical versions, and
-/// the text is built backwards without a rope.
+/// them, with each event's parents, replica and position. Consecutive events are run-length
+/// encoded into operation runs, and inserted text lives in one append-only buffer. A checkout
+/// replays the events in the style of Eg-walker (Gentle and Kleppmann, 2024), building CRDT
+/// records only where history is concurrent; on top of that, concurrent ranges whose operations
+/// do not touch are merged by transforming positions, what the CRDT records work out is cached
+/// at critical versions, and the text is built backwards without a rope.
 ///
 /// Events must be valid as the Eg-walker paper defines it (Definition C.1): each is added once,
 /// its parents are events the log already has, and each position exists in the document at its
-/// parents. The paper's replicas are not Byzantine, so a run of ops also carries exactly the text
-/// its inserts put in. None of this is checked.
+/// parents. The paper's replicas are not Byzantine, so a run of operations also carries exactly
+/// the text its inserts put in. None of this is checked.
 #[derive(Default)]
 pub struct OpLog {
     pub(crate) graph: CausalGraph,
@@ -171,12 +171,12 @@ pub struct OpLog {
     replica_names: Vec<String>,
     next_sequence_numbers: Vec<SequenceNumber>,
     replica_runs: Vec<ReplicaRun>,
-    memo: Memo,
+    replay_cache: ReplayCache,
     /// The document as of some first events, which the next merge starts from.
-    base: Base,
+    base: DocumentState,
     /// The fully merged document, when the log ends with concurrent events. The base stays put
     /// then, since moving it into events still being added would cut them up at every merge.
-    latest: Option<Base>,
+    latest_document_state: Option<DocumentState>,
     /// History from before the first event held here, from a loaded file, still unread.
     packed: Option<file::Packed>,
     /// Scratch for a new event's parents.
@@ -244,29 +244,29 @@ impl OpLog {
     /// last merge where history allows.
     pub fn checkout(&mut self) -> &str {
         let len = self.graph.len();
-        if self.base.events != len && self.latest.as_ref().is_none_or(|latest| latest.events != len) {
+        if self.base.events != len && self.latest_document_state.as_ref().is_none_or(|latest| latest.events != len) {
             // An event made without all that the base holds is concurrent with some of it.
             // The merge then has to tell what the base holds from the rest.
             if self.graph.start_run_at(self.base.events) {
                 self.split_op(self.base.events);
-                self.memo.outdate();
+                self.replay_cache.outdate();
             }
-            let mut memo = std::mem::take(&mut self.memo);
-            let (text, chars) = replay::checkout(self, &mut memo, &self.base);
-            self.memo = memo;
-            let merged = Base { events: len, chars, text };
+            let mut cache = std::mem::take(&mut self.replay_cache);
+            let (text, chars) = replay::replay(self, &mut cache, &self.base);
+            self.replay_cache = cache;
+            let merged = DocumentState { events: len, chars, text };
             if self.graph.frontier().len() == 1 {
-                (self.base, self.latest) = (merged, None);
+                (self.base, self.latest_document_state) = (merged, None);
             } else {
-                self.latest = Some(merged);
+                self.latest_document_state = Some(merged);
             }
         }
         &self.merged().text
     }
 
     /// Returns the document as of the last merge.
-    fn merged(&self) -> &Base {
-        self.latest.as_ref().unwrap_or(&self.base)
+    fn merged(&self) -> &DocumentState {
+        self.latest_document_state.as_ref().unwrap_or(&self.base)
     }
 
     /// Returns how many events of a loaded log's history are still unread.
@@ -274,16 +274,16 @@ impl OpLog {
         self.graph.first_held_event() as usize
     }
 
-    /// Returns how many regions the last checkout could not merge by shifting alone.
+    /// Returns how many concurrent ranges the last checkout could not merge by transforming alone.
     pub fn ranges_using_crdt_records(&self) -> usize {
-        self.memo.ranges_using_crdt_records()
+        self.replay_cache.ranges_using_crdt_records()
     }
 
     /// Drops what earlier checkouts worked out, so that the next one starts from scratch. This
     /// reads back all saved history, which fails if it is damaged.
     pub fn clear_replay_cache(&mut self) -> Result<(), Malformed> {
         self.unpack_from(0)?;
-        (self.memo, self.base, self.latest) = (Memo::default(), Base::default(), None);
+        (self.replay_cache, self.base, self.latest_document_state) = (ReplayCache::default(), DocumentState::default(), None);
         Ok(())
     }
 
