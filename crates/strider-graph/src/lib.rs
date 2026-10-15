@@ -170,9 +170,12 @@ impl CausalGraph {
         insert_and_grow(&mut runs.parent_start, i + 1, later as u32, |_| 1);
         self.seen_prefix_len.insert(i + 1, if self.seen_prefix_len[i] == runs.start[i] { at } else { self.seen_prefix_len[i] });
 
-        let moved = self.critical_versions.partition_point(|&critical| critical <= first);
-        for critical in &mut self.critical_versions[moved..] {
-            *critical += 1;
+        // Splits land near the end, after nearly every critical version, so those to renumber
+        // are found from the end.
+        let mut moved = self.critical_versions.len();
+        while moved > 0 && self.critical_versions[moved - 1] > first {
+            moved -= 1;
+            self.critical_versions[moved] += 1;
         }
         if self.seen_prefix_len[i + 1..].iter().all(|&seen| seen >= at) {
             self.critical_versions.insert(moved, second);
