@@ -6,6 +6,8 @@
 import json
 import math
 import sys
+import textwrap
+from xml.sax.saxutils import escape
 
 # Each system's name, its key in the results, and its colour.
 SYSTEMS = [
@@ -16,7 +18,7 @@ SYSTEMS = [
     ("Automerge", "automerge", "#cc79a7"),
 ]
 ORDER = ["S1", "S2", "S3", "C1", "C2", "A1", "A2"]
-LEFT, RIGHT, ROW, GAP, TOP = 120, 640, 12, 14, 56
+LEFT, RIGHT, ROW, GAP = 120, 640, 12, 14
 TIMES = [(0.01, "0.01 ms"), (0.1, "0.1 ms"), (1, "1 ms"), (10, "10 ms"), (100, "100 ms"), (1000, "1 sec"), (10000, "10 sec"), (100000, "100 sec")]
 
 
@@ -38,8 +40,8 @@ def times(ratio):
     return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
 
 
-def chart(results, kind, title, label, caption, ticks):
-    """Draws one bar per system for each trace, under `title`. The axis runs in decades of the first tick,
+def chart(results, kind, title, definition, label, caption, ticks):
+    """Draws one bar per system for each trace, under `title` and `definition`. The axis runs in decades of the first tick,
     from the one at or below the smallest figure. A system whose text came out unlike
     diamond-types' is starred."""
     by_trace = {r["trace"]: r[kind] for r in results}
@@ -54,25 +56,30 @@ def chart(results, kind, title, label, caption, ticks):
     low, high = math.floor(min(decades)), math.ceil(max(decades))
     x = lambda v: LEFT + (math.log10(v / origin) - low) / (high - low) * (RIGHT - LEFT)
 
-    height = TOP + len(traces) * (len(systems) * ROW + GAP) + 40
+    lines = textwrap.wrap(definition, 135, break_on_hyphens=False)
+    legend = 44 + 13 * len(lines)
+    top = legend + 15
+    height = top + len(traces) * (len(systems) * ROW + GAP) + 40
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {RIGHT + 110} {height}" font-family="Helvetica, Arial, sans-serif">',
         f'<rect width="{RIGHT + 110}" height="{height}" fill="white"/>',
         f'<text x="{LEFT}" y="20" font-size="16" font-weight="bold">{title}</text>',
     ]
+    for i, line in enumerate(lines):
+        out.append(f'<text x="{LEFT}" y="{36 + 13 * i}" font-size="10" fill="#444">{escape(line)}</text>')
     at = LEFT
     for name, _, colour in systems:
-        out.append(f'<rect x="{at}" y="32" width="10" height="10" fill="{colour}"/>')
-        out.append(f'<text x="{at + 14}" y="41" font-size="11">{name}</text>')
+        out.append(f'<rect x="{at}" y="{legend - 9}" width="10" height="10" fill="{colour}"/>')
+        out.append(f'<text x="{at + 14}" y="{legend}" font-size="11">{name}</text>')
         at += 26 + 6.2 * len(name)
     if any(text is False for texts in same.values() for text in texts.values()):
-        out.append(f'<text x="{RIGHT + 100}" y="41" font-size="9" fill="#888" text-anchor="end">* ends with a different text</text>')
+        out.append(f'<text x="{RIGHT + 100}" y="{legend}" font-size="9" fill="#888" text-anchor="end">* ends with a different text</text>')
 
     bottom = height - 40
     for decade in range(low, high):
         for step in range(1, 10):
             at = x(step * 10**decade * origin)
-            out.append(f'<line x1="{at:.1f}" y1="{TOP - 4}" x2="{at:.1f}" y2="{bottom}" stroke="#ddd" stroke-width="{1 if step == 1 else 0.5}"/>')
+            out.append(f'<line x1="{at:.1f}" y1="{top - 4}" x2="{at:.1f}" y2="{bottom}" stroke="#ddd" stroke-width="{1 if step == 1 else 0.5}"/>')
     for value, text in ticks:
         if low <= round(math.log10(value / origin)) <= high:
             out.append(f'<line x1="{x(value):.1f}" y1="{bottom}" x2="{x(value):.1f}" y2="{bottom + 5}" stroke="black"/>')
@@ -80,7 +87,7 @@ def chart(results, kind, title, label, caption, ticks):
     out.append(f'<line x1="{LEFT}" y1="{bottom}" x2="{RIGHT}" y2="{bottom}" stroke="black"/>')
     out.append(f'<text x="{RIGHT}" y="{bottom + 33}" font-size="10" text-anchor="end">{caption} →</text>')
 
-    y = TOP
+    y = top
     for trace in traces:
         middle = y + len(systems) * ROW / 2
         out.append(f'<text x="{LEFT - 62}" y="{middle + 4:.1f}" font-size="14" text-anchor="end">{trace}</text>')
@@ -109,11 +116,31 @@ def main(results_path, out_dir):
     runs = f"Median of {results[0]['reps']} runs. {scale}"
     sizes = [(2**20 * 10**k, text) for k, text in ((-2, "0.01 MiB"), (-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
     charts = {
-        "time-merge": chart(results, "merge_ms", "Merge time", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES),
-        "time-open": chart(results, "open_ms", "Reopen time", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES),
-        "memory-peak": chart(results, "merge_peak", "Peak memory", memory, f"Most memory allocated while merging a history, the ops being merged included. {scale}", sizes),
-        "memory-at-rest": chart(results, "merge_kept", "Ready memory at rest", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes),
-        "file-size": chart(results, "saved", "Snapshot size", memory, f"Size of a saved document. {scale}", sizes),
+        "time-merge": chart(
+            results,
+            "merge_ms",
+            "Merge time",
+            "Appending a history's ops and merging them, until the document is produced. Each library is handed the ops through its own API surface.",
+            milliseconds,
+            runs,
+            TIMES,
+        ),
+        "time-open": chart(
+            results,
+            "open_ms",
+            "Reopen time",
+            "From the bytes of a saved document (using each library's native format) until it is ready for more edits, with all parsing counted. "
+            "eg-strider and Loro leave the history unread until an edit needs it. diamond-types has no saved document that skips the merge, so it is "
+            "given what the paper uses: its history file beside a copy of the text.",
+            milliseconds,
+            runs,
+            TIMES,
+        ),
+        "memory-peak": chart(results, "merge_peak", "Peak memory", "The most heap allocated while merging, the ops being merged included.", memory, scale, sizes),
+        "memory-at-rest": chart(
+            results, "merge_kept", "Ready memory at rest", "What a document holds once a merge from nothing is done, ready for more edits.", memory, scale, sizes
+        ),
+        "file-size": chart(results, "saved", "Snapshot size", "The size of a saved checkpoint of a document.", memory, scale, sizes),
     }
     for name, drawn in charts.items():
         open(f"{out_dir}/{name}.svg", "w").write(drawn)
