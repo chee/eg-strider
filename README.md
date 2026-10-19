@@ -15,28 +15,28 @@ They contain 3 classes of traces:
 
 ![Time to merge a history](compare/figures/time-merge.svg)
 
-**Merge time.** Appending a history's ops and merging them, until the document is
+Appending a history's ops and merging them, until the document is
 produced. Each library is handed the ops through its own API surface.
 
 ![Time to reopen a saved document](compare/figures/time-open.svg)
 
-**Reopen time.** From the bytes of a saved document (using each library's native format) until it is ready for more edits, with
+From the bytes of a saved document (using each library's native format) until it is ready for more edits, with
 all parsing counted. eg-strider and Loro leave the history unread until an edit needs it.
 diamond-types has no saved document that skips the merge, so it is given what the paper
 uses: its history file beside a copy of the text.
 
 ![Peak memory while merging a history](compare/figures/memory-peak.svg)
 
-**Peak memory.** The most heap allocated while merging, the ops being merged included.
+The most heap allocated while merging, the ops being merged included.
 
 ![Memory a document holds at rest](compare/figures/memory-at-rest.svg)
 
-**Ready memory at rest.** What a document holds once a merge from nothing is done, ready for
+What a document holds once a merge from nothing is done, ready for
 more edits.
 
 ![Size of a saved document](compare/figures/file-size.svg)
 
-**Snapshot size.** The size of a saved checkpoint of a document.
+The size of a saved checkpoint of a document.
 
 ### Measurement details
 

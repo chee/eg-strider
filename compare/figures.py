@@ -16,7 +16,7 @@ SYSTEMS = [
     ("Automerge", "automerge", "#cc79a7"),
 ]
 ORDER = ["S1", "S2", "S3", "C1", "C2", "A1", "A2"]
-LEFT, RIGHT, ROW, GAP, TOP = 120, 640, 12, 14, 30
+LEFT, RIGHT, ROW, GAP, TOP = 120, 640, 12, 14, 56
 TIMES = [(0.01, "0.01 ms"), (0.1, "0.1 ms"), (1, "1 ms"), (10, "10 ms"), (100, "100 ms"), (1000, "1 sec"), (10000, "10 sec"), (100000, "100 sec")]
 
 
@@ -38,8 +38,8 @@ def times(ratio):
     return f"{ratio:.2f}" if ratio < 10 else f"{ratio:.1f}" if ratio < 100 else f"{ratio:.0f}"
 
 
-def chart(results, kind, label, caption, ticks):
-    """Draws one bar per system for each trace. The axis runs in decades of the first tick,
+def chart(results, kind, title, label, caption, ticks):
+    """Draws one bar per system for each trace, under `title`. The axis runs in decades of the first tick,
     from the one at or below the smallest figure. A system whose text came out unlike
     diamond-types' is starred."""
     by_trace = {r["trace"]: r[kind] for r in results}
@@ -58,14 +58,15 @@ def chart(results, kind, label, caption, ticks):
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {RIGHT + 110} {height}" font-family="Helvetica, Arial, sans-serif">',
         f'<rect width="{RIGHT + 110}" height="{height}" fill="white"/>',
+        f'<text x="{LEFT}" y="20" font-size="16" font-weight="bold">{title}</text>',
     ]
     at = LEFT
     for name, _, colour in systems:
-        out.append(f'<rect x="{at}" y="6" width="10" height="10" fill="{colour}"/>')
-        out.append(f'<text x="{at + 14}" y="15" font-size="11">{name}</text>')
+        out.append(f'<rect x="{at}" y="32" width="10" height="10" fill="{colour}"/>')
+        out.append(f'<text x="{at + 14}" y="41" font-size="11">{name}</text>')
         at += 26 + 6.2 * len(name)
     if any(text is False for texts in same.values() for text in texts.values()):
-        out.append(f'<text x="{RIGHT + 100}" y="15" font-size="9" fill="#888" text-anchor="end">* ends with a different text</text>')
+        out.append(f'<text x="{RIGHT + 100}" y="41" font-size="9" fill="#888" text-anchor="end">* ends with a different text</text>')
 
     bottom = height - 40
     for decade in range(low, high):
@@ -108,11 +109,11 @@ def main(results_path, out_dir):
     runs = f"Median of {results[0]['reps']} runs. {scale}"
     sizes = [(2**20 * 10**k, text) for k, text in ((-2, "0.01 MiB"), (-1, "0.1 MiB"), (0, "1 MiB"), (1, "10 MiB"), (2, "100 MiB"), (3, "1,000 MiB"), (4, "10,000 MiB"))]
     charts = {
-        "time-merge": chart(results, "merge_ms", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES),
-        "time-open": chart(results, "open_ms", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES),
-        "memory-peak": chart(results, "merge_peak", memory, f"Most memory allocated while merging a history, the ops being merged included. {scale}", sizes),
-        "memory-at-rest": chart(results, "merge_kept", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes),
-        "file-size": chart(results, "saved", memory, f"Size of a saved document. {scale}", sizes),
+        "time-merge": chart(results, "merge_ms", "Merge time", milliseconds, f"Time taken to append a history's ops and merge them. {runs}", TIMES),
+        "time-open": chart(results, "open_ms", "Reopen time", milliseconds, f"Time taken to reopen a saved document from its bytes, ready for more edits. {runs}", TIMES),
+        "memory-peak": chart(results, "merge_peak", "Peak memory", memory, f"Most memory allocated while merging a history, the ops being merged included. {scale}", sizes),
+        "memory-at-rest": chart(results, "merge_kept", "Ready memory at rest", memory, f"Memory a document holds at rest, ready for more edits, once a merge from nothing is done. {scale}", sizes),
+        "file-size": chart(results, "saved", "Snapshot size", memory, f"Size of a saved document. {scale}", sizes),
     }
     for name, drawn in charts.items():
         open(f"{out_dir}/{name}.svg", "w").write(drawn)
