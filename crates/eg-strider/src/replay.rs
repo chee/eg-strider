@@ -100,6 +100,7 @@ pub(crate) struct DocumentState {
 
 /// What replays of a log keep between checkouts while its events stay the same: its ranges, and the
 /// CRDT records' cached results.
+#[derive(Default)]
 pub(crate) struct ReplayPlan {
     /// The number of events the plan was made for.
     events: usize,
@@ -116,29 +117,62 @@ pub(crate) struct ReplayPlan {
 
 impl ReplayPlan {
     /// Analyses the log, taking over what the `previous` plan resolved for concurrent ranges that
-    /// start at the same event.
-    fn new(log: &OpLog, mut previous: Option<ReplayPlan>) -> Self {
-        let room = previous.as_ref().map_or(0, |previous| previous.room);
+    /// start at the same event. Runs before `changed_from` are as they were when `previous` was
+    /// made, unless it was outdated; only what follows them is analysed again.
+    fn new(log: &OpLog, previous: Option<ReplayPlan>, changed_from: EventRunIndex) -> Self {
         let runs = log.graph.runs();
-        let ranges = log.graph.split_at_critical_versions();
-        let range_starts = ranges.iter().map(|range| runs.start(range.runs().start)).collect();
-        let first_op_of_run = log.ops_containing((0..=runs.len()).map(|run| runs.start(run)));
-        let resolved = ranges
-            .iter()
-            .map(|range| match (range, &mut previous) {
-                (HistoryRange::Concurrent(concurrent), Some(previous)) => previous.take_resolved(runs.start(concurrent.start)),
-                _ => ResolvedOrigins::default(),
-            })
-            .collect();
-        ReplayPlan { events: log.len(), range_starts, ranges, first_op_of_run, resolved, room }
+        let Some(previous) = previous else {
+            return ReplayPlan::from_run(log, ReplayPlan::default(), 0, 0);
+        };
+        // The range holding the last run that did not change starts at a critical version that
+        // did not either; everything from it on is cut again.
+        let unchanged = (changed_from as usize).min(previous.first_op_of_run.len() - 1);
+        if previous.events == usize::MAX || unchanged == 0 || previous.ranges.is_empty() {
+            return ReplayPlan::from_run(log, previous, 0, 0);
+        }
+        let kept = previous.ranges.partition_point(|range| range.runs().end < unchanged as EventRunIndex);
+        let from = previous.ranges[kept].runs().start;
+        debug_assert!(runs.start(from) == previous.range_starts[kept], "a range kept that changed");
+        let plan = ReplayPlan::from_run(log, previous, kept, from);
+        if cfg!(debug_assertions) {
+            let fresh = ReplayPlan::from_run(log, ReplayPlan::default(), 0, 0);
+            debug_assert_eq!(plan.ranges, fresh.ranges, "ranges cut again from run {from}");
+            debug_assert_eq!(plan.range_starts, fresh.range_starts);
+            debug_assert_eq!(plan.first_op_of_run, fresh.first_op_of_run, "ops found again from run {from}");
+        }
+        plan
     }
 
-    /// Takes the cached result for the concurrent range starting at `start`, if any.
-    fn take_resolved(&mut self, start: EventIndex) -> ResolvedOrigins {
-        match self.range_starts.binary_search(&start) {
-            Ok(at) => std::mem::take(&mut self.resolved[at]),
-            Err(_) => ResolvedOrigins::default(),
+    /// The plan with `previous`'s first `kept` ranges, which end where run `from` starts, and the
+    /// history from run `from` cut again.
+    fn from_run(log: &OpLog, mut previous: ReplayPlan, kept: usize, from: EventRunIndex) -> Self {
+        let runs = log.graph.runs();
+        let (old_starts, old_resolved) = (previous.range_starts.split_off(kept), previous.resolved.split_off(kept));
+        let (mut ranges, mut range_starts, mut resolved) = (previous.ranges, previous.range_starts, previous.resolved);
+        ranges.truncate(kept);
+        let mut more = log.graph.split_at_critical_versions_from(from);
+        // A linear range is as long as it can be: the one kept last and the first cut again may
+        // be one.
+        if let (Some(HistoryRange::Linear(last)), Some(HistoryRange::Linear(first))) = (ranges.last_mut(), more.first()) {
+            last.end = first.end;
+            more.remove(0);
         }
+        let mut old = (old_starts, old_resolved);
+        for range in &more {
+            let start = runs.start(range.runs().start);
+            range_starts.push(start);
+            resolved.push(match (range, old.0.binary_search(&start)) {
+                (HistoryRange::Concurrent(_), Ok(at)) => std::mem::take(&mut old.1[at]),
+                _ => ResolvedOrigins::default(),
+            });
+        }
+        ranges.extend(more);
+        // Runs before `from` start in the same ops as before.
+        let mut first_op_of_run = previous.first_op_of_run;
+        first_op_of_run.truncate(from as usize);
+        let from_op = first_op_of_run.last().copied().unwrap_or(0);
+        first_op_of_run.extend(log.ops_containing(from_op, (from..=runs.len()).map(|run| runs.start(run))));
+        ReplayPlan { events: log.len(), range_starts, ranges, first_op_of_run, resolved, room: previous.room }
     }
 
     /// Iterates over the operations of a range of runs, cutting any that run past either end.
@@ -179,10 +213,10 @@ impl ReplayPlan {
 /// with the CRDT records, whose result `plan` caches. The text is then built by undoing every
 /// operation last to first. If `base` ends inside a concurrent range, an event run and an operation
 /// run must start there.
-pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &DocumentState) -> (String, u32) {
+pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &DocumentState, changed_from: EventRunIndex) -> (String, u32) {
     // The log only ever grows, so the same length means the same events.
     if plan.as_ref().is_none_or(|plan| plan.events != log.len()) {
-        *plan = Some(ReplayPlan::new(log, plan.take()));
+        *plan = Some(ReplayPlan::new(log, plan.take(), changed_from));
     }
     let plan = plan.as_mut().expect("a plan was just made");
     let mut resolved = std::mem::take(&mut plan.resolved);
@@ -193,9 +227,11 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
     let events = |run_range: &Range<EventRunIndex>| runs.start(run_range.start)..runs.start(run_range.end);
     debug_assert!((log.graph.first_held_event()..log.graph.len()).contains(&base.events), "a base the log does not reach back to");
     let first_new_run = runs.containing(base.events);
+    // The ranges before the one holding the base have nothing to replay.
+    let first_range = plan.range_starts.partition_point(|&start| start <= base.events).saturating_sub(1);
     // Each run of a concurrent range after the base is begun at most once, so that is room
     // enough for the merge order.
-    let concurrent_runs = plan.ranges.iter().map(|range| match range {
+    let concurrent_runs = plan.ranges[first_range..].iter().map(|range| match range {
         HistoryRange::Concurrent(concurrent) => concurrent.end.saturating_sub(concurrent.start.max(first_new_run)) as usize,
         HistoryRange::Linear(_) => 0,
     });
@@ -212,7 +248,7 @@ pub(crate) fn replay(log: &OpLog, plan: &mut Option<ReplayPlan>, base: &Document
     let (mut versions, mut stable, mut edited, mut spare) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     // The ranges that have events after the base, and for each the first of those.
     let after = |range: &HistoryRange| Some(events(range.runs())).filter(|events| events.end > base.events).map(|events| events.start.max(base.events));
-    for (range, resolved) in plan.ranges.iter().zip(&mut resolved) {
+    for (range, resolved) in plan.ranges.iter().zip(&mut resolved).skip(first_range) {
         let Some(from) = after(range) else { continue };
         match range {
             HistoryRange::Linear(linear) => {

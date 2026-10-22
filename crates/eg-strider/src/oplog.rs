@@ -113,8 +113,9 @@ impl OpLog {
                 self.split_op(self.base.events);
                 self.replay_plan.iter_mut().for_each(ReplayPlan::outdate);
             }
+            let changed_from = self.graph.take_changed_from();
             let mut plan = self.replay_plan.take();
-            let (text, chars) = replay::replay(self, &mut plan, &self.base);
+            let (text, chars) = replay::replay(self, &mut plan, &self.base, changed_from);
             self.replay_plan = plan;
             let merged = DocumentState { events: len, chars, text };
             if self.graph.frontier().len() == 1 {
@@ -443,9 +444,9 @@ impl OpLog {
     }
 
     /// For each of the ascending `starts`, the op holding it, or the number of ops past the last
-    /// event.
-    pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = EventIndex>) -> Vec<OperationRunIndex> {
-        let mut op = 0;
+    /// event, searching on from op `from`, which is at or before the first.
+    pub(crate) fn ops_containing(&self, from: OperationRunIndex, starts: impl Iterator<Item = EventIndex>) -> Vec<OperationRunIndex> {
+        let mut op = from as usize;
         starts
             .map(|event| {
                 while self.ops.get(op).is_some_and(|op| op.first_event + op.len() <= event) {
