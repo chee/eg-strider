@@ -211,6 +211,14 @@ impl OpLog {
         text: &str,
     ) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
+        // One op holds all the text, so there is nothing in it to find: it is appended as it is.
+        if let [op] = ops {
+            let (kind, backward, pos, len) = match *op {
+                Operation::Insert { pos, len } => (OperationKind::Insert, false, pos, len),
+                Operation::Delete { pos, len, backward } => (OperationKind::Delete, backward, pos, len),
+            };
+            return Ok(self.append_events(replica, Some(sequence_number), Some(parents), kind, backward, pos as usize, len as usize, text));
+        }
         let event = self.graph.len();
         let total = self.append_operations(event, parents, ops, text);
         if total == 0 {
