@@ -36,32 +36,33 @@ They contain 3 classes of traces:
 
 ## Improvements
 
-We attribute most of the improvements here to choice of data structures
-and what kind of bookkeeping to keep up to date.
+Where the history is linear, Eg-walker applies its edits one after another, with no CRDT.
+Most of eg-strider's gains come from making that sequential work faster, making more of
+the merge sequential, and skipping work that is already done or not yet needed.
 
-- **OT before CRDT for concurrent edits.** Eg-walker materializes its CRDT wherever the
-  history is concurrent. eg-strider first tries to shift each edit past the concurrent
-  edits before it, the way OT would, which only needs to track the few places those edits
-  touched. It falls back to the CRDT when concurrent edits land in the same place, which
-  is rare when people type in different parts of a document, or when a concurrent part of
-  the history is very large.
-- **A piece table instead of a rope.** A rope keeps the text readable after every single
-  edit. When merging history, especially if the number of edits to merge is large, we
-  benefit from turning it into a bulk operation and only converting back to text at the
-  very end. The piece table only tracks where each stretch of the document ends up in the
-  final text, which improves on the metadata overhead and cache locality of a rope.
-- **Incremental planning.** Eg-walker works out which parts of the history are linear or
-  concurrent, and builds a plan for the merge at the start of every replay.
-  eg-strider keeps the split into linear and concurrent parts up to date as events are
-  appended, so a replay starts from it and only has to look inside the concurrent parts.
-  The cost moves to when events are appended, which the merge time counts.
-- **Opening without reading the history.** A saved document holds its text, and its
-  history in compressed blocks that each start at a critical version. Opening reads the
-  text. An edit made at an older version reads the blocks back to that version and is
-  merged into the text already there, instead of replaying from the start.
-- **O(1) lookup of CRDT records.** Eg-walker finds the record for an event by searching a
-  B-tree, which is O(log n) on every retreat and advance. Events in a concurrent part are
-  numbered consecutively, so eg-strider indexes a flat array instead.
+- **Faster sequential work: a piece table instead of a rope.** A rope keeps the text
+  readable after every single edit. When merging history, especially if the number of
+  edits to merge is large, we benefit from turning it into a bulk operation and only
+  converting back to text at the very end. The piece table goes through the edits last to
+  first and only tracks where each stretch of the document ends up in the final text, so
+  text that a later edit deletes is never copied. This also improves on the metadata
+  overhead and cache locality of a rope.
+- **More sequential work: OT before CRDT for concurrent edits.** Eg-walker materializes
+  its CRDT wherever the history is concurrent. eg-strider first tries to shift each edit
+  past the concurrent edits before it, the way OT would, which only needs to track the
+  spans of the document those edits touched. It falls back to the CRDT when concurrent
+  edits land in the same span, which is rare when people type in different parts of a
+  document, or when a concurrent part of the history is very large. Edits that shift are
+  then applied one after another, like those of a linear part.
+- **Saving work: incremental planning and lazy history.** Eg-walker works out which parts
+  of the history are linear or concurrent, and builds a plan for the merge at the start
+  of every replay. eg-strider keeps that split up to date as events are appended, which
+  for most events means extending the last run. When more events arrive, the plan is
+  rebuilt only from the first part they changed, and the CRDT's results for the parts
+  before it are kept. Opening a saved document reads only its text. The history stays in
+  compressed blocks cut at critical versions, and an edit made at an older version reads
+  them back only to that version, merging into the text already there instead of
+  replaying from the start.
 
 ## Caveats
 
