@@ -18,6 +18,9 @@ pub struct PieceTable<'a> {
     non_ascii_pages: Vec<Option<u32>>,
     /// The final text's non-ASCII characters, by position within their page.
     non_ascii_chars: Vec<char>,
+    /// How many characters of the final text are still to be placed. Once none are, everything
+    /// left is deleted later, and undoing only counts lengths.
+    unplaced: u32,
 }
 
 /// Stands for a non-ASCII character in `final_text_bytes`.
@@ -88,6 +91,7 @@ impl<'a> PieceTable<'a> {
             final_text_bytes: vec![0; len as usize + SHORT],
             non_ascii_pages: Vec::new(),
             non_ascii_chars: Vec::new(),
+            unplaced: len,
         }
     }
 
@@ -102,15 +106,22 @@ impl<'a> PieceTable<'a> {
             return;
         }
         self.len -= len;
-        let (final_text_bytes, pages, chars) = (&mut self.final_text_bytes, &mut self.non_ascii_pages, &mut self.non_ascii_chars);
+        if self.unplaced == 0 {
+            return;
+        }
+        let (final_text_bytes, pages, chars, unplaced) = (&mut self.final_text_bytes, &mut self.non_ascii_pages, &mut self.non_ascii_chars, &mut self.unplaced);
         if text.len() == len as usize {
             // All ASCII: characters and bytes coincide.
-            self.pieces.remove(pos, len, |at, skip, n| copy(final_text_bytes, at as usize, inserted_text, start + skip as usize, n as usize));
+            self.pieces.remove(pos, len, |at, skip, n| {
+                *unplaced -= n;
+                copy(final_text_bytes, at as usize, inserted_text, start + skip as usize, n as usize)
+            });
         } else {
             // The survivors come in the order they have in `text`, so one pass over it
             // reaches them all. `passed` counts the characters gone by.
             let (mut rest, mut passed) = (text.chars(), 0);
             self.pieces.remove(pos, len, |at, skip, n| {
+                *unplaced -= n;
                 if skip > passed {
                     rest.nth((skip - passed - 1) as usize);
                 }
@@ -129,11 +140,20 @@ impl<'a> PieceTable<'a> {
             return;
         }
         self.len = self.len.checked_add(len).expect("document too long");
-        self.pieces.insert_deleted(pos, len);
+        if self.unplaced > 0 {
+            self.pieces.insert_deleted(pos, len);
+        }
     }
 
     /// Undoes all remaining operations at once, given the text they produced.
     pub fn undo_rest(&mut self, text: &str) {
+        if self.unplaced == 0 {
+            // Every piece left is deleted later, so none of this text survives.
+            assert!(text.len() == self.len as usize || text.chars().count() == self.len as usize, "the text is not the document as it stands");
+            self.len = 0;
+            return;
+        }
+        self.unplaced = 0;
         let (final_text_bytes, pages, chars) = (&mut self.final_text_bytes, &mut self.non_ascii_pages, &mut self.non_ascii_chars);
         if text.len() == self.len as usize {
             // All ASCII: characters and bytes coincide.
