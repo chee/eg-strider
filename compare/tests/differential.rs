@@ -123,6 +123,35 @@ fn check(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseErr
     Ok(())
 }
 
+/// Checks out after every transaction as a log grows, against a log built to the same point and
+/// merged from nothing, so that each merge carries on from the plan the one before made.
+fn check_each_step(replicas: usize, steps: &[Step], apart: bool) -> Result<(), TestCaseError> {
+    let dt = build(replicas, steps, apart);
+    let history = compare::History::of(&dt).edits();
+    let mut growing = OpLog::new();
+    for txn in &history.txns {
+        let limit = txn.events.end;
+        compare::extend(&mut growing, &history, limit);
+        let mut fresh = OpLog::new();
+        compare::extend(&mut fresh, &history, limit);
+        prop_assert_eq!(growing.checkout(), fresh.checkout(), "after event {}", limit);
+    }
+    Ok(())
+}
+
+proptest! {
+    /// Merging after every transaction.
+    #[test]
+    fn checked_out_after_every_transaction(steps in history(60, 10)) {
+        check_each_step(3, &steps, false)?;
+    }
+
+    #[test]
+    fn checked_out_after_every_transaction_working_apart(steps in history(80, 25)) {
+        check_each_step(3, &steps, true)?;
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 

@@ -21,6 +21,9 @@ pub struct CausalGraph {
     seen_prefix_len: Vec<EventIndex>,
     /// Runs that start at a critical version, ascending.
     critical_versions: Vec<EventRunIndex>,
+    /// The first run that may have changed since [`take_changed_from`](Self::take_changed_from):
+    /// its events, its parents, its number or whether it starts at a critical version.
+    changed_from: EventRunIndex,
 }
 
 impl CausalGraph {
@@ -95,6 +98,7 @@ impl CausalGraph {
         if self.extends_last_event(parents) {
             // Nothing else can have the last event as a parent yet, so its run just grows, and
             // the run's new end replaces the last event of the frontier.
+            self.changed_from = self.changed_from.min(self.runs.len() - 1);
             *self.runs.start.last_mut().expect("a run to extend") = end;
             *self.frontier.last_mut().expect("the last event is in the frontier") = end - 1;
             return start..end;
@@ -126,8 +130,10 @@ impl CausalGraph {
         self.seen_prefix_len.push(seen);
 
         // A version is critical only while every later run has seen all that came before it.
-        while self.critical_versions.last().is_some_and(|&run| self.runs.start(run) > seen) {
+        self.changed_from = self.changed_from.min(new);
+        while let Some(&run) = self.critical_versions.last().filter(|&&run| self.runs.start(run) > seen) {
             self.critical_versions.pop();
+            self.changed_from = self.changed_from.min(run);
         }
         if seen == start {
             self.critical_versions.push(new);
@@ -154,6 +160,7 @@ impl CausalGraph {
 
     /// Splits a run so that a new one starts at `at`.
     fn split_run(&mut self, run: EventRunIndex, at: EventIndex) {
+        self.changed_from = self.changed_from.min(run);
         let runs = &mut self.runs;
         let (first, second, i) = (run, run + 1, run as usize);
         // Later runs named this one for its last event, which the second part now has; and
@@ -176,13 +183,25 @@ impl CausalGraph {
         }
     }
 
+    /// The first run that may have changed since this was last called; the number of runs if none.
+    pub fn take_changed_from(&mut self) -> EventRunIndex {
+        std::mem::replace(&mut self.changed_from, self.runs.len())
+    }
+
     /// Cuts the history at its critical versions, joining consecutive linear runs into one range.
     pub fn split_at_critical_versions(&self) -> Vec<HistoryRange> {
+        self.split_at_critical_versions_from(0)
+    }
+
+    /// Cuts the history from run `from`, which starts at a critical version, as
+    /// [`split_at_critical_versions`](Self::split_at_critical_versions) does.
+    pub fn split_at_critical_versions_from(&self, from: EventRunIndex) -> Vec<HistoryRange> {
         let runs = self.runs.len();
         let critical = &self.critical_versions;
         let next = |i: usize| critical.get(i + 1).copied().unwrap_or(runs);
         let mut ranges = Vec::new();
-        let mut i = 0;
+        let mut i = critical.partition_point(|&run| run < from);
+        debug_assert!(runs == 0 || critical.get(i) == Some(&from), "cutting from a run that does not start at a critical version");
         while i < critical.len() {
             let from = critical[i];
             if next(i) == from + 1 {

@@ -113,8 +113,9 @@ impl OpLog {
                 self.split_op(self.base.events);
                 self.replay_plan.iter_mut().for_each(ReplayPlan::outdate);
             }
+            let changed_from = self.graph.take_changed_from();
             let mut plan = self.replay_plan.take();
-            let (text, chars) = replay::replay(self, &mut plan, &self.base);
+            let (text, chars) = replay::replay(self, &mut plan, &self.base, changed_from);
             self.replay_plan = plan;
             let merged = DocumentState { events: len, chars, text };
             if self.graph.frontier().len() == 1 {
@@ -210,6 +211,14 @@ impl OpLog {
         text: &str,
     ) -> Result<Range<EventIndex>, Malformed> {
         self.unpack_needed_history(parents)?;
+        // One op holds all the text, so there is nothing in it to find: it is appended as it is.
+        if let [op] = ops {
+            let (kind, backward, pos, len) = match *op {
+                Operation::Insert { pos, len } => (OperationKind::Insert, false, pos, len),
+                Operation::Delete { pos, len, backward } => (OperationKind::Delete, backward, pos, len),
+            };
+            return Ok(self.append_events(replica, Some(sequence_number), Some(parents), kind, backward, pos as usize, len as usize, text));
+        }
         let event = self.graph.len();
         let total = self.append_operations(event, parents, ops, text);
         if total == 0 {
@@ -443,11 +452,15 @@ impl OpLog {
     }
 
     /// For each of the ascending `starts`, the op holding it, or the number of ops past the last
-    /// event.
-    pub(crate) fn ops_containing(&self, starts: impl Iterator<Item = EventIndex>) -> Vec<OperationRunIndex> {
-        let mut op = 0;
+    /// event, searching on from op `from`, which is at or before the first.
+    pub(crate) fn ops_containing(&self, from: OperationRunIndex, starts: impl Iterator<Item = EventIndex>) -> Vec<OperationRunIndex> {
+        let mut op = from as usize;
         starts
             .map(|event| {
+                // Past the last event: no op holds it, and none need be passed to know that.
+                if event == self.graph.len() {
+                    return self.ops.len() as OperationRunIndex;
+                }
                 while self.ops.get(op).is_some_and(|op| op.first_event + op.len() <= event) {
                     op += 1;
                 }
