@@ -36,24 +36,23 @@ They contain 3 classes of traces:
 
 ## Improvements
 
-Where the history is linear, Eg-walker applies its edits one after another, with no CRDT.
-Most of eg-strider's gains come from making that sequential work faster, making more of
-the merge sequential, and skipping work that is already done or not yet needed.
+Where the history is linear, Eg-walker applies its edits one after another, with no CRDT,
+so applying text operations is where most of a merge's time goes. Most of eg-strider's
+gains come from making those text operations faster, taking the cheap path for as much of
+the merge as possible, and skipping work that is already done or not yet needed.
 
-- **Faster sequential work: a piece table instead of a rope.** A rope keeps the text
+- **Faster text operations: a piece table instead of a rope.** A rope keeps the text
   readable after every single edit. When merging history, especially if the number of
   edits to merge is large, we benefit from turning it into a bulk operation and only
   converting back to text at the very end. The piece table goes through the edits last to
   first and only tracks where each stretch of the document ends up in the final text, so
   text that a later edit deletes is never copied. This also improves on the metadata
   overhead and cache locality of a rope.
-- **More sequential work: OT before CRDT for concurrent edits.** Eg-walker materializes
-  its CRDT wherever the history is concurrent. eg-strider first tries to shift each edit
-  past the concurrent edits before it, the way OT would, which only needs to track the
-  spans of the document those edits touched. It falls back to the CRDT when concurrent
-  edits land in the same span, which is rare when people type in different parts of a
-  document, or when a concurrent part of the history is very large. Edits that shift are
-  then applied one after another, like those of a linear part.
+- **Maximizing cheap work: OT before CRDT for concurrent edits.** Eg-walker materializes
+  its CRDT wherever the history is concurrent. eg-strider first tries to shift the way OT
+  would and only falls back to the CRDT when concurrent edits land in the same span, or
+  when a concurrent part of the history is very large. As this doesn't happen frequently,
+  we can take the faster merge strategy much more often.
 - **Saving work: incremental planning and lazy history.** Eg-walker works out which parts
   of the history are linear or concurrent, and builds a plan for the merge at the start
   of every replay. eg-strider keeps that split up to date as events are appended, which
