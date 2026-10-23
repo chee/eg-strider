@@ -457,6 +457,10 @@ impl OpLog {
         let mut op = from as usize;
         starts
             .map(|event| {
+                // Past the last event: no op holds it, and none need be passed to know that.
+                if event == self.graph.len() {
+                    return self.ops.len() as OperationRunIndex;
+                }
                 while self.ops.get(op).is_some_and(|op| op.first_event + op.len() <= event) {
                     op += 1;
                 }
