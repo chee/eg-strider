@@ -6,7 +6,8 @@
 
 ## Results
 
-Traces are sourced from the JSON versions of the [editing histories published alongside Eg-walker](https://github.com/josephg/egwalker-paper/tree/master/datasets).
+Traces are the [editing histories published alongside Eg-walker](https://github.com/josephg/egwalker-paper/tree/master/datasets),
+read from their diamond-types files, which keep each agent's name for breaking ties.
 
 They contain 3 classes of traces:
 - Sequential text editing traces (S)
@@ -23,16 +24,33 @@ They contain 3 classes of traces:
 
 ![Size of a saved document](compare/figures/file-size.svg)
 
+![Size of a saved document, compressed](compare/figures/file-size-zstd.svg)
+
 ### Measurement details
 
+- Every library starts from bytes in its own format, and every task ends once the text is
+  read, so decoding, merging and reading count the same for all of them.
+  - Merging starts from the library's encoding of the whole history. For eg-strider that is
+    its saved file, with the saved text ignored and the history replayed from nothing. For
+    diamond-types it is its history file, which the paper benchmarked. For Loro it is its
+    exported updates. Yjs and Automerge are CRDTs whose saved document is their history, so
+    their merge is loading it.
+  - Reopening starts from the library's saved document. eg-strider and Loro leave the history
+    unread until an edit needs it. diamond-types has no such document, so it is given what the
+    paper uses: its history file beside a copy of the text.
 - [diamond-types](https://github.com/josephg/diamond-types) is the implementation of
-  Eg-walker that the paper benchmarked. 
-- Yjs is measured through yrs, its Rust port. 
-- Automerge is measured at 0.12. Each trace's Automerge changes are made once with 0.6.1,
-  the last version without quadratic blowup when a replica applies a few changes at a
-  time, which making the concurrent traces requires. 0.12 then applies them all at once.
-- Yjs runs with garbage collection off. 
-- Times are the p50 of 100 runs. 
+  Eg-walker that the paper benchmarked.
+- Yjs is measured through yrs, its Rust port, with its default options (garbage collection
+  on), saved as a v2 update as the paper's files are.
+- Automerge is measured at 0.12, loading with its default checks. Each trace's Automerge
+  changes are made once with 0.6.1, the last version without quadratic blowup when a replica
+  applies a few changes at a time, which making the concurrent traces requires.
+- Yjs and Automerge are measured on the paper's own files for each trace, which those
+  libraries made themselves. Loro, which the paper has no files for, is measured on a replay
+  of each trace with one replica per writer, each sent what its writer had seen. The harness
+  makes the same replays into Yjs and Automerge, and prints them beside the paper's files.
+- Peak memory counts the bytes being merged.
+- Times are the p50 of 100 runs.
 
 ## Improvements
 
@@ -87,7 +105,7 @@ concurrent traces and too little to measure on the others.
 
 ## Reproducing the results
 
-Copy the paper's traces (`datasets/*.json` from
+Copy the paper's traces (`datasets/*.json` and `datasets/*.dt` from
 [josephg/egwalker-paper](https://github.com/josephg/egwalker-paper), and its `.yjs` and
 `.am` files to check the replays against) into `traces/paper/`, then:
 

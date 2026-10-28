@@ -120,7 +120,8 @@ def main(results_path, out_dir):
             results,
             "merge_ms",
             "Merge time",
-            "Appending a history's ops and merging them, until the document is produced. Each library is handed the ops through its own API surface.",
+            "From the bytes of each library's own encoding of a whole history until the merged text is read, with all decoding counted. "
+            "eg-strider and diamond-types replay their event graph from nothing; Yjs, Loro (from its updates) and Automerge integrate their CRDT ops.",
             milliseconds,
             runs,
             TIMES,
@@ -129,18 +130,29 @@ def main(results_path, out_dir):
             results,
             "open_ms",
             "Reopen time",
-            "From the bytes of a saved document (using each library's native format) until it is ready for more edits, with all parsing counted. "
+            "From the bytes of a saved document (each library's native format) until its text is read, with all parsing counted. "
             "eg-strider and Loro leave the history unread until an edit needs it. diamond-types has no saved document that skips the merge, so it is "
-            "given what the paper uses: its history file beside a copy of the text.",
+            "given what the paper uses: its history file beside a copy of the text. A Yjs or Automerge document is its CRDT, so this is its merge again.",
             milliseconds,
             runs,
             TIMES,
         ),
-        "memory-peak": chart(results, "merge_peak", "Peak memory", "The most heap allocated while merging, the ops being merged included.", memory, scale, sizes),
+        "memory-peak": chart(
+            results, "merge_peak", "Peak memory", "The most heap in use while merging, the encoded history being merged included.", memory, scale, sizes
+        ),
         "memory-at-rest": chart(
             results, "merge_kept", "Ready memory at rest", "What a document holds once a merge from nothing is done, ready for more edits.", memory, scale, sizes
         ),
-        "file-size": chart(results, "saved", "Snapshot size", "The size of a saved checkpoint of a document.", memory, scale, sizes),
+        "file-size": chart(results, "saved", "Snapshot size", "The size of a saved document, in each library's native format.", memory, scale, sizes),
+        "file-size-zstd": chart(
+            results,
+            "saved_zstd",
+            "Compressed snapshot size",
+            "The size of a saved document compressed by Zstandard at level 3, which eg-strider already applies to its own.",
+            memory,
+            scale,
+            sizes,
+        ),
     }
     for name, drawn in charts.items():
         open(f"{out_dir}/{name}.svg", "w").write(drawn)

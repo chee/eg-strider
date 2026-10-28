@@ -57,74 +57,80 @@ pub(crate) fn memory_of<T>(f: impl FnOnce() -> T) -> (T, Memory) {
     (result, Memory { peak: MOST.load(Relaxed) - before, kept: IN_USE.load(Relaxed).saturating_sub(before) })
 }
 
-/// How long each trace's merges run before any is timed.
+/// How long each trace's tasks run before any is timed.
 const WARM_UP: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A library's document, whatever form it takes.
+pub(crate) trait Document {
+    /// The document's text, read out as a string.
+    fn text(&mut self) -> String;
+}
 
 /// A library's time and memory on the two tasks.
 #[derive(Clone, Copy)]
 pub(crate) struct Measured {
     pub(crate) merge_ms: f64,
-    /// Memory the history's ops take, in the form the library gets them.
-    pub(crate) ops: usize,
-    /// While merging: peak memory, ops included, and what the merged document holds.
+    /// Size of the encoded history that merging starts from.
+    pub(crate) history: usize,
+    /// While merging: peak memory, the encoded history included, and what the merged document
+    /// holds.
     pub(crate) merging: Memory,
     pub(crate) open_ms: f64,
-    /// While reopening: peak memory, and what the reopened document holds.
+    /// While reopening: peak memory, the saved document's bytes included, and what the reopened
+    /// document holds.
     pub(crate) opening: Memory,
     /// Size of the saved document.
     pub(crate) saved: usize,
+    /// Size of the saved document compressed by Zstandard at level 3, as eg-strider's own parts
+    /// are.
+    pub(crate) compressed: usize,
     /// Whether both tasks ended with diamond-types' text.
     pub(crate) same: bool,
 }
 
-/// One run of merging: the milliseconds taken, then for eg-strider and diamond-types those spent
-/// appending, then for eg-strider those one more edit at the end takes. And whether the text was
-/// diamond-types'.
-pub(crate) type MergeRun = ([f64; 3], bool);
-
 /// A library's two tasks on one trace, each run once per call, so that every trace takes its
-/// turn.
+/// turn. Each returns the milliseconds it took.
 pub(crate) struct Turns<'a> {
-    pub(crate) merge: Box<dyn FnMut() -> MergeRun + 'a>,
+    pub(crate) merge: Box<dyn FnMut() -> f64 + 'a>,
     pub(crate) open: Box<dyn FnMut() -> f64 + 'a>,
 }
 
-/// Checks a library on the two tasks and measures their memory, then sets them up to be timed
-/// in turns with its tasks on the other traces. `ops` puts a history's ops in memory, untimed but
-/// counted. A document's text is read only to check it, outside the times and memory.
-pub(crate) fn prepare<'a, O: 'a, D: 'a>(
+/// Reads a document's text, as each task ends by doing, and keeps the document.
+fn read<D: Document>(mut document: D) -> D {
+    std::hint::black_box(document.text());
+    document
+}
+
+/// Times `task` on its own copy of `bytes`, made untimed, until the document's text is read.
+fn timed<D: Document>(bytes: &[u8], task: &impl Fn(Vec<u8>) -> D) -> f64 {
+    let input = bytes.to_vec();
+    let t = Instant::now();
+    let mut document = task(input);
+    let text = document.text();
+    let ms = since(t);
+    std::hint::black_box(&text);
+    drop((text, document));
+    ms
+}
+
+/// Checks a library on the two tasks and measures their memory, then sets them up to be timed in
+/// turns with its tasks on the other traces. `merge` builds a document from the library's encoding
+/// of the whole history, and `open` reopens its saved document. Every library is handed bytes and
+/// every task ends once the text is read, so that decoding, merging and reading are counted alike.
+pub(crate) fn prepare<'a, M: Document + 'a, O: Document + 'a>(
     expected: &str,
-    ops: impl Fn() -> O + 'a,
-    merge: impl Fn(O) -> D + 'a,
-    text: impl Fn(&D) -> String,
-    save: impl Fn(&mut D) -> Vec<u8>,
-    open: impl Fn(&[u8]) -> D + 'a,
+    history: Vec<u8>,
+    merge: impl Fn(Vec<u8>) -> M + 'a,
+    saved: Vec<u8>,
+    open: impl Fn(Vec<u8>) -> O + 'a,
 ) -> (Measured, Turns<'a>) {
-    let mut document = merge(ops());
-    let saved = save(&mut document);
-    let same = text(&document) == expected && text(&open(&saved)) == expected;
-    drop(document);
-    let held_by_ops = memory_of(&ops).1.kept;
-    let merging = memory_of(|| merge(ops())).1;
-    let opening = memory_of(|| open(&saved)).1;
-    let measured = Measured { merge_ms: f64::NAN, ops: held_by_ops, merging, open_ms: f64::NAN, opening, saved: saved.len(), same };
-    let turns = Turns {
-        merge: Box::new(move || {
-            let input = ops();
-            let t = Instant::now();
-            let document = merge(input);
-            let ms = since(t);
-            drop(document);
-            ([ms, f64::NAN, f64::NAN], true)
-        }),
-        open: Box::new(move || {
-            let t = Instant::now();
-            let document = open(&saved);
-            let ms = since(t);
-            drop(document);
-            ms
-        }),
-    };
+    let same = merge(history.clone()).text() == expected && open(saved.clone()).text() == expected;
+    // The copy of the bytes each task takes is made inside, so that peak memory counts the input.
+    let merging = memory_of(|| read(merge(history.clone()))).1;
+    let opening = memory_of(|| read(open(saved.clone()))).1;
+    let compressed = zstd::bulk::compress(&saved, 3).unwrap().len();
+    let measured = Measured { merge_ms: f64::NAN, history: history.len(), merging, open_ms: f64::NAN, opening, saved: saved.len(), compressed, same };
+    let turns = Turns { merge: Box::new(move || timed(&history, &merge)), open: Box::new(move || timed(&saved, &open)) };
     (measured, turns)
 }
 
