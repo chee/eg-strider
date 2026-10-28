@@ -16,6 +16,7 @@ SYSTEMS = [
     ("Yjs (yrs)", "yjs", "#e69f00"),
     ("Loro", "loro", "#009e73"),
     ("Automerge", "automerge", "#cc79a7"),
+    ("Automerge next", "automerge_next", "#882255"),
 ]
 ORDER = ["S1", "S2", "S3", "C1", "C2", "A1", "A2"]
 LEFT, RIGHT, ROW, GAP = 120, 640, 12, 14

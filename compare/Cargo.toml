@@ -22,6 +22,8 @@ automerge = "0.12.0"
 # applying a few changes walks every op in the document, so making the concurrent traces,
 # each writer taking in the others' changes as it goes, does not finish.
 automerge_replay = { package = "automerge", version = "0.6.1" }
+# Automerge's hashless branch, which reworks how changes are stored and loaded.
+automerge_hashless = { package = "automerge", git = "https://github.com/automerge/automerge", rev = "7046d39dd5d9064c91ea7eae1016199de94dcaf2" }
 yrs = "0.28.0"
 # Reads the paper's editing traces, which are JSON.
 serde_json = "1"

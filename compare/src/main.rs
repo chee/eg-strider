@@ -151,6 +151,26 @@ fn automerge_open(saved: &[u8]) -> automerge::AutoCommit {
     automerge::AutoCommit::load(saved).unwrap()
 }
 
+/// Converts a saved Automerge document into a bundle of the hashless branch, the format its `next`
+/// documents save in and load fastest from.
+fn automerge_bundle(saved: &[u8]) -> Vec<u8> {
+    automerge_hashless::next::Automerge::load(saved).unwrap().save()
+}
+
+/// Opens a bundle as a `next` document of the hashless branch, which keeps only the change hashes
+/// it needs.
+fn automerge_next_open(saved: &[u8]) -> automerge_hashless::next::Automerge {
+    automerge_hashless::next::Automerge::load(saved).unwrap()
+}
+
+impl Document for automerge_hashless::next::Automerge {
+    fn text(&mut self) -> String {
+        use automerge_hashless::next::ReadDoc;
+        let (_, text) = self.get(automerge_hashless::ROOT, TEXT).unwrap().unwrap();
+        ReadDoc::text(self, &text).unwrap()
+    }
+}
+
 impl Document for automerge::AutoCommit {
     fn text(&mut self) -> String {
         use automerge::ReadDoc;
@@ -227,17 +247,18 @@ fn mb(bytes: usize) -> String {
 
 /// The libraries, in the order they are timed and their figures listed: each one's key in the
 /// results, and its name.
-const LIBRARIES: [(&str, &str); 5] = [("strider", "eg-strider"), ("dt", "diamond-types"), ("yjs", "yrs"), ("loro", "Loro"), ("automerge", "Automerge")];
+const LIBRARIES: [(&str, &str); 6] =
+    [("strider", "eg-strider"), ("dt", "diamond-types"), ("yjs", "yrs"), ("loro", "Loro"), ("automerge", "Automerge"), ("automerge_next", "Automerge next")];
 
 /// Writes one figure per library as a JSON object, with `null` where there is none.
-fn object<T: Display>(of: [Option<T>; 5]) -> String {
+fn object<T: Display>(of: [Option<T>; LIBRARIES.len()]) -> String {
     let fields: Vec<String> =
         LIBRARIES.iter().zip(of).map(|((key, _), value)| format!("\"{key}\":{}", value.map_or("null".to_string(), |v| v.to_string()))).collect();
     format!("{{{}}}", fields.join(","))
 }
 
 /// Lays one figure per library out in columns, with a dash where there is none.
-fn columns(of: [Option<String>; 5]) -> String {
+fn columns(of: [Option<String>; LIBRARIES.len()]) -> String {
     of.map(|value| format!("{:>13}", value.unwrap_or("-".to_string()))).join(" ")
 }
 
@@ -303,8 +324,9 @@ fn crdt_documents(loaded: &Loaded) -> [Option<Vec<u8>>; 2] {
 /// Checks and weighs every library on a trace, and sets their tasks up to be timed. Each merges
 /// from its own encoding of the whole history and reopens its own saved document. Yjs and
 /// Automerge are CRDTs, whose saved document is their history, so both tasks start from the same
-/// bytes for them.
-fn libraries(loaded: &Loaded) -> [Option<(Measured, Turns<'_>)>; 5] {
+/// bytes for them. Automerge's hashless branch is handed the Automerge document as a bundle, the
+/// format its `next` documents save in.
+fn libraries(loaded: &Loaded) -> [Option<(Measured, Turns<'_>)>; LIBRARIES.len()] {
     let expected = loaded.expected.as_str();
     let loro = &loaded.sent[1];
     let [yjs, automerge] = crdt_documents(loaded);
@@ -318,13 +340,17 @@ fn libraries(loaded: &Loaded) -> [Option<(Measured, Turns<'_>)>; 5] {
             let (history, saved) = (document.export(ExportMode::all_updates()).unwrap(), document.export(ExportMode::snapshot()).unwrap());
             prepare(expected, history, |bytes| loro_import(&bytes), saved, |bytes| loro_import(&bytes))
         }),
-        automerge.map(|saved| prepare(expected, saved.clone(), |bytes| automerge_open(&bytes), saved, |bytes| automerge_open(&bytes))),
+        automerge.as_ref().map(|saved| prepare(expected, saved.clone(), |bytes| automerge_open(&bytes), saved.clone(), |bytes| automerge_open(&bytes))),
+        automerge.map(|saved| {
+            let bundle = automerge_bundle(&saved);
+            prepare(expected, bundle.clone(), |bytes| automerge_next_open(&bytes), bundle, |bytes| automerge_next_open(&bytes))
+        }),
     ]
 }
 
-/// Measures eg-strider beside diamond-types, yrs, Loro and Automerge on the paper's editing traces,
-/// merging a history from each library's own encoding of it and reopening a saved document, and
-/// checks each result against diamond-types' text.
+/// Measures eg-strider beside diamond-types, yrs, Loro, Automerge and Automerge's hashless branch on
+/// the paper's editing traces, merging a history from each library's own encoding of it and
+/// reopening a saved document, and checks each result against diamond-types' text.
 ///
 /// The paper's own Yjs and Automerge files for a trace, when beside it, are opened to check the
 /// replays' saved documents against.
@@ -381,7 +407,7 @@ fn main() {
     for ((loaded, measured), merged) in loaded.iter().zip(&measured).zip(&merge_runs) {
         let Loaded { name, events, expected, trace_text, saved, sent, .. } = loaded;
         let (name, events, expected, trace_text) = (name.as_str(), *events, expected.as_str(), *trace_text);
-        let mut all: [Option<Measured>; 5] = measured.clone().try_into().ok().unwrap();
+        let mut all: [Option<Measured>; LIBRARIES.len()] = measured.clone().try_into().ok().unwrap();
         // A reopened document has read none of its history, which an edit made at an older
         // version then needs some of. One edit is added and merged: at the end, and at the
         // version so many events back.

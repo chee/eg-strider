@@ -45,6 +45,11 @@ They contain 3 classes of traces:
 - Automerge is measured at 0.12, loading with its default checks. Each trace's Automerge
   changes are made once with 0.6.1, the last version without quadratic blowup when a replica
   applies a few changes at a time, which making the concurrent traces requires.
+- Automerge next is Automerge's unreleased
+  [hashless branch](https://github.com/automerge/automerge/tree/hashless) (at `7046d39`),
+  through its `next` documents, which keep only the change hashes they need. It is handed
+  the same documents as Automerge, converted once to the bundles it saves in, since loading
+  older documents takes it through the path that rebuilds every change.
 - Yjs and Automerge are measured on the paper's own files for each trace, which those
   libraries made themselves. Loro, which the paper has no files for, is measured on a replay
   of each trace with one replica per writer, each sent what its writer had seen. The harness
